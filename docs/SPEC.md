@@ -44,17 +44,39 @@ The provider (Bob) charges 0.3% (`providerFeeBps = 30`), added to the customer's
 
 ## Contracts (owner A)
 
-### DirectPay (Whitechain)
+### DirectPay (Whitechain) — built
 
 ```solidity
+function paymentIdFor(bytes32 orderId, address merchant, uint256 amount, address payer) view returns (bytes32);
+// = keccak256(abi.encode(PAY_TAG, chainid, this, orderId, merchant, amount, payer)); also the EIP-3009 nonce
 function pay(bytes32 orderId, address merchant, uint256 amount, address payer,
-             uint256 validAfter, uint256 validBefore, uint8 v, bytes32 r, bytes32 s) external;
-// USDT.receiveWithAuthorization(payer -> this), nonce = keccak256(abi.encode(orderId, merchant, amount))
-function refund(bytes32 orderId, address customer, uint256 amount, address merchant,
-                uint256 validAfter, uint256 validBefore, uint8 v, bytes32 r, bytes32 s) external;
-event Paid(bytes32 indexed orderId, address payer, address merchant, uint256 amount);
-event Refunded(bytes32 indexed orderId, address customer, uint256 amount);
+             uint256 validAfter, uint256 validBefore, uint8 v, bytes32 r, bytes32 s) returns (bytes32 paymentId);
+function refundNonceFor(bytes32 paymentId, uint256 amount, uint256 refundedBefore) view returns (bytes32);
+function refund(bytes32 paymentId, uint256 amount, uint256 validAfter, uint256 validBefore,
+                uint8 v, bytes32 r, bytes32 s);   // signed by the merchant, paid to the original payer
+event Paid(bytes32 indexed paymentId, bytes32 indexed orderId, address indexed merchant, address payer, uint256 amount);
+event Refunded(bytes32 indexed paymentId, bytes32 indexed orderId, address indexed payer, uint256 amount, uint256 totalRefunded);
+// MAX_AUTH_WINDOW = 1 hour: validBefore must be <= now + 1 hour
 ```
+
+What the customer (or shop, for refunds) signs with `eth_signTypedData_v4`:
+
+```
+domain  = { name: "Tether USD", version: "1", chainId: 1874,
+            verifyingContract: 0xcedfB56113143d55b2358b8CFbB0dEB5Ad2f55a7 }
+types   = ReceiveWithAuthorization(address from,address to,uint256 value,uint256 validAfter,uint256 validBefore,bytes32 nonce)
+message = { from: customer, to: DirectPay, value: amount, validAfter: now - 60,
+            validBefore: now + 600, nonce: paymentIdFor(orderId, merchant, amount, customer) }
+```
+
+Rules for the Order Desk and Gas Payer (from the security review):
+- Treat an order as paid only from a `Paid` log emitted by the DirectPay address, after the block is final, and read `payments(paymentId)` as the source of truth.
+- Check that `payer`, `merchant` and `amount` match the quote. A second or late `Paid` for one orderId means a refund is owed.
+- Keep `validBefore` short (10 minutes); the contract rejects more than 1 hour.
+- Before sending, simulate with `eth_call` and check `authorizationState(payer, nonce)` and the payer's balance, so cancelled or front-run authorizations don't waste gas.
+- Check Tether's `isBlocked` for the merchant and payer.
+- Refund signatures depend on the amount refunded so far, so sign one partial refund at a time.
+- Known limitation: only 65-byte EOA signatures (no ERC-1271 smart wallets).
 
 ### CustomerLock (Base Sepolia, Ethereum Sepolia)
 
