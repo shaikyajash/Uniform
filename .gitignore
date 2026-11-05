@@ -1,0 +1,12 @@
+node_modules/
+.env
+.env.*
+!.env.example
+dist/
+.next/
+out/
+cache/
+broadcast/*/31337/
+*.sqlite
+*.db
+.DS_Store
