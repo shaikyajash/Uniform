@@ -13,7 +13,7 @@
     "permit2": "0x000000000022D473030F116dDEE9F6B43aC78BA3",
     "contracts": {
       "aqua": "0x02dF2659B5B4956EAFEe3293584C2aaefC114871",
-      "directPay": "",
+      "directPay": "0x9DF1C7C32Ce3f1322e1c7bAEc30664b1c472DaE9",
       "payoutPool": "",
       "shopLock": ""
     },
