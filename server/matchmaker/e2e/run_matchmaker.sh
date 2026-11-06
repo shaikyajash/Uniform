@@ -10,6 +10,7 @@ export STRATEGY_SALT=0x000000000000000000000000000000000000000000000000000000000
 export STRATEGY_MAX_PER_ORDER=2000000
 export RPC_84532=http://127.0.0.1:8601
 export RPC_1874=http://127.0.0.1:8602
+export RPC_11155111=http://127.0.0.1:8604
 export DB_PATH=$PWD/.state/matchmaker.db
 export POLL_SECONDS=2
 exec ../../target/debug/matchmaker
