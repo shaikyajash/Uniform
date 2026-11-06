@@ -34,7 +34,7 @@ rm -f .state/events.log .state/matchmaker.db .state/anvil-*.log; echo '{}' > .st
 sleep 1
 
 nohup anvil --port 8601 --fork-url https://sepolia.base.org --block-time 1 >.state/anvil-base.log 2>&1 &
-nohup anvil --port 8602 --fork-url https://rpc.testnet.whitechain.io --block-time 1 >.state/anvil-wc.log 2>&1 &
+nohup anvil --port 8602 --fork-url https://rpc.ankr.com/whitechain_testnet --block-time 1 >.state/anvil-wc.log 2>&1 &
 nohup anvil --port 8604 --fork-url https://ethereum-sepolia-rpc.publicnode.com --block-time 2 >.state/anvil-eth.log 2>&1 &
 nohup python3 mock_order_desk.py 8603 >.state/mock.log 2>&1 &
 for url in $BASE $WC $ETH; do
