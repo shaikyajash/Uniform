@@ -7,8 +7,11 @@
 use std::{future::Future, time::Duration};
 
 use alloy::{
-    eips::eip2718::Encodable2718,
-    network::{EthereumWallet, NetworkTransactionBuilder, TransactionBuilder},
+    eips::{
+        eip2718::Encodable2718,
+        eip7702::{Authorization, SignedAuthorization},
+    },
+    network::{EthereumWallet, NetworkTransactionBuilder, TransactionBuilder, TransactionBuilder7702},
     primitives::{Address, B256, Bytes, Signature, U256},
     providers::{DynProvider, Provider, ProviderBuilder},
     rpc::types::{Filter, TransactionRequest},
@@ -19,6 +22,7 @@ use alloy::{
 };
 use common::{
     amount::Amount,
+    calibur::{self, Batch},
     chains::Chain as ChainConfig,
     jobs::{Job, transfer_refund_nonce},
     locks::{SourceLockParams, hashlock_of, source_lock_id},
@@ -159,7 +163,8 @@ pub struct PayCall {
     pub s: B256,
 }
 
-/// `SourceLock.lockWithAuthorization`'s arguments, with the signature split into v, r, s.
+/// `SourceLock.lockWithAuthorization`'s arguments, with the signature split into v, r, s. With
+/// `batch`, the same lock of any ERC-20 through the customer's Calibur account instead.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LockCall {
     pub params: SourceLockParams,
@@ -172,6 +177,9 @@ pub struct LockCall {
     pub v: u8,
     pub r: B256,
     pub s: B256,
+    /// `customer.execute(batch, signature)` (approve, then `SourceLock.lock`), sent by us.
+    /// Boxed: it would make every `Call` as large as a batch.
+    pub batch: Option<Box<Batch>>,
 }
 
 /// `DirectPay.refund`'s arguments, from the note the shop signed, with what the note was made against.
@@ -248,7 +256,7 @@ impl Call {
                     s,
                 })
             }
-            Job::SourceLock { params, payer, token, amount, valid_after, valid_before, lock_id, signature, batch: _ } => {
+            Job::SourceLock { params, payer, token, amount, valid_after, valid_before, lock_id, signature, batch } => {
                 let (v, r, s) = split_signature(signature)?;
                 Call::SourceLock(LockCall {
                     params: *params,
@@ -261,6 +269,7 @@ impl Call {
                     v,
                     r,
                     s,
+                    batch: batch.map(Box::new),
                 })
             }
             Job::DestinationClaim { lock_id, secret, merchant, min_amount, deadline } => {
@@ -355,7 +364,7 @@ impl Call {
     pub fn deadline(&self) -> Option<u64> {
         match self {
             Call::DirectPay(call) => Some(call.valid_before),
-            Call::SourceLock(call) => Some(call.valid_before),
+            Call::SourceLock(call) => Some(call.batch.as_ref().map_or(call.valid_before, |batch| batch.deadline)),
             Call::DestinationClaim(call) => Some(call.deadline),
             Call::SourceRefund { .. } => None,
             Call::DirectRefund(call) => Some(call.valid_before),
@@ -372,13 +381,22 @@ impl Call {
     }
 
     /// The amount checked against the Relayer's order limit, in 6-decimal units. A lock carries
-    /// Bob's fee on top of the order, so it is allowed 1% more.
+    /// Bob's fee on top of the order, so it is allowed 1% more. A batch lock's token is not a
+    /// 6-decimal dollar, so its USD value (`minUsdcOut`) is checked instead.
     pub fn amount_for_limit(&self) -> Option<U256> {
         match self {
             Call::DirectPay(call) => Some(call.amount.0),
-            Call::SourceLock(call) => Some(call.amount.0 * U256::from(100u64) / U256::from(101u64)),
+            Call::SourceLock(call) => {
+                let usd = if call.batch.is_some() { call.params.min_usdc_out.0 } else { call.amount.0 };
+                Some(usd * U256::from(100u64) / U256::from(101u64))
+            }
             Call::DestinationClaim(_) | Call::SourceRefund { .. } | Call::DirectRefund(_) | Call::TransferRefund(_) => None,
         }
+    }
+
+    /// A lock sent through the customer's Calibur account (a token without EIP-3009).
+    pub fn is_batch_lock(&self) -> bool {
+        matches!(self, Call::SourceLock(call) if call.batch.is_some())
     }
 
     /// Whether a failure that leaves nothing on chain hands the order back to `quoted`, so the
@@ -465,12 +483,54 @@ impl LockCall {
             swapData: Bytes::new(),
         }
     }
+
+    /// The 65-byte signature (r, s, v) again, for Calibur.
+    fn signature(&self) -> Bytes {
+        [self.r.as_slice(), self.s.as_slice(), &[self.v]].concat().into()
+    }
+
+    /// The Calibur batch, rebuilt from the job's own lock: approve exactly `amount` to SourceLock,
+    /// then lock it.
+    fn signed_batch(&self, batch: &Batch, source_lock: Address) -> calibur::SignedBatchedCall {
+        calibur::signed_batch(calibur::lock_calls(source_lock, &self.params, self.token, self.amount), batch.nonce, batch.deadline)
+    }
+}
+
+impl Call {
+    /// The EIP-7702 authorization to send with this call: only a batch lock's first one, which
+    /// delegates the customer's wallet to Calibur.
+    fn authorization_list(&self) -> Option<Vec<SignedAuthorization>> {
+        match self {
+            Call::SourceLock(call) => call.batch.as_ref()?.authorization.map(|auth| vec![signed_authorization(&auth)]),
+            _ => None,
+        }
+    }
+}
+
+fn signed_authorization(auth: &calibur::Authorization) -> SignedAuthorization {
+    let inner = Authorization { chain_id: U256::from(auth.chain_id), address: auth.address, nonce: auth.nonce };
+    SignedAuthorization::new_unchecked(inner, auth.y_parity, auth.r, auth.s)
 }
 
 /// 65 bytes into the `v` (27 or 28), `r`, `s` that `receiveWithAuthorization` takes.
 pub fn split_signature(signature: &Bytes) -> Result<(u8, B256, B256), String> {
     let parsed = Signature::from_raw(signature).map_err(|error| format!("bad signature: {error}"))?;
     Ok((27 + u8::from(parsed.v()), parsed.r().into(), parsed.s().into()))
+}
+
+/// A batch lock's wallet code must be empty (then the authorization delegates it to Calibur) or
+/// Calibur's EIP-7702 designator (then any authorization keeps it there: checked in `check_batch`).
+fn check_delegation(code: &Bytes, batch: &Batch, calibur: Address) -> Result<(), ChainError> {
+    if code.is_empty() {
+        if batch.authorization.is_none() {
+            return refuse("the wallet is not delegated to Calibur and sent no authorization");
+        }
+        return Ok(());
+    }
+    if *code != calibur::delegation_code(calibur) {
+        return refuse("the wallet has code other than a delegation to Calibur");
+    }
+    Ok(())
 }
 
 pub trait Chain {
@@ -503,6 +563,10 @@ struct Contracts {
     usdt: Option<Address>,
     /// The tokens a SourceLock here may hold for us (USDC, EURC).
     lockable: Vec<Address>,
+    /// Uniswap's Calibur: the only delegate a customer's wallet may have for a batch lock.
+    calibur: Option<Address>,
+    /// The tokens with a market price (`priceId`), locked through a Calibur batch (WETH, WBTC).
+    priced: Vec<Address>,
 }
 
 /// A real chain over JSON-RPC, signing with the Relayer's key.
@@ -539,6 +603,8 @@ impl Rpc {
             destination_lock: config.contracts.destination_lock,
             usdt: token("USDT"),
             lockable: ["USDC", "EURC"].into_iter().filter_map(token).collect(),
+            calibur: config.contracts.calibur,
+            priced: config.tokens.values().filter(|token| token.price_id.is_some()).map(|token| token.address).collect(),
         };
         let sender = signer.address();
         let url = rpc_url.parse().map_err(|_| format!("chain {}: the RPC address is not a valid URL", config.chain_id))?;
@@ -584,7 +650,14 @@ impl Rpc {
     fn target(&self, call: &Call) -> Result<(Address, Vec<u8>), ChainError> {
         Ok(match call {
             Call::DirectPay(call) => (self.need(self.contracts.direct_pay, "DirectPay")?, call.abi().abi_encode()),
-            Call::SourceLock(call) => (self.need(self.contracts.source_lock, "SourceLock")?, call.abi().abi_encode()),
+            Call::SourceLock(call) => match &call.batch {
+                // To the customer's own address, which runs Calibur's code.
+                Some(batch) => {
+                    let batch = call.signed_batch(batch, self.need(self.contracts.source_lock, "SourceLock")?);
+                    (call.payer, calibur::execute_calldata(batch, &call.signature()).to_vec())
+                }
+                None => (self.need(self.contracts.source_lock, "SourceLock")?, call.abi().abi_encode()),
+            },
             Call::DestinationClaim(call) => (
                 self.need(self.contracts.destination_lock, "DestinationLock")?,
                 IDestinationLock::claimCall { lockId: call.lock_id, secret: call.secret }.abi_encode(),
@@ -598,10 +671,20 @@ impl Rpc {
         })
     }
 
-    /// `eth_call` of the exact transaction: free, and says whether sending would succeed.
-    async fn dry_run(&self, call: &Call) -> Result<(), ChainError> {
+    /// The transaction, without nonce, fees or gas: where it goes, its calldata and any EIP-7702
+    /// authorization (which makes it a type 0x04 transaction).
+    fn request(&self, call: &Call) -> Result<TransactionRequest, ChainError> {
         let (to, input) = self.target(call)?;
         let request = TransactionRequest::default().with_from(self.sender).with_to(to).with_input(input);
+        Ok(match call.authorization_list() {
+            Some(list) => request.with_authorization_list(list),
+            None => request,
+        })
+    }
+
+    /// `eth_call` of the exact transaction: free, and says whether sending would succeed.
+    async fn dry_run(&self, call: &Call) -> Result<(), ChainError> {
+        let request = self.request(call)?;
         self.rpc(self.provider.call(request).into_future()).await.map(|_| ())
     }
 
@@ -655,6 +738,66 @@ impl Rpc {
         }
         if self.balance(call.token, call.payer).await? < call.amount.0 {
             return refuse("the payer does not have enough USDC");
+        }
+        Ok(())
+    }
+
+    /// A batch lock: the checks that need no chain (`check_batch`), then the token balance, the
+    /// wallet's code, and that any authorization is for the wallet's next nonce. A wallet that is
+    /// not delegated would take the transaction as a plain call and do nothing, so these matter.
+    async fn check_batch_lock(&self, call: &LockCall, batch: &Batch, now: u64) -> Result<(), ChainError> {
+        self.check_batch(call, batch, now)?;
+        if self.balance(call.token, call.payer).await? < call.amount.0 {
+            return refuse("the payer does not have enough of the token");
+        }
+        let code = self.rpc(self.provider.get_code_at(call.payer).into_future()).await?;
+        check_delegation(&code, batch, self.need(self.contracts.calibur, "Calibur")?)?;
+        if let Some(auth) = batch.authorization {
+            let nonce = self.rpc(self.provider.get_transaction_count(call.payer).into_future()).await?;
+            if auth.nonce != nonce {
+                return refuse("the wallet's authorization is for another nonce; it must sign it again");
+            }
+        }
+        Ok(())
+    }
+
+    /// What a batch lock must be, from the job alone: our SourceLock and a priced token, the lock
+    /// id of its own parameters, time for Bob, a live deadline, the batch signed by the payer, and
+    /// any authorization signed by the payer, naming Calibur on this chain.
+    fn check_batch(&self, call: &LockCall, batch: &Batch, now: u64) -> Result<(), ChainError> {
+        let source_lock = self.need(self.contracts.source_lock, "SourceLock")?;
+        let calibur = self.need(self.contracts.calibur, "Calibur")?;
+        if !self.contracts.priced.contains(&call.token) {
+            return refuse("the token cannot be locked through Calibur on this chain");
+        }
+        let expected = source_lock_id(self.chain_id, source_lock, &call.params, call.payer, call.token, call.amount);
+        if expected != call.lock_id {
+            return refuse("the lock id does not match its parameters");
+        }
+        if call.params.expiry < now + MIN_LOCK_TIME_LEFT {
+            return refuse("too little time left on the lock for Bob to fill it");
+        }
+        if batch.deadline <= now {
+            return refuse("the batch's deadline has passed");
+        }
+        if batch.nonce != calibur::nonce_for(call.lock_id) {
+            return refuse("the batch's nonce is not the one for this lock");
+        }
+        let hash = calibur::signing_hash(&call.signed_batch(batch, source_lock), self.chain_id, call.payer, calibur);
+        let signer = Signature::from_raw(&call.signature()).ok().and_then(|signature| signature.recover_address_from_prehash(&hash).ok());
+        if signer != Some(call.payer) {
+            return refuse("the batch is not signed by the payer");
+        }
+        if let Some(auth) = &batch.authorization {
+            if auth.address != calibur {
+                return refuse("the authorization delegates to a contract other than Calibur");
+            }
+            if auth.chain_id != 0 && auth.chain_id != self.chain_id {
+                return refuse("the authorization is for another chain");
+            }
+            if signed_authorization(auth).recover_authority().ok() != Some(call.payer) {
+                return refuse("the authorization is not signed by the payer");
+            }
         }
         Ok(())
     }
@@ -763,6 +906,8 @@ impl Chain for Rpc {
     async fn done(&self, call: &Call) -> Result<bool, ChainError> {
         match call {
             Call::DirectPay(call) => self.note_used(self.need(self.contracts.usdt, "USDT")?, call.payer, call.nonce).await,
+            // A batch has no EIP-3009 note: the lock existing at all says it was done.
+            Call::SourceLock(call) if call.batch.is_some() => Ok(self.source_lock_state(call.lock_id).await?.state != 0),
             Call::SourceLock(call) => self.note_used(call.token, call.payer, call.lock_id).await,
             Call::DestinationClaim(call) => Ok(self.destination_lock_state(call.lock_id).await?.state == LOCK_CLAIMED),
             Call::SourceRefund { lock_id } => Ok(self.source_lock_state(*lock_id).await?.state == LOCK_REFUNDED),
@@ -778,7 +923,10 @@ impl Chain for Rpc {
     async fn check(&self, call: &Call, now: u64) -> Result<(), ChainError> {
         match call {
             Call::DirectPay(call) => self.check_pay(call).await?,
-            Call::SourceLock(call) => self.check_lock(call, now).await?,
+            Call::SourceLock(call) => match &call.batch {
+                Some(batch) => self.check_batch_lock(call, batch, now).await?,
+                None => self.check_lock(call, now).await?,
+            },
             Call::DestinationClaim(call) => self.check_claim(call, now).await?,
             Call::SourceRefund { lock_id } => self.check_refund(*lock_id).await?,
             Call::DirectRefund(call) => self.check_direct_refund(call).await?,
@@ -788,7 +936,7 @@ impl Chain for Rpc {
     }
 
     async fn sign(&self, call: &Call, nonce: Option<u64>, fee_bumps: u32) -> Result<SignedTx, ChainError> {
-        let (to, input) = self.target(call)?;
+        let request = self.request(call)?;
         let nonce = match nonce {
             Some(nonce) => nonce,
             None => self.rpc(self.provider.get_transaction_count(self.sender).pending().into_future()).await?,
@@ -800,10 +948,7 @@ impl Chain for Rpc {
             max_fee = max_fee * 5 / 4 + 1;
             tip = tip * 5 / 4 + 1;
         }
-        let mut request = TransactionRequest::default()
-            .with_from(self.sender)
-            .with_to(to)
-            .with_input(input)
+        let mut request = request
             .with_chain_id(self.chain_id)
             .with_nonce(nonce)
             .with_max_fee_per_gas(max_fee)
@@ -892,7 +1037,7 @@ fn rpc_error(error: RpcError<TransportErrorKind>) -> ChainError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use alloy::signers::SignerSync;
+    use alloy::{signers::SignerSync, sol_types::SolValue};
 
     #[test]
     fn signatures_split_into_v_27_or_28() {
@@ -927,5 +1072,167 @@ mod tests {
             assert!(already_handled(text), "{text}");
         }
         assert!(!already_handled("insufficient funds for gas * price + value"));
+    }
+
+    // ---- Batch locks (any ERC-20 through Calibur) ----
+
+    const SEPOLIA: u64 = 11_155_111;
+    const NOW: u64 = 1_800_000_000;
+
+    fn sepolia() -> Rpc {
+        let config = common::chains::Chains::from_json(include_str!("../../../shared/chains.json")).unwrap();
+        Rpc::connect(config.by_id(SEPOLIA).unwrap(), "http://127.0.0.1:1", PrivateKeySigner::random()).unwrap()
+    }
+
+    fn authorization(wallet: &PrivateKeySigner, chain_id: u64, delegate: Address) -> calibur::Authorization {
+        let inner = Authorization { chain_id: U256::from(chain_id), address: delegate, nonce: 0 };
+        let signature = wallet.sign_hash_sync(&inner.signature_hash()).unwrap();
+        calibur::Authorization {
+            chain_id,
+            address: delegate,
+            nonce: 0,
+            y_parity: u8::from(signature.v()),
+            r: signature.r(),
+            s: signature.s(),
+        }
+    }
+
+    /// A batch lock of 0.00001 WBTC, signed by `wallet`, with or without an authorization.
+    fn batch_lock(rpc: &Rpc, wallet: &PrivateKeySigner, token: Address, auth: Option<calibur::Authorization>) -> LockCall {
+        let source_lock = rpc.contracts.source_lock.unwrap();
+        let params = SourceLockParams {
+            order_id: B256::repeat_byte(1),
+            receiver: Address::repeat_byte(0xb0),
+            min_usdc_out: Amount::from(1_003_000u64),
+            hashlock: B256::repeat_byte(2),
+            expiry: NOW + 1_200,
+            out_token: Address::ZERO,
+        };
+        let amount = Amount::from(1_000u64);
+        let lock_id = source_lock_id(SEPOLIA, source_lock, &params, wallet.address(), token, amount);
+        let batch = Batch { nonce: calibur::nonce_for(lock_id), deadline: NOW + 600, authorization: auth };
+        let signed = calibur::signed_batch(calibur::lock_calls(source_lock, &params, token, amount), batch.nonce, batch.deadline);
+        let hash = calibur::signing_hash(&signed, SEPOLIA, wallet.address(), rpc.contracts.calibur.unwrap());
+        let signature = wallet.sign_hash_sync(&hash).unwrap();
+        let job = Job::SourceLock {
+            params,
+            payer: wallet.address(),
+            token,
+            amount,
+            valid_after: 0,
+            valid_before: 0,
+            lock_id,
+            signature: Bytes::from(signature.as_bytes().to_vec()),
+            batch: Some(batch),
+        };
+        match Call::from_job(&job).unwrap() {
+            Call::SourceLock(call) => call,
+            _ => unreachable!(),
+        }
+    }
+
+    fn wbtc(rpc: &Rpc) -> Address {
+        *rpc.contracts.priced.iter().find(|token| **token == alloy::primitives::address!("29f2D40B0605204364af54EC677bD022dA425d03")).unwrap()
+    }
+
+    fn refused(result: Result<(), ChainError>, reason: &str) {
+        match result {
+            Err(ChainError::Revert(text)) => assert!(text.contains(reason), "{text}"),
+            other => panic!("expected a refusal containing {reason:?}, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_batch_lock_goes_to_the_payer_as_calibur_execute() {
+        let rpc = sepolia();
+        let wallet = PrivateKeySigner::random();
+        let call = batch_lock(&rpc, &wallet, wbtc(&rpc), None);
+        let source_lock = rpc.contracts.source_lock.unwrap();
+        let (to, input) = rpc.target(&Call::SourceLock(call.clone())).unwrap();
+        assert_eq!(to, wallet.address());
+        let execute = calibur::ICalibur::executeCall::abi_decode(&input).unwrap();
+        let calls = &execute.signedBatchedCall.batchedCall.calls;
+        assert_eq!(calls.len(), 2);
+        assert!(execute.signedBatchedCall.batchedCall.revertOnFailure);
+        assert_eq!(execute.signedBatchedCall.nonce, calibur::nonce_for(call.lock_id));
+        assert_eq!(calls[0].to, call.token);
+        let approve = calibur::IErc20Approve::approveCall::abi_decode(&calls[0].data).unwrap();
+        assert_eq!((approve.spender, approve.amount), (source_lock, call.amount.0));
+        assert_eq!(calls[1].to, source_lock);
+        let lock = calibur::ISourceLockLock::lockCall::abi_decode(&calls[1].data).unwrap();
+        assert_eq!((lock.token, lock.amount, lock.p.orderId), (call.token, call.amount.0, call.params.order_id));
+        let (signature, hook) = <(Bytes, Bytes)>::abi_decode_params(&execute.wrappedSignature).unwrap();
+        assert_eq!((signature, hook), (call.signature(), Bytes::new()));
+        // The batch's own deadline applies, and the order limit sees its dollar value.
+        let call = Call::SourceLock(call);
+        assert_eq!(call.deadline(), Some(NOW + 600));
+        assert_eq!(call.amount_for_limit(), Some(U256::from(1_003_000u64 * 100 / 101)));
+    }
+
+    #[test]
+    fn the_authorization_is_sent_only_when_the_wallet_signed_one() {
+        let rpc = sepolia();
+        let wallet = PrivateKeySigner::random();
+        let calibur = rpc.contracts.calibur.unwrap();
+        let without = Call::SourceLock(batch_lock(&rpc, &wallet, wbtc(&rpc), None));
+        assert_eq!(rpc.request(&without).unwrap().authorization_list, None);
+        let auth = authorization(&wallet, SEPOLIA, calibur);
+        let with = Call::SourceLock(batch_lock(&rpc, &wallet, wbtc(&rpc), Some(auth)));
+        let list = rpc.request(&with).unwrap().authorization_list.unwrap();
+        assert_eq!(list.len(), 1);
+        assert_eq!(list[0].address, calibur);
+        assert_eq!(list[0].recover_authority().unwrap(), wallet.address());
+    }
+
+    #[test]
+    fn a_good_batch_lock_passes_the_checks() {
+        let rpc = sepolia();
+        let wallet = PrivateKeySigner::random();
+        let calibur = rpc.contracts.calibur.unwrap();
+        for auth in [None, Some(authorization(&wallet, SEPOLIA, calibur)), Some(authorization(&wallet, 0, calibur))] {
+            let call = batch_lock(&rpc, &wallet, wbtc(&rpc), auth);
+            rpc.check_batch(&call, call.batch.as_ref().unwrap(), NOW).unwrap();
+        }
+    }
+
+    #[test]
+    fn the_checks_refuse_a_bad_batch_lock() {
+        let rpc = sepolia();
+        let wallet = PrivateKeySigner::random();
+        let calibur = rpc.contracts.calibur.unwrap();
+        let check = |call: &LockCall, now| rpc.check_batch(call, call.batch.as_ref().unwrap(), now);
+        let other = Address::repeat_byte(0x66);
+        refused(check(&batch_lock(&rpc, &wallet, wbtc(&rpc), Some(authorization(&wallet, SEPOLIA, other))), NOW), "other than Calibur");
+        refused(check(&batch_lock(&rpc, &wallet, wbtc(&rpc), Some(authorization(&wallet, 84_532, calibur))), NOW), "another chain");
+        let stranger = PrivateKeySigner::random();
+        refused(check(&batch_lock(&rpc, &wallet, wbtc(&rpc), Some(authorization(&stranger, SEPOLIA, calibur))), NOW), "not signed by the payer");
+        let mut expired = batch_lock(&rpc, &wallet, wbtc(&rpc), None);
+        expired.batch.as_mut().unwrap().deadline = NOW;
+        refused(check(&expired, NOW), "deadline has passed");
+        // USDC has a note path and no price: not lockable through Calibur.
+        let usdc = alloy::primitives::address!("1c7D4B196Cb0C7B01d743Fbc6116a902379C7238");
+        refused(check(&batch_lock(&rpc, &wallet, usdc, None), NOW), "cannot be locked through Calibur");
+        let mut signed_by_another = batch_lock(&rpc, &stranger, wbtc(&rpc), None);
+        let mine = batch_lock(&rpc, &wallet, wbtc(&rpc), None);
+        (signed_by_another.v, signed_by_another.r, signed_by_another.s) = (mine.v, mine.r, mine.s);
+        refused(check(&signed_by_another, NOW), "not signed by the payer");
+        let mut wrong_nonce = batch_lock(&rpc, &wallet, wbtc(&rpc), None);
+        wrong_nonce.batch.as_mut().unwrap().nonce = U256::from(1);
+        refused(check(&wrong_nonce, NOW), "nonce");
+    }
+
+    #[test]
+    fn the_wallet_must_be_bare_with_an_authorization_or_delegated_to_calibur() {
+        let calibur = alloy::primitives::address!("000000005c84F8Fd50b21CAC312528A64437030e");
+        let wallet = PrivateKeySigner::random();
+        let bare = Batch { nonce: U256::ZERO, deadline: NOW, authorization: None };
+        let first = Batch { authorization: Some(authorization(&wallet, SEPOLIA, calibur)), ..bare };
+        check_delegation(&Bytes::new(), &first, calibur).unwrap();
+        refused(check_delegation(&Bytes::new(), &bare, calibur), "not delegated");
+        check_delegation(&calibur::delegation_code(calibur), &bare, calibur).unwrap();
+        check_delegation(&calibur::delegation_code(calibur), &first, calibur).unwrap();
+        let elsewhere = calibur::delegation_code(Address::repeat_byte(0x66));
+        refused(check_delegation(&elsewhere, &bare, calibur), "other than a delegation to Calibur");
+        refused(check_delegation(&Bytes::from(vec![0x60, 0x80]), &first, calibur), "other than a delegation to Calibur");
     }
 }

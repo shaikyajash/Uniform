@@ -73,6 +73,9 @@ struct State {
     receipts: HashMap<B256, Mined>,
     /// When set, signing also changes the job's lease token: another Relayer took the job.
     steal_lease_on_sign: Option<PgPool>,
+    /// When set, a mined transaction succeeds without doing its job (a Calibur batch whose 7702
+    /// authorization was skipped).
+    hollow: bool,
 }
 
 struct FakeChain(Mutex<State>);
@@ -105,7 +108,7 @@ impl FakeChain {
             }
             state.mined_nonces.insert(nonce);
             let success = !revert && !state.used_notes.contains_key(&note);
-            if success {
+            if success && !state.hollow {
                 state.used_notes.insert(note, hash);
             }
             state.receipts.insert(hash, Mined { from: RELAYER, success, gas_used: GAS_USED, gas_cost: U256::from(GAS_COST) });
@@ -510,6 +513,21 @@ async fn a_job_on_another_chain_is_left_alone(pool: PgPool) {
 
 // ---- The cross-chain jobs: the same machinery, with what differs checked here. ----
 
+#[sqlx::test(migrations = "../order-desk/migrations")]
+async fn a_batch_lock_mined_without_opening_the_lock_is_not_confirmed(pool: PgPool) {
+    let Job::SourceLock { params, payer, token, amount, lock_id, signature, .. } = lock_job(1, 6_036_000) else { unreachable!() };
+    let batch = common::calibur::Batch { nonce: common::calibur::nonce_for(lock_id), deadline: NOW + 300, authorization: None };
+    let job = Job::SourceLock { params, payer, token, amount, valid_after: 0, valid_before: 0, lock_id, signature, batch: Some(batch) };
+    let id = add_order_and_job(&pool, 1, AMOUNT, "paying", &job).await;
+    let chain = FakeChain::new();
+    chain.with(|state| state.hollow = true);
+    let hash = sent(&pool, &chain, NOW).await;
+    chain.mine(hash, false);
+    let after = outcome(&pool, &chain, NOW + RECEIPT_POLL_SECONDS).await;
+    assert_ne!(after, Some(Outcome::Confirmed(hash)), "a hollow batch must not count as the lock");
+    assert_ne!(statuses(&pool, id).await.0, "confirmed");
+}
+
 fn lock_job(order: u8, amount: u64) -> Job {
     let signature = PrivateKeySigner::random().sign_hash_sync(&note(order)).unwrap();
     Job::SourceLock {
@@ -528,6 +546,7 @@ fn lock_job(order: u8, amount: u64) -> Job {
         valid_before: NOW + 300,
         lock_id: note(order),
         signature: Bytes::from(signature.as_bytes().to_vec()),
+        batch: None,
     }
 }
 
