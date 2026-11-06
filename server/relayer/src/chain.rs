@@ -753,7 +753,8 @@ impl Rpc {
         let code = self.rpc(self.provider.get_code_at(call.payer).into_future()).await?;
         check_delegation(&code, batch, self.need(self.contracts.calibur, "Calibur")?)?;
         if let Some(auth) = batch.authorization {
-            let nonce = self.rpc(self.provider.get_transaction_count(call.payer).into_future()).await?;
+            // `pending`, as the pay page reads it when the wallet signs.
+            let nonce = self.rpc(self.provider.get_transaction_count(call.payer).pending().into_future()).await?;
             if auth.nonce != nonce {
                 return refuse("the wallet's authorization is for another nonce; it must sign it again");
             }
@@ -792,7 +793,8 @@ impl Rpc {
             if auth.address != calibur {
                 return refuse("the authorization delegates to a contract other than Calibur");
             }
-            if auth.chain_id != 0 && auth.chain_id != self.chain_id {
+            // Chain id 0 would let the authorization be replayed on any chain: refuse it.
+            if auth.chain_id != self.chain_id {
                 return refuse("the authorization is for another chain");
             }
             if signed_authorization(auth).recover_authority().ok() != Some(call.payer) {
@@ -1189,10 +1191,13 @@ mod tests {
         let rpc = sepolia();
         let wallet = PrivateKeySigner::random();
         let calibur = rpc.contracts.calibur.unwrap();
-        for auth in [None, Some(authorization(&wallet, SEPOLIA, calibur)), Some(authorization(&wallet, 0, calibur))] {
+        for auth in [None, Some(authorization(&wallet, SEPOLIA, calibur))] {
             let call = batch_lock(&rpc, &wallet, wbtc(&rpc), auth);
             rpc.check_batch(&call, call.batch.as_ref().unwrap(), NOW).unwrap();
         }
+        // Chain id 0 is valid on every chain, so it could be replayed elsewhere: refused.
+        let call = batch_lock(&rpc, &wallet, wbtc(&rpc), Some(authorization(&wallet, 0, calibur)));
+        assert!(rpc.check_batch(&call, call.batch.as_ref().unwrap(), NOW).is_err());
     }
 
     #[test]

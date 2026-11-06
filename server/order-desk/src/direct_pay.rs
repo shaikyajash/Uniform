@@ -52,10 +52,13 @@ pub struct Note {
 
 /// The EIP-712 JSON the pay page passes to the wallet. Numbers are decimal text and addresses
 /// lowercase hex, the JSON form wallets accept (checked with Privy in B0).
-pub fn typed_data(token: &Token, chain_id: u64, note: &Note) -> Value {
-    // Only tokens with EIP-3009 notes come here; chains.json gives each of them its domain.
-    let (name, version) = token.eip712.as_ref().map_or(("", ""), |d| (d.name.as_str(), d.version.as_str()));
-    json!({
+pub fn typed_data(token: &Token, chain_id: u64, note: &Note) -> Result<Value, crate::error::ApiError> {
+    let domain = token
+        .eip712
+        .as_ref()
+        .ok_or_else(|| crate::error::ApiError::internal(format!("chains.json has no EIP-712 domain for token {}", token.address)))?;
+    let (name, version) = (domain.name.as_str(), domain.version.as_str());
+    Ok(json!({
         "domain": {
             "name": name,
             "version": version,
@@ -87,19 +90,19 @@ pub fn typed_data(token: &Token, chain_id: u64, note: &Note) -> Value {
             "validBefore": note.valid_before.to_string(),
             "nonce": note.nonce.to_string(),
         },
-    })
+    }))
 }
 
 /// The same note as a `TransferWithAuthorization`: anyone may submit it, and the USDT goes straight
 /// to `to`. Used for a shop's refund to the customer.
-pub fn transfer_typed_data(token: &Token, chain_id: u64, note: &Note) -> Value {
-    let mut data = typed_data(token, chain_id, note);
+pub fn transfer_typed_data(token: &Token, chain_id: u64, note: &Note) -> Result<Value, crate::error::ApiError> {
+    let mut data = typed_data(token, chain_id, note)?;
     let fields = data["types"]["ReceiveWithAuthorization"].take();
     let types = data["types"].as_object_mut().expect("types is an object");
     types.remove("ReceiveWithAuthorization");
     types.insert("TransferWithAuthorization".into(), fields);
     data["primaryType"] = json!("TransferWithAuthorization");
-    data
+    Ok(data)
 }
 
 #[cfg(test)]
@@ -171,7 +174,7 @@ mod tests {
             valid_before: 1_793_914_600,
             nonce: B256::repeat_byte(0x42),
         };
-        let json = typed_data(&token, 1874, &note);
+        let json = typed_data(&token, 1874, &note).unwrap();
         let from_json: TypedData = serde_json::from_value(json).unwrap();
 
         let expected = ReceiveWithAuthorization {

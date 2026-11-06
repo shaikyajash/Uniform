@@ -160,13 +160,13 @@ export async function usdPrices(ids: string[]): Promise<Record<string, number>> 
 
 /**
  * About how much of a priced token pays `usd6` (USD in 6-decimal units, fee included): at `price`
- * USD per token, plus 1.5% for the quote's safety buffer, rounded up.
+ * USD per token, plus the quote's 3% safety buffer, rounded up (as the Order Desk).
  */
 export function estimateTokenUnits(usd6: bigint, price: number, decimals: number): bigint {
   const priceMicro = BigInt(Math.round(price * 1_000_000));
   if (priceMicro <= BigInt(0)) return BigInt(0);
-  const numerator = usd6 * BigInt(10) ** BigInt(decimals) * BigInt(1015);
-  const denominator = priceMicro * BigInt(1000);
+  const numerator = usd6 * BigInt(10) ** BigInt(decimals) * BigInt(10_000);
+  const denominator = priceMicro * BigInt(9_700);
   return (numerator + denominator - BigInt(1)) / denominator;
 }
 

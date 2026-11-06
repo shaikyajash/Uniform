@@ -13,6 +13,8 @@ use serde_json::Value;
 const COINGECKO: &str = "https://api.coingecko.com/api/v3/simple/price";
 /// How long a price is reused before it is fetched again.
 const FRESH_FOR: Duration = Duration::from_secs(30);
+/// CoinGecko's own update time: a price older than this is not quoted (the Matchmaker's limit too).
+const MAX_AGE_SECONDS: u64 = 600;
 
 pub struct Prices {
     /// `None`: only `fixed` prices (tests).
@@ -50,7 +52,7 @@ impl Prices {
         }
         let http = self.http.as_ref().ok_or_else(|| format!("no price for {id}"))?;
         let reply: Value = http
-            .get(format!("{COINGECKO}?ids={id}&vs_currencies=usd"))
+            .get(format!("{COINGECKO}?ids={id}&vs_currencies=usd&include_last_updated_at=true"))
             .send()
             .await
             .and_then(reqwest::Response::error_for_status)
@@ -59,6 +61,11 @@ impl Prices {
             .await
             .map_err(|error| format!("price of {id}: {error}"))?;
         let usd = reply[id]["usd"].as_f64().filter(|usd| usd.is_finite() && *usd > 0.0).ok_or_else(|| format!("no USD price for {id}"))?;
+        let updated = reply[id]["last_updated_at"].as_u64().ok_or_else(|| format!("no update time for {id}"))?;
+        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs());
+        if now.saturating_sub(updated) > MAX_AGE_SECONDS {
+            return Err(format!("the price of {id} is {}s old", now.saturating_sub(updated)));
+        }
         let price = (usd * 1_000_000.0).round() as u64;
         self.cache.lock().expect("price cache").insert(id.to_owned(), (price, Instant::now()));
         Ok(price)

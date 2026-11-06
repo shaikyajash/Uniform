@@ -115,7 +115,7 @@ pub async fn submit(
             _ => return Err(ApiError::bad_request("bad_authorization", "an authorization goes only with a token batch")),
         };
         let calibur = state.chains.by_id(leg.chain_id).and_then(|chain| chain.contracts.calibur);
-        if Some(authorization.address) != calibur || (authorization.chain_id != 0 && authorization.chain_id != leg.chain_id) {
+        if Some(authorization.address) != calibur || authorization.chain_id != leg.chain_id {
             return Err(ApiError::bad_request("bad_authorization", "the authorization must delegate to Calibur on this chain"));
         }
     }
