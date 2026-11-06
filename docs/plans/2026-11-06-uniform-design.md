@@ -37,15 +37,15 @@ Every address lives in `shared/chains.json`.
 
 ```
 1. Source lock         Mei → Source Lock (Base)      12 USDC held for Bob       (Locked)
-2. Destination lock    Bob → Shop Lock (Whitechain)    12 USDT held for the shop  (Filled)
+2. Destination lock    Bob → Destination Lock (Whitechain)    12 USDT held for the shop  (Filled)
 3. Destination redeem  Mei reveals the secret          shop gets 12 USDT          (Settled)
 4. Source redeem       Bob reuses the public secret    Bob gets 12 USDC           (Claimed)
 Timeout: each lock refunds whoever locked it. The destination lock (10 min) expires before the source lock (20 min).
 ```
 
 - The Source Lock holds the token the customer paid with (USDC, EURC or ETH). Bob swaps it to USDC on Uniswap v4 only when he redeems, so a successful payment swaps once and a failed one refunds the exact token with no swap and no fee (A6). Uniswap's Quoter also prices every quote.
-- Bob's USDT reaches the Shop Lock through 1inch Aqua: the Payout Pool `pull`s it from Bob's shipped strategy.
-- Why nobody can cheat: Bob cannot redeem without the secret, and the secret is first used on the Shop Lock, which can only pay the shop. Mei reveals only after her browser has checked the Shop Lock itself.
+- Bob's USDT reaches the Destination Lock through 1inch Aqua: the Payout Pool `pull`s it from Bob's shipped strategy.
+- Why nobody can cheat: Bob cannot redeem without the secret, and the secret is first used on the Destination Lock, which can only pay the shop. Mei reveals only after her browser has checked the Destination Lock itself.
 
 ### Path C: split (two source chains, all or nothing)
 
@@ -56,7 +56,7 @@ The source locks part on Base and part on Ethereum Sepolia under the same hashlo
 - `secret = keccak256(signature)`, where the customer's Privy wallet signs EIP-712 data with domain `{name "Uniform", version "1", chainId}` and a message binding `orderId` and `amount`. Signing again gives the same signature, so a closed tab can be recovered.
 - `hashlock = keccak256(abi.encodePacked(secret))`.
 - The secret and its signature are never stored (no localStorage) and never sent to the server before the reveal.
-- The browser reveals only after it has read the Shop Lock and checked the merchant, the amount (at least the order amount), the hashlock and the time left.
+- The browser reveals only after it has read the Destination Lock and checked the merchant, the amount (at least the order amount), the hashlock and the time left.
 - Fallback: a random secret kept only in memory. If the tab closes, the timeouts refund both sides.
 
 ## 5. Components
@@ -68,8 +68,8 @@ The source locks part on Base and part on Ethereum Sepolia under the same hashlo
 | Aqua (official 1inch code) | Whitechain | Holds Bob's strategy and lets the Payout Pool pull from it | A1 ✅ `0x02dF…4871` |
 | DirectPay | Whitechain | Path A payments and refunds | A2 ✅ `0x9DF1…aE9` |
 | SourceLock | Base, Ethereum Sepolia | Source lock: lock, source redeem, refund, lock for refunds | A3, A6, A7 |
-| PayoutPool (AquaApp) | Whitechain | Pulls Bob's USDT into a Shop Lock under Bob's rules | A4 |
-| ShopLock | Whitechain | Destination lock: destination redeem (emits `Settled`), refund to Bob | A4, A9 |
+| PayoutPool (AquaApp) | Whitechain | Pulls Bob's USDT into a Destination Lock under Bob's rules | A4 |
+| DestinationLock | Whitechain | Destination lock: destination redeem (emits `Settled`), refund to Bob | A4, A9 |
 
 ### Server (Rust)
 
@@ -87,7 +87,7 @@ One Cargo workspace in `server/`: a binary per service, plus `server/common` (B:
 
 | Page | Owner | Job |
 |---|---|---|
-| Pay Button `/pay/[orderId]` | B | Privy email login, price, sign, secret, Shop Lock check, reveal, live status |
+| Pay Button `/pay/[orderId]` | B | Privy email login, price, sign, secret, Destination Lock check, reveal, live status |
 | Shop Dashboard | B | Payments, refunds, payment links, settings, CSV |
 | Receipt `/receipt/[orderId]` | B | Public proof with every transaction link |
 | Earn Page | A | Bob ships or docks his strategy and sees his fees |
@@ -104,8 +104,8 @@ Rule: **only chain events say money moved.** The databases keep business details
 
 ```
 created → quoted → paying → paid                                   (Path A)
-created → quoted → paying → customer_locked → shop_locked → paid   (Paths B and C)
-customer_locked or shop_locked → returned    created or quoted → expired    paying → quoted
+created → quoted → paying → source_locked → destination_locked → paid   (Paths B and C)
+source_locked or destination_locked → returned    created or quoted → expired    paying → quoted
 paid → partially_refunded → refunded
 ```
 
@@ -114,7 +114,7 @@ paid → partially_refunded → refunded
 | Item | Demo | Real product |
 |---|---|---|
 | Source Lock (Base or Ethereum Sepolia) | 20 min | 2 h |
-| Shop Lock (destination) | 10 min | 1 h |
+| Destination Lock (Whitechain) | 10 min | 1 h |
 | Matchmaker fill cutoff | at least 15 min left on the source lock | at least 90 min |
 | Quote | 2 min | 2 min |
 | Signed authorization | 10 min (contracts reject more than 1 h) | same |
@@ -136,7 +136,7 @@ paid → partially_refunded → refunded
 | B0 | Privy check | S1 | ✅ |
 | A2 | DirectPay | S1 | ✅ live pay and refund |
 | **A3** | **SourceLock, USDC only, Base Sepolia** | S1 | **next**, see [the A3 plan](2026-11-06-a3-source-lock.md) |
-| A4 | PayoutPool and ShopLock | A1 | to do |
+| A4 | PayoutPool and DestinationLock | A1 | to do |
 | A5 | Matchmaker v1 | A3, A4 | to do (M2) |
 | A6 | Multi-token Source Lock, Uniswap swap at redeem, pools | A3 | to do |
 | A7 | Ethereum Sepolia | A6 | to do (M3) |
