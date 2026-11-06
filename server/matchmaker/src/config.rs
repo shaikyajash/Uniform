@@ -28,6 +28,10 @@ pub struct Config {
     /// EURC locks are valued this far below the price, so a price move before Bob converts the
     /// EURC cannot leave him short (100 = 1%).
     pub eurc_price_buffer_bps: u16,
+    /// Customer chains read up to their "safe" block (rollups such as Base, where it trails the
+    /// head by seconds). Every other chain waits its `confirmations` from chains.json: on Ethereum
+    /// "safe" trails by about 9 minutes, too long for a 20-minute lock.
+    pub safe_tag_chains: Vec<u64>,
 }
 
 impl Config {
@@ -69,6 +73,7 @@ impl Config {
                     .into()
             }),
             eurc_price_buffer_bps: number("EURC_PRICE_BUFFER_BPS", 100)?,
+            safe_tag_chains: chain_list("SAFE_TAG_CHAINS", &[84532])?,
             chains,
         };
         config.check()?;
@@ -153,9 +158,39 @@ fn parse<T: FromStr>(name: &str) -> Result<T, String> {
         .map_err(|_| format!("{name} is not valid"))
 }
 
+/// A comma-separated list of chain ids, or `default` when unset.
+fn chain_list(name: &str, default: &[u64]) -> Result<Vec<u64>, String> {
+    match env::var(name) {
+        Ok(value) => parse_chain_list(&value).map_err(|e| format!("{name}: {e}")),
+        Err(_) => Ok(default.to_vec()),
+    }
+}
+
+fn parse_chain_list(value: &str) -> Result<Vec<u64>, String> {
+    value
+        .split(',')
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+        .map(|v| v.parse().map_err(|_| format!("{v} is not a chain id")))
+        .collect()
+}
+
 fn number<T: FromStr>(name: &str, default: T) -> Result<T, String> {
     match env::var(name) {
         Ok(value) => value.parse().map_err(|_| format!("{name} is not a number")),
         Err(_) => Ok(default),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn chain_lists_are_comma_separated_ids() {
+        assert_eq!(parse_chain_list("84532"), Ok(vec![84532]));
+        assert_eq!(parse_chain_list(" 84532, 8453 ,"), Ok(vec![84532, 8453]));
+        assert_eq!(parse_chain_list(""), Ok(vec![]));
+        assert!(parse_chain_list("base").is_err());
     }
 }
