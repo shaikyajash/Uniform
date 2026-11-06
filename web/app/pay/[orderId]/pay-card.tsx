@@ -8,23 +8,34 @@
 //   kept only in this page's memory), a second signs the USDC note that locks it for the
 //   provider. Once the provider has locked USDT for the merchant, this page checks that lock on
 //   chain itself and only then hands over the key, which pays the merchant.
+// - A priced token (WETH, WBTC) on a customer chain: the same, but the note is a Calibur batch
+//   (approve, then lock) signed by the wallet itself, with an EIP-7702 authorization to Calibur
+//   the first time. Both are signed silently behind the one Pay click; the Gas Payer sends them.
 
-import { usePrivy, useSignTypedData, useWallets } from "@privy-io/react-auth";
+import { usePrivy, useSign7702Authorization, useSignTypedData, useWallets } from "@privy-io/react-auth";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { formatUnits, parseUnits, type Address, type Hex } from "viem";
+import { decodeFunctionData, erc20Abi, formatUnits, parseUnits, zeroAddress, type Address, type Hex } from "viem";
 import { Check, Loader2 } from "lucide-react";
 import {
   chainName,
   checkShopLock,
   customerChain,
   customerChains,
+  estimateTokenUnits,
   explorerTx,
+  formatTokenAmount,
   shopChain,
   shortAddress,
+  tokenBalance,
   trimAmount,
+  usdPrices,
   usdcBalance,
   usdtBalance,
+  walletCode,
+  walletNonce,
   withProviderFee,
+  type CustomerChain,
+  type PricedToken,
 } from "@/lib/chain";
 import {
   anchorLeg,
@@ -35,6 +46,9 @@ import {
   revealSecret,
   submitDirect,
   submitLegs,
+  type Authorization,
+  type BatchQuote,
+  type BatchTypedData,
   type Order,
   type Quote,
   type Payment,
@@ -89,6 +103,15 @@ const STEP_LABEL: Record<Exclude<Step, "idle">, string> = {
 /** The Order Desk's smallest split leg: 0.1 USDC (A8). */
 const MIN_SPLIT_LEG = BigInt(100_000);
 
+/** How often to refresh the market prices behind the priced tokens' estimates. */
+const PRICE_POLL_MS = 60_000;
+/** CoinGecko ids of every priced token on the customer chains. */
+const PRICE_IDS = [...new Set(customerChains.flatMap((chain) => chain.tokens.map((token) => token.priceId)))];
+/** Every priced token, with its chain: one balance and one pay option each. */
+const PRICED = customerChains.flatMap((chain) => chain.tokens.map((token) => ({ chain, token })));
+const tokenKey = (chainId: number, symbol: string) => `token:${chainId}:${symbol}`;
+const DIDNT_CHECK_OUT = "The payment details didn't check out. Nothing was signed.";
+
 /** The payment's key, in memory only. */
 type Key = { orderId: string; secret: Hex; hashlock: Hex };
 
@@ -100,10 +123,13 @@ export function PayCard({ orderId }: { orderId: string }) {
   const { ready, authenticated, logout, user } = usePrivy();
   const { wallets, ready: walletsReady } = useWallets();
   const { signTypedData } = useSignTypedData();
+  const { signAuthorization } = useSign7702Authorization();
 
   const [order, setOrder] = useState<Order | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [balances, setBalances] = useState<Balances | null>(null);
+  /** USD per token by CoinGecko id, for estimates only. */
+  const [prices, setPrices] = useState<Record<string, number>>({});
   const [picked, setPicked] = useState<Source | null>(null);
   const [step, setStep] = useState<Step>("idle");
   const [error, setError] = useState<string | null>(null);
@@ -147,7 +173,24 @@ export function PayCard({ orderId }: { orderId: string }) {
   }, [moving, waiting, refresh]);
 
   // Every way to pay, with what it costs and whether the wallet has it.
-  const options = useMemo(() => paymentOptions(units, balances, address), [units, balances, address]);
+  const options = useMemo(() => paymentOptions(units, balances, address, prices), [units, balances, address, prices]);
+
+  // Market prices for the priced tokens' estimates. A failed read keeps the last prices.
+  useEffect(() => {
+    if (PRICE_IDS.length === 0) return;
+    let current = true;
+    const load = () =>
+      usdPrices(PRICE_IDS).then(
+        (loaded) => current && setPrices((previous) => ({ ...previous, ...loaded })),
+        () => undefined,
+      );
+    void load();
+    const timer = setInterval(load, PRICE_POLL_MS);
+    return () => {
+      current = false;
+      clearInterval(timer);
+    };
+  }, []);
 
   const anyEnough = options.some((option) => option.balance !== null && option.balance >= option.cost);
   const firstEnough = options.find((option) => option.balance !== null && option.balance >= option.cost);
@@ -162,6 +205,10 @@ export function PayCard({ orderId }: { orderId: string }) {
     const reads: [string, Promise<bigint>][] = [
       ["usdt", usdtBalance(address)],
       ...customerChains.map((chain): [string, Promise<bigint>] => [`usdc:${chain.id}`, usdcBalance(chain, address)]),
+      ...PRICED.map(({ chain, token }): [string, Promise<bigint>] => [
+        tokenKey(chain.id, token.symbol),
+        tokenBalance(chain.id, token.address, address),
+      ]),
     ];
     const settled = await Promise.allSettled(reads.map(([, read]) => read));
     setBalances((previous) => {
@@ -247,9 +294,14 @@ export function PayCard({ orderId }: { orderId: string }) {
   }, [order, keyFits, claimLive, leg, units, key, refresh]);
 
   /** No Privy window: the customer's Pay click is the confirmation (A8: one click for every note). */
-  async function signNote(typedData: TypedData, title: string, description: string): Promise<string> {
+  async function signNote(typedData: TypedData | BatchTypedData, title: string, description: string): Promise<string> {
     if (!address) throw new Error("no wallet");
-    const data = { ...typedData, domain: { ...typedData.domain, chainId: Number(typedData.domain.chainId) } };
+    // A Calibur batch's domain has a `salt` (bytes32 hex), passed through as is: Privy types it as
+    // an ArrayBuffer, but the wallet takes eth_signTypedData_v4 JSON, where bytes32 is hex text.
+    const data = {
+      ...typedData,
+      domain: { ...typedData.domain, chainId: Number(typedData.domain.chainId) },
+    } as unknown as Parameters<typeof signTypedData>[0];
     const options = {
       address,
       uiOptions: { showWalletUIs: false, title, description, buttonText: "Sign and pay" },
@@ -259,7 +311,7 @@ export function PayCard({ orderId }: { orderId: string }) {
     } catch (problem) {
       // Some wallets sign typed data only for the chain they are on.
       if (!wallet || !/chain/i.test(String(problem))) throw problem;
-      await wallet.switchChain(data.domain.chainId);
+      await wallet.switchChain(Number(typedData.domain.chainId));
       return (await signTypedData(data, options)).signature;
     }
   }
@@ -294,6 +346,54 @@ export function PayCard({ orderId }: { orderId: string }) {
     );
     setStep("submitting");
     await submitLegs(orderId, quote.quoteId, [signature]);
+  }
+
+  /**
+   * A priced token (WETH, WBTC): one Calibur batch, approve then lock, signed by the wallet itself.
+   * The first time on a chain the wallet also signs an EIP-7702 authorization to Calibur. Both are
+   * silent: the Pay click is the confirmation, and our Gas Payer sends the transaction.
+   */
+  async function payToken(chainId: number, symbol: string) {
+    const chain = customerChain(chainId);
+    const token = chain?.tokens.find((candidate) => candidate.symbol === symbol);
+    if (!order || !address || !chain || !token || !chain.calibur) return;
+    const calibur = chain.calibur;
+    setStep("keying");
+    const made = keyFits && key ? key : await makeKey();
+    setStep("quoting");
+    const quote = await getQuote(orderId, address, { hashlock: made.hashlock, chainId, token: symbol });
+    const held = balances?.owner === address ? (balances.units[tokenKey(chainId, symbol)] ?? null) : null;
+    // Read the balance afresh: the one shown may be a few seconds old.
+    const balance = await tokenBalance(chainId, token.address, address).catch(() => held);
+    const batch = quote.toSign[0];
+    if (quote.toSign.length !== 1 || !batch || !batchFits(batch, chain, token, address, balance)) throw new Error(DIDNT_CHECK_OUT);
+
+    // Delegated already? Then the wallet's code is `0xef0100 ‖ calibur` and no authorization is needed.
+    const code = await walletCode(chainId, address);
+    let authorization: Authorization | undefined;
+    setStep("signing");
+    if (code.toLowerCase() !== `0xef0100${calibur.slice(2).toLowerCase()}`) {
+      const nonce = await walletNonce(chainId, address);
+      const signed = await signAuthorization({ contractAddress: calibur, chainId, nonce }, { address });
+      if (signed.address.toLowerCase() !== calibur.toLowerCase() || Number(signed.chainId) !== chainId) {
+        throw new Error(DIDNT_CHECK_OUT);
+      }
+      authorization = {
+        chainId,
+        address: signed.address,
+        nonce: Number(signed.nonce),
+        yParity: Number(signed.yParity),
+        r: signed.r,
+        s: signed.s,
+      };
+    }
+    const signature = await signNote(
+      batch.typedData,
+      `Pay ${formatTokenAmount(BigInt(batch.amount), batch.decimals)} ${symbol}`,
+      `From ${chainName(chainId)}. Held for the provider until ${order.merchant.name} is paid; it comes back to you if not.`,
+    );
+    setStep("submitting");
+    await submitLegs(orderId, quote.quoteId, [signature], authorization);
   }
 
   /** A8 split: part of the USDC from each chain, every signature behind this one Pay click. */
@@ -341,6 +441,7 @@ export function PayCard({ orderId }: { orderId: string }) {
     try {
       if (source.kind === "usdt") await payDirect();
       else if (source.kind === "usdc") await payCrossChain(source.chainId);
+      else if (source.kind === "token") await payToken(source.chainId, source.symbol);
       else await paySplit(source.parts);
     } catch (problem) {
       setError(explain(problem));
@@ -512,7 +613,7 @@ export function PayCard({ orderId }: { orderId: string }) {
                       {step !== "idle"
                         ? STEP_LABEL[step]
                         : chosen
-                          ? `Pay ${trimAmount(formatUnits(chosen.cost, 6))} ${chosen.token}`
+                          ? `Pay ${chosen.approx ? "≈" : ""}${formatTokenAmount(chosen.cost, chosen.decimals)} ${chosen.token}`
                           : "Pay"}
                     </PrimaryButton>
                     <FinePrint>
@@ -540,7 +641,7 @@ function formatUsdc(units: bigint): string {
 
 /** "One click · " for the cross-chain and split payments: what the customer does, before the countdown. */
 function oneClickNote(source: Source | null): string {
-  if (source?.kind === "usdc" || source?.kind === "split") return "One click · ";
+  if (source?.kind === "usdc" || source?.kind === "split" || source?.kind === "token") return "One click · ";
   return "";
 }
 
@@ -651,7 +752,9 @@ function CompactSummary({
   amount: string;
   secondsLeft: number;
 }) {
-  const payWith = customerChains.length > 0 ? "USDT or USDC" : "USDT";
+  const extra = [...new Set(PRICED.map(({ token }) => token.symbol))];
+  const tokens = ["USDT", ...(customerChains.length > 0 ? ["USDC"] : []), ...extra];
+  const payWith = tokens.length > 1 ? `${tokens.slice(0, -1).join(", ")} or ${tokens[tokens.length - 1]}` : "USDT";
   return (
     <div className="grid gap-4 px-(--card-spacing)">
       <div className="flex items-baseline justify-between gap-3">
@@ -745,8 +848,63 @@ function noteFits(note: Quote["toSign"][number], chainId: number, address: Addre
   );
 }
 
+/**
+ * A priced token's batch may only approve exactly the quoted amount of this token to our SourceLock
+ * on this chain, then call that SourceLock, from this wallet (the domain's verifyingContract), under
+ * Calibur's domain, within what the wallet holds.
+ */
+function batchFits(
+  batch: BatchQuote["toSign"][number],
+  chain: CustomerChain,
+  token: PricedToken,
+  address: Address,
+  balance: bigint | null,
+): boolean {
+  if (!chain.calibur) return false;
+  const same = (a: string | undefined, b: string) => typeof a === "string" && a.toLowerCase() === b.toLowerCase();
+  const { domain, message } = batch.typedData;
+  const calls = message?.batchedCall?.calls ?? [];
+  let amount: bigint;
+  try {
+    amount = BigInt(batch.amount);
+  } catch {
+    return false;
+  }
+  if (
+    batch.signing !== "batch" ||
+    batch.chainId !== chain.id ||
+    Number(domain.chainId) !== chain.id ||
+    !same(batch.tokenAddress, token.address) ||
+    batch.decimals !== token.decimals ||
+    !same(batch.calibur, chain.calibur) ||
+    !same(domain.verifyingContract, address) ||
+    !same(domain.salt, `0x${"0".repeat(24)}${chain.calibur.slice(2)}`) ||
+    calls.length !== 2 ||
+    !same(calls[0].to, token.address) ||
+    !same(calls[1].to, chain.sourceLock) ||
+    calls.some((call) => BigInt(call.value || "0") !== BigInt(0)) ||
+    !same(message.executor, zeroAddress) ||
+    amount <= BigInt(0) ||
+    balance === null ||
+    amount > balance
+  ) {
+    return false;
+  }
+  try {
+    const approve = decodeFunctionData({ abi: erc20Abi, data: calls[0].data as Hex });
+    return approve.functionName === "approve" && same(approve.args[0], chain.sourceLock) && approve.args[1] === amount;
+  } catch {
+    return false;
+  }
+}
+
 /** Every way to pay this order, with what it costs and what the wallet holds there. */
-function paymentOptions(units: bigint | null, balances: Balances | null, address: Address | null): SourceOption[] {
+function paymentOptions(
+  units: bigint | null,
+  balances: Balances | null,
+  address: Address | null,
+  prices: Record<string, number>,
+): SourceOption[] {
   if (units === null) return [];
   const mine = balances && balances.owner === address ? balances.units : {};
   const usdt: SourceOption = {
@@ -754,6 +912,7 @@ function paymentOptions(units: bigint | null, balances: Balances | null, address
     token: "USDT",
     chain: chainName(shopChain.id),
     cost: units,
+    decimals: shopChain.usdtDecimals,
     balance: mine.usdt ?? null,
   };
   const usdc = customerChains.map(
@@ -762,6 +921,7 @@ function paymentOptions(units: bigint | null, balances: Balances | null, address
       token: "USDC",
       chain: chainName(chain.id),
       cost: withProviderFee(units),
+      decimals: chain.usdcDecimals,
       balance: mine[`usdc:${chain.id}`] ?? null,
       note: "incl. 0.3% provider fee",
     }),
@@ -777,11 +937,29 @@ function paymentOptions(units: bigint | null, balances: Balances | null, address
           token: "USDC",
           chain: parts.map((part) => chainName(part.chainId)).join(" + "),
           cost: withProviderFee(units),
+          decimals: 6,
           balance: parts.reduce((sum, part) => sum + (mine[`usdc:${part.chainId}`] ?? BigInt(0)), BigInt(0)),
           note: "incl. 0.3% provider fee",
           detail: parts.map((part) => `${formatUsdc(part.amount)} on ${chainName(part.chainId)}`).join(" + "),
         },
       ]
     : [];
-  return [usdt, ...usdc, ...split];
+  // Priced tokens the wallet holds, once their price is known: the cost is an estimate.
+  const priced = PRICED.flatMap(({ chain, token }): SourceOption[] => {
+    const balance = mine[tokenKey(chain.id, token.symbol)] ?? null;
+    const price = prices[token.priceId];
+    if (balance === null || balance <= BigInt(0) || !price) return [];
+    return [
+      {
+        source: { kind: "token", chainId: chain.id, symbol: token.symbol },
+        token: token.symbol,
+        chain: chainName(chain.id),
+        cost: estimateTokenUnits(withProviderFee(units), price, token.decimals),
+        decimals: token.decimals,
+        approx: true,
+        balance,
+      },
+    ];
+  });
+  return [usdt, ...usdc, ...split, ...priced];
 }

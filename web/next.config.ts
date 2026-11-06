@@ -25,7 +25,7 @@ type ChainEntry = {
   role: string;
   rpc: string;
   explorer: string;
-  tokens: Record<string, { address: string; decimals: number }>;
+  tokens: Record<string, { address: string; decimals: number; priceId?: string }>;
   contracts: Record<string, string>;
 };
 
@@ -48,6 +48,8 @@ const shopChain = {
 };
 
 // Customer chains a payment can come from: those whose SourceLock is deployed and that list USDC.
+// `tokens` are the priced ERC-20s (WETH, WBTC, ...) paid through a Calibur batch; `calibur` is the
+// EIP-7702 delegate that runs it (null where it is not deployed, and then those tokens are skipped).
 const customerChains = entries
   .filter(([, entry]) => entry.role === "customer" && entry.contracts.sourceLock && entry.tokens.USDC)
   .map(([key, entry]) => ({
@@ -58,6 +60,12 @@ const customerChains = entries
     usdc: entry.tokens.USDC.address,
     usdcDecimals: entry.tokens.USDC.decimals,
     sourceLock: entry.contracts.sourceLock,
+    calibur: entry.contracts.calibur || null,
+    tokens: entry.contracts.calibur
+      ? Object.entries(entry.tokens)
+          .filter(([, token]) => token.priceId)
+          .map(([symbol, token]) => ({ symbol, address: token.address, decimals: token.decimals, priceId: token.priceId }))
+      : [],
   }));
 
 const orderDesk = fromRepoEnv("ORDER_DESK_URL") ?? "http://localhost:4000";
