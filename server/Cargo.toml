@@ -1,0 +1,22 @@
+[workspace]
+resolver = "3"
+members = ["common", "order-desk", "relayer", "notifier", "bindings", "matchmaker"]
+
+[workspace.package]
+edition = "2024"
+license = "MIT"
+publish = false
+
+[workspace.dependencies]
+alloy = { version = "2.5.0", features = ["full", "eip712", "signer-local"] }
+axum = "0.8.9"
+tokio = { version = "1.54.1", features = ["full"] }
+sqlx = { version = "0.9.0", features = ["sqlite", "runtime-tokio", "migrate"] }
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.154"
+reqwest = { version = "0.13.5", features = ["json"] }
+hmac = "0.13.0"
+sha2 = "0.11.1"
+
+common = { path = "common" }
+bindings = { path = "bindings" }
