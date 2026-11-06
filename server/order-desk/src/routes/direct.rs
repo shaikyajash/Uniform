@@ -110,26 +110,7 @@ pub async fn direct(
     if moved.rows_affected() == 0 {
         return Err(ApiError::conflict("already_submitted", "this order's payment is already being sent"));
     }
-    let now = now();
-    let job_id: i64 = sqlx::query_scalar(
-        "INSERT INTO relayer_jobs (order_id, merchant_id, chain_id, kind, args, created_at, updated_at)
-         VALUES ($1, $2, $3, $4, $5, $6, $6) RETURNING id",
-    )
-    .bind(&order_id)
-    .bind(quote.merchant_id)
-    .bind(chain_id)
-    .bind(job.kind())
-    .bind(serde_json::to_value(&job).map_err(ApiError::internal)?)
-    .bind(now)
-    .fetch_one(&mut *tx)
-    .await
-    .map_err(|error| match &error {
-        // The order already has an unfinished job (`relayer_jobs_one_live_per_order`).
-        sqlx::Error::Database(db) if db.is_unique_violation() => {
-            ApiError::conflict("already_submitted", "this order's payment is already being sent")
-        }
-        _ => ApiError::from(error),
-    })?;
+    let job_id = super::insert_job(&mut tx, &order_id, quote.merchant_id, chain_id, &job, now()).await?;
     tx.commit().await?;
 
     Ok((StatusCode::ACCEPTED, Json(DirectAccepted { status: OrderStatus::Paying, job_id })))
@@ -137,7 +118,7 @@ pub async fn direct(
 
 /// The signature must be 65 bytes (an ordinary wallet, per the spec) and recover to the quote's
 /// payer from exactly the note we stored. Returns the 65 bytes for the job.
-fn recover_check(signature: &str, typed_data: &Value, payer: Address) -> Result<Bytes, ApiError> {
+pub(super) fn recover_check(signature: &str, typed_data: &Value, payer: Address) -> Result<Bytes, ApiError> {
     let bad = |message: &str| ApiError::bad_request("bad_signature", message.to_owned());
     let bytes: Bytes = signature.parse().map_err(|_| bad("signature must be 0x hex"))?;
     if bytes.len() != 65 {
@@ -213,7 +194,9 @@ mod tests {
                 .await
                 .unwrap();
         assert_eq!((kind.as_str(), job_status.as_str()), ("direct_pay", "pending"));
-        let Job::DirectPay { payer, amount, nonce, valid_before, .. } = serde_json::from_value(args).unwrap();
+        let Job::DirectPay { payer, amount, nonce, valid_before, .. } = serde_json::from_value(args).unwrap() else {
+            panic!("expected a direct_pay job");
+        };
         let message = &quote["toSign"][0]["typedData"]["message"];
         assert_eq!(payer, alice.address());
         assert_eq!(amount.to_string(), "12000000");

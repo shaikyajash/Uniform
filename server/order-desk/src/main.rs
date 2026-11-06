@@ -9,6 +9,7 @@ mod db;
 mod direct_pay;
 mod error;
 mod random;
+mod refunds;
 mod routes;
 
 use std::{env, sync::Arc};
@@ -63,12 +64,25 @@ async fn serve(pool: PgPool) -> Result<(), String> {
     let max_order_text = env::var("RELAYER_MAX_ORDER_USDT").unwrap_or_else(|_| DEFAULT_MAX_ORDER_USDT.to_owned());
     let max_order = Amount::from_decimal(&max_order_text, USDT_DECIMALS)
         .map_err(|_| format!("RELAYER_MAX_ORDER_USDT must be a number of USDT, got {max_order_text:?}"))?;
+    let provider = match env::var("PROVIDER_ADDRESS") {
+        Ok(text) if !text.trim().is_empty() => Some(
+            text.trim()
+                .parse()
+                .map_err(|_| format!("PROVIDER_ADDRESS must be Bob's 0x address, got {text:?}"))?,
+        ),
+        _ => {
+            println!("order-desk: PROVIDER_ADDRESS is not set; only Path A (USDT on Whitechain) is offered");
+            None
+        }
+    };
+    tokio::spawn(refunds::run(pool.clone()));
     let app = routes::router(routes::AppState {
         pool,
         chains: Arc::new(chains),
         pay_base_url,
         internal_token,
         max_order,
+        provider,
     });
     // 0.0.0.0, not 127.0.0.1: a host like Railway reaches the server from outside the container.
     let listener = tokio::net::TcpListener::bind(("0.0.0.0", port))
