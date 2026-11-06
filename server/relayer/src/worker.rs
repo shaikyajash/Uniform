@@ -225,7 +225,7 @@ impl Taken<'_> {
         if call.deadline().is_some_and(|deadline| deadline < self.now + MIN_NOTE_LIFE_SECONDS) {
             return Ok(Some("the signed note or the lock runs out too soon"));
         }
-        if self.gas_spent_today(merchant_id, limits.chain_id).await? >= limits.daily_gas_wei {
+        if call.uses_shop_budget() && self.gas_spent_today(merchant_id, limits.chain_id).await? >= limits.daily_gas_wei {
             return Ok(Some("the shop's gas budget for today is used up"));
         }
         Ok(None)
