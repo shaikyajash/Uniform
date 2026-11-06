@@ -120,4 +120,49 @@ mod tests {
             .unwrap();
         assert_eq!(amount.parse::<common::amount::Amount>().unwrap(), common::amount::Amount::from(12_000_000u64));
     }
+
+    const TX_HASH: &str = "0x7777777777777777777777777777777777777777777777777777777777777777";
+
+    async fn add_job(pool: &PgPool, status: &str, tx_hash: Option<&str>) -> Result<(), sqlx::Error> {
+        sqlx::query(
+            "INSERT INTO relayer_jobs (order_id, merchant_id, chain_id, kind, args, status, tx_hash, raw_tx, created_at, updated_at)
+             VALUES ($1, 1, 1874, 'direct_pay', '{}', $2, $3, CASE WHEN $3 IS NULL THEN NULL ELSE '\\x02'::bytea END, 1, 1)",
+        )
+        .bind(ORDER_ID)
+        .bind(status)
+        .bind(tx_hash)
+        .execute(pool)
+        .await
+        .map(|_| ())
+    }
+
+    #[sqlx::test]
+    async fn the_database_accepts_every_rust_job_status(pool: PgPool) {
+        add_order(&pool).await;
+        // One at a time: finished jobs do not count against "one live job per order".
+        for status in common::jobs::JobStatus::ALL {
+            add_job(&pool, status.as_str(), Some(TX_HASH)).await.unwrap_or_else(|error| panic!("{status:?}: {error}"));
+            sqlx::query("UPDATE relayer_jobs SET status = 'failed'").execute(&pool).await.unwrap();
+        }
+        assert!(add_job(&pool, "lost", None).await.is_err());
+    }
+
+    #[sqlx::test]
+    async fn an_order_has_at_most_one_unfinished_job(pool: PgPool) {
+        add_order(&pool).await;
+        add_job(&pool, "pending", None).await.unwrap();
+        assert!(add_job(&pool, "pending", None).await.is_err(), "a second live job must be refused");
+
+        sqlx::query("UPDATE relayer_jobs SET status = 'failed'").execute(&pool).await.unwrap();
+        add_job(&pool, "pending", None).await.expect("after a failure the customer can try again");
+    }
+
+    #[sqlx::test]
+    async fn a_sent_job_must_have_its_hash(pool: PgPool) {
+        add_order(&pool).await;
+        assert!(add_job(&pool, "sending", None).await.is_err());
+        assert!(add_job(&pool, "sent", None).await.is_err());
+        assert!(add_job(&pool, "confirmed", None).await.is_err());
+        add_job(&pool, "sent", Some(TX_HASH)).await.unwrap();
+    }
 }
