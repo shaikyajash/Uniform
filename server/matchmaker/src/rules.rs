@@ -240,10 +240,36 @@ pub fn liquidity(strategy_balance: U256, wallet: U256, approved: U256) -> U256 {
     strategy_balance.min(wallet).min(approved)
 }
 
+/// The strategy to fill `amount` from: among those whose per-order limit and remaining balance
+/// both cover it, the one with the most left, so small strategies are not drained first and
+/// spread thin. `limits` gives (max per order, balance) for each.
+pub fn choose_strategy<T>(open: &[T], amount: U256, limits: impl Fn(&T) -> (U256, U256)) -> Option<&T> {
+    open.iter()
+        .filter(|s| {
+            let (max, balance) = limits(s);
+            max >= amount && balance >= amount
+        })
+        .max_by_key(|s| limits(s).1)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use alloy::primitives::address;
+
+    #[test]
+    fn a_fill_uses_the_covering_strategy_with_the_most_left() {
+        let u = U256::from;
+        // (max per order, balance)
+        let open = [(u(2_000_000), u(5_000_000)), (u(100_000_000), u(3_000_000)), (u(100_000_000), u(9_000_000))];
+        let pick = |amount: u64| choose_strategy(&open, u(amount), |s| *s).copied();
+        assert_eq!(pick(1_000_000), Some(open[2]));
+        // Above the first one's per-order limit, still the fullest that allows it.
+        assert_eq!(pick(4_000_000), Some(open[2]));
+        // More than any one strategy holds.
+        assert_eq!(pick(9_500_000), None);
+        assert_eq!(choose_strategy::<(U256, U256)>(&[], u(1), |s| *s), None);
+    }
 
     #[test]
     fn liquidity_is_the_lowest_of_strategy_wallet_and_approval() {

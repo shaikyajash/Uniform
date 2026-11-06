@@ -11,6 +11,7 @@ mod order_desk;
 mod price;
 mod rules;
 mod store;
+mod strategies;
 mod worker;
 
 use std::{sync::Arc, time::Duration};
