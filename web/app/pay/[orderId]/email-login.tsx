@@ -1,7 +1,7 @@
 "use client";
 
-// Log in with email inside the checkout widget's card, in our own form: Privy sends and checks
-// the code, but no Privy window opens over the card. Email first, then the 6-digit code.
+// Log in with email in our own form, on the full pay page and in the widget: Privy sends and checks
+// the code, but no Privy window opens. Email first, then the 6-digit code.
 
 import { useLoginWithEmail } from "@privy-io/react-auth";
 import { useState } from "react";

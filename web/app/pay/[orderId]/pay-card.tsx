@@ -92,7 +92,7 @@ type Balances = { owner: Address; units: Record<string, bigint | null> };
 
 export function PayCard({ orderId }: { orderId: string }) {
   const embedded = useEmbedded();
-  const { ready, authenticated, login, logout, user } = usePrivy();
+  const { ready, authenticated, logout, user } = usePrivy();
   const { wallets, ready: walletsReady } = useWallets();
   const { signTypedData } = useSignTypedData();
 
@@ -193,22 +193,17 @@ export function PayCard({ orderId }: { orderId: string }) {
   }, [paid, orderId]);
 
   /** Signs this order's fixed message: the same order always gives the same key. */
-  const makeKey = useCallback(async (silent = false): Promise<Key> => {
+  const makeKey = useCallback(async (): Promise<Key> => {
     if (!address || units === null || !order) throw new Error("not ready");
     const { signature } = await signTypedData(secretTypedData(order.orderId as Hex, units), {
       address,
-      uiOptions: {
-        // In the widget's card our own button is the confirmation: no Privy window over the card.
-        showWalletUIs: !embedded && !silent,
-        title: "Confirm this payment",
-        description: "This signature makes a one-time key for this payment. It moves no money and costs nothing.",
-        buttonText: "Confirm",
-      },
+      // Our Pay button is the confirmation, on the full page and in the widget alike: no Privy window.
+      uiOptions: { showWalletUIs: false, title: "", description: "", buttonText: "" },
     });
     const made = { orderId: order.orderId, ...secretFromSignature(signature as Hex) };
     setKey(made);
     return made;
-  }, [address, units, order, signTypedData, embedded]);
+  }, [address, units, order, signTypedData]);
 
   // Cross-chain: once the provider has locked USDT for the shop, check that lock on chain and
   // hand over the key. Runs again on every poll until the claim is under way.
@@ -244,13 +239,13 @@ export function PayCard({ orderId }: { orderId: string }) {
     })();
   }, [order, keyFits, claimLive, leg, units, key, refresh]);
 
-  /** `silent`: no Privy window (a split signs several notes behind one Pay click, per A8). */
-  async function signNote(typedData: TypedData, title: string, description: string, silent = false): Promise<string> {
+  /** No Privy window: the customer's Pay click is the confirmation (A8: one click for every note). */
+  async function signNote(typedData: TypedData, title: string, description: string): Promise<string> {
     if (!address) throw new Error("no wallet");
     const data = { ...typedData, domain: { ...typedData.domain, chainId: Number(typedData.domain.chainId) } };
     const options = {
       address,
-      uiOptions: { showWalletUIs: !embedded && !silent, title, description, buttonText: "Sign and pay" },
+      uiOptions: { showWalletUIs: false, title, description, buttonText: "Sign and pay" },
     };
     try {
       return (await signTypedData(data, options)).signature;
@@ -298,7 +293,7 @@ export function PayCard({ orderId }: { orderId: string }) {
   async function paySplit(parts: SplitPart[]) {
     if (!order || !address || parts.length < 2) return;
     setStep("keying");
-    const made = keyFits && key ? key : await makeKey(true);
+    const made = keyFits && key ? key : await makeKey();
     setStep("quoting");
     const [first, ...rest] = parts;
     const quote = await getQuote(orderId, address, {
@@ -325,7 +320,6 @@ export function PayCard({ orderId }: { orderId: string }) {
           note.typedData,
           `Pay ${formatUsdc(values[index])} USDC`,
           `From ${chainName(note.chainId)}, part of ${trimAmount(quote.total)} USDC to ${order.shop.name}.`,
-          true,
         ),
       ],
       Promise.resolve([]),
@@ -468,13 +462,7 @@ export function PayCard({ orderId }: { orderId: string }) {
                   <Notice>The time to pay this order has run out. Ask the shop for a new link.</Notice>
                 )}
                 {view === "starting" && <PrimaryButton disabled>Loading…</PrimaryButton>}
-                {view === "log-in" && embedded && <EmailLogin />}
-                {view === "log-in" && !embedded && (
-                  <>
-                    <PrimaryButton onClick={login}>Log in with email to pay</PrimaryButton>
-                    <FinePrint>We create a wallet for you. Nothing to install.</FinePrint>
-                  </>
-                )}
+                {view === "log-in" && <EmailLogin />}
                 {view === "creating-wallet" && (
                   <WalletWait accountWallet={user?.wallet?.address ?? null} walletsReady={walletsReady} embedded={embedded} />
                 )}
@@ -514,7 +502,7 @@ export function PayCard({ orderId }: { orderId: string }) {
                           : "Pay"}
                     </PrimaryButton>
                     <FinePrint>
-                      {signatureCount(chosen?.source ?? null)}Expires in {formatCountdown(secondsLeft)}
+                      {oneClickNote(chosen?.source ?? null)}Expires in {formatCountdown(secondsLeft)}
                     </FinePrint>
                   </>
                 )}
@@ -536,10 +524,9 @@ function formatUsdc(units: bigint): string {
   return trimAmount(formatUnits(units, 6));
 }
 
-/** "Two signatures · " and so on: what the customer will be asked for, before the countdown. */
-function signatureCount(source: Source | null): string {
-  if (source?.kind === "usdc") return "Two signatures · ";
-  if (source?.kind === "split") return `${source.parts.length + 1} signatures, one click · `;
+/** "One click · " for the cross-chain and split payments: what the customer does, before the countdown. */
+function oneClickNote(source: Source | null): string {
+  if (source?.kind === "usdc" || source?.kind === "split") return "One click · ";
   return "";
 }
 
