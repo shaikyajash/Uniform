@@ -6,7 +6,7 @@
 use alloy::primitives::{Address, B256, Bytes};
 use serde::{Deserialize, Serialize};
 
-use crate::{amount::Amount, status::UnknownValue};
+use crate::{amount::Amount, locks::SourceLockParams, status::UnknownValue};
 
 /// What to send. Stored as JSON in `relayer_jobs.args`; `kind` is also its own column.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -26,6 +26,33 @@ pub enum Job {
         /// 65 bytes: r, s, v.
         signature: Bytes,
     },
+    /// Path B, step 1: `SourceLock.lockWithAuthorization(params, payer, token, amount, validAfter,
+    /// validBefore, v, r, s, "")` on a customer chain, from the note the customer signed.
+    SourceLock {
+        params: SourceLockParams,
+        payer: Address,
+        token: Address,
+        amount: Amount,
+        valid_after: u64,
+        valid_before: u64,
+        /// `lockIdFor(params, payer, token, amount)`: the note's nonce. The Relayer recomputes it.
+        lock_id: B256,
+        /// 65 bytes: r, s, v.
+        signature: Bytes,
+    },
+    /// Path B, step 3: `DestinationLock.claim(lockId, secret)` on the shop chain. The secret pays
+    /// the shop, so the Relayer sends it only to a lock that pays `merchant` at least `min_amount`.
+    DestinationClaim {
+        lock_id: B256,
+        secret: B256,
+        merchant: Address,
+        min_amount: Amount,
+        /// The source lock's expiry: the destination lock always ends before it.
+        deadline: u64,
+    },
+    /// Path B, step 6: `SourceLock.refund(lockId)` once it has timed out: the customer's tokens go
+    /// back to them. For locks Bob never filled; the Matchmaker refunds the ones he did.
+    SourceRefund { lock_id: B256 },
 }
 
 impl Job {
@@ -33,6 +60,9 @@ impl Job {
     pub const fn kind(&self) -> &'static str {
         match self {
             Job::DirectPay { .. } => "direct_pay",
+            Job::SourceLock { .. } => "source_lock",
+            Job::DestinationClaim { .. } => "destination_claim",
+            Job::SourceRefund { .. } => "source_refund",
         }
     }
 }
@@ -115,6 +145,43 @@ mod tests {
         assert_eq!(value["signature"], json!(format!("0x{}", "07".repeat(65))));
         assert_eq!(serde_json::from_value::<Job>(value).unwrap(), direct_pay());
         assert_eq!(direct_pay().kind(), "direct_pay");
+    }
+
+    #[test]
+    fn every_kind_round_trips_with_its_name() {
+        let params = SourceLockParams {
+            order_id: B256::repeat_byte(0xab),
+            receiver: address!("b0b0000000000000000000000000000000000001"),
+            min_usdc_out: Amount::from(12_036_000u64),
+            hashlock: B256::repeat_byte(0x42),
+            expiry: 1_793_915_140,
+            out_token: Address::ZERO,
+        };
+        let jobs = [
+            Job::SourceLock {
+                params,
+                payer: address!("a917000000000000000000000000000000000001"),
+                token: address!("036CbD53842c5426634e7929541eC2318f3dCF7e"),
+                amount: Amount::from(12_036_000u64),
+                valid_after: 1_793_913_940,
+                valid_before: 1_793_914_240,
+                lock_id: B256::repeat_byte(0x11),
+                signature: Bytes::from(vec![7u8; 65]),
+            },
+            Job::DestinationClaim {
+                lock_id: B256::repeat_byte(0x22),
+                secret: B256::repeat_byte(0x33),
+                merchant: address!("5a30000000000000000000000000000000000001"),
+                min_amount: Amount::from(12_000_000u64),
+                deadline: 1_793_915_140,
+            },
+            Job::SourceRefund { lock_id: B256::repeat_byte(0x44) },
+        ];
+        for job in jobs {
+            let value = serde_json::to_value(&job).unwrap();
+            assert_eq!(value["kind"], job.kind());
+            assert_eq!(serde_json::from_value::<Job>(value).unwrap(), job);
+        }
     }
 
     #[test]
