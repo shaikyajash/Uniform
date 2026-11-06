@@ -43,6 +43,7 @@ import {
 import { secretFromSignature, secretTypedData } from "@/lib/secret";
 import { useEmbedded } from "@/app/_ui/embedded";
 import { EmailLogin } from "./email-login";
+import { ScanToPay } from "./scan-to-pay";
 import { Badge } from "@/components/ui/badge";
 import { CardContent, CardHeader } from "@/components/ui/card";
 import { Separator } from "@/components/ui/separator";
@@ -67,6 +68,10 @@ import { Progress, describeLegs } from "./progress";
 
 /** How often to look at the order while a payment is on its way. */
 const ORDER_POLL_MS = 2_000;
+/** How often to look at an order not paid yet: it may be paid from a phone that scanned its QR. */
+const WAITING_POLL_MS = 4_000;
+/** Orders still waiting for a payment to start. */
+const WAITING = new Set(["created", "quoted"]);
 /** How often to look at balances while none covers the order (the customer may be topping up). */
 const BALANCE_POLL_MS = 5_000;
 /** Orders that are moving and worth following. */
@@ -131,13 +136,15 @@ export function PayCard({ orderId }: { orderId: string }) {
     };
   }, [orderId]);
 
-  // While the payment moves, follow it.
+  // While the payment moves, follow it. While it waits, look now and then: it may be paid from a
+  // phone that scanned this order's QR.
   const moving = order ? MOVING.has(order.status) : false;
+  const waiting = order ? WAITING.has(order.status) : false;
   useEffect(() => {
-    if (!moving) return;
-    const timer = setInterval(refresh, ORDER_POLL_MS);
+    if (!moving && !waiting) return;
+    const timer = setInterval(refresh, moving ? ORDER_POLL_MS : WAITING_POLL_MS);
     return () => clearInterval(timer);
-  }, [moving, refresh]);
+  }, [moving, waiting, refresh]);
 
   // Every way to pay, with what it costs and whether the wallet has it.
   const options = useMemo(() => paymentOptions(units, balances, address), [units, balances, address]);
@@ -374,6 +381,7 @@ export function PayCard({ orderId }: { orderId: string }) {
 
   const amount = trimAmount(order.amount);
   const payment = order.payment;
+  const paidHere = address !== null && order.payer?.toLowerCase() === address.toLowerCase();
   const crossChain = order.path === "crosschain";
   const secondsLeft = order.expiresAt - now;
   const expired =
@@ -441,7 +449,8 @@ export function PayCard({ orderId }: { orderId: string }) {
                 {view === "progress" && (
                   <>
                     <Progress order={order} amount={amount} />
-                    <Reveal show={order.status === "destination_locked" && !keyFits && !claimLive}>
+                    {/* Only the wallet that paid holds the key: a screen that showed the QR waits for the phone. */}
+                    <Reveal show={order.status === "destination_locked" && !keyFits && !claimLive && paidHere}>
                       <div className="grid gap-3">
                         <Notice>
                           The merchant&apos;s USDT is locked and waiting. Confirm once more to release it: this page
@@ -462,7 +471,12 @@ export function PayCard({ orderId }: { orderId: string }) {
                   <Notice>The time to pay this order has run out. Ask the merchant for a new link.</Notice>
                 )}
                 {view === "starting" && <PrimaryButton disabled>Loading…</PrimaryButton>}
-                {view === "log-in" && <EmailLogin />}
+                {view === "log-in" && (
+                  <>
+                    <EmailLogin />
+                    <ScanToPay orderId={order.orderId} />
+                  </>
+                )}
                 {view === "creating-wallet" && (
                   <WalletWait accountWallet={user?.wallet?.address ?? null} walletsReady={walletsReady} embedded={embedded} />
                 )}
