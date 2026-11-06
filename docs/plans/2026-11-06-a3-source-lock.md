@@ -12,6 +12,8 @@
 
 **Limits enforced by the contract:** lock time 5 min to 3 h · authorization valid for at most 1 h · amount fits in uint96 · non-zero receiver and hashlock · each lock id once.
 
+**After the security review:** the authorization must also end at least 15 minutes before the lock expires, its lifetime is measured from `validAfter`, and the receiver cannot be the contract or USDC. The current contract and its 25 unit tests in `contracts/` are the source of truth; the code below is the first version.
+
 ---
 
 ### Task 1: Write the failing unit tests

@@ -136,27 +136,48 @@ Rules for the Order Desk and Gas Payer (from the security review):
 - Refund signatures depend on the amount refunded so far, so sign one partial refund at a time.
 - Known limitation: only 65-byte EOA signatures (no ERC-1271 smart wallets).
 
-### SourceLock (Base Sepolia, Ethereum Sepolia)
+### SourceLock (Base Sepolia, Ethereum Sepolia) — built, USDC only
 
 ```solidity
 struct LockParams { bytes32 orderId; address receiver; uint256 minUsdcOut;
                     bytes32 hashlock; uint64 expiry; address outToken; }
 
+function lockIdFor(LockParams p, address payer, address tokenIn, uint256 amountIn) view returns (bytes32);
+// = keccak256(abi.encode(LOCK_TAG, chainid, this, p, payer, tokenIn, amountIn)); also the EIP-3009 nonce
 function lockWithAuthorization(LockParams p, address payer, address tokenIn, uint256 amountIn,
         uint256 validAfter, uint256 validBefore, uint8 v, bytes32 r, bytes32 s,
         bytes swapData) external returns (bytes32 lockId);
-// tokenIn is USDC or EURC (EIP-3009). Nonce = keccak256(abi.encode(p)), so the relayer
-// cannot change receiver, hashlock or expiry. Non-USDC input is swapped on Uniswap v4,
-// require(out >= minUsdcOut).
-function lockWithETH(LockParams p, bytes swapData) external payable returns (bytes32 lockId);
+// USDC only for now: swapData must be empty, outToken 0 or USDC (the Uniswap swap comes in A6)
 function lockFromProvider(LockParams p, uint256 usdcAmount) external returns (bytes32 lockId);
-function claim(bytes32 lockId, bytes32 secret) external;  // source redeem: to receiver, swapped to outToken if set
-function refund(bytes32 lockId) external;                 // after expiry, back to payer
+// caller's own approved USDC, used by the provider for the refund direction
+function claim(bytes32 lockId, bytes32 secret) external;  // source redeem: before expiry, to receiver
+function refund(bytes32 lockId) external;                 // at or after expiry, back to payer; anyone may call
 event Locked(bytes32 indexed lockId, bytes32 indexed orderId, address payer, address receiver,
              uint256 usdcAmount, bytes32 hashlock, uint64 expiry);
 event Claimed(bytes32 indexed lockId, bytes32 secret);
 event Refunded(bytes32 indexed lockId);
 ```
+
+Contract limits: lock time 5 min to 3 h · `validBefore - validAfter <= 1 h` · `validBefore + 15 min <= expiry` · amount fits in uint96 · receiver is not zero, the contract or USDC · each lock id once.
+
+What the customer signs (Base Sepolia shown):
+
+```
+domain  = { name: "USDC", version: "2", chainId: 84532,
+            verifyingContract: 0x036CbD53842c5426634e7929541eC2318f3dCF7e }
+types   = ReceiveWithAuthorization(address from,address to,uint256 value,uint256 validAfter,uint256 validBefore,bytes32 nonce)
+message = { from: customer, to: SourceLock, value: amountIn, validAfter: now - 60,
+            validBefore: now + 300, nonce: lockIdFor(params, customer, USDC, amountIn) }
+params.expiry = now + 1200 (demo), so validBefore + 15 min <= expiry holds
+```
+
+Rules for the Matchmaker and Gas Payer (from the security review):
+- **Trust only the exact lock you expect.** Anyone can open a lock with any orderId, receiver or hashlock, using their own USDC. Recompute `lockIdFor` from the Order Desk's quote and the customer, and accept only that lock id, emitted by our SourceLock address. Never match on orderId or hashlock alone. Then read `locks(lockId)` and check amount, receiver, hashlock and expiry.
+- Fill only with at least 15 minutes left on the source lock, and set the destination lock to expire before it.
+- Before filling, check that Circle has not blacklisted Bob (`isBlacklisted`); a blacklisted receiver cannot claim, and the customer would be refunded after Bob has paid.
+- Claim as soon as the secret appears on Whitechain; do not wait near expiry.
+- Known limit: if Circle blacklists the customer after locking, refund reverts and the USDC stays in the contract.
+- For A6 (swaps): the relayer must not choose the route. Bind `swapData` (or a route hash) into the lock id, measure the USDC received by balance difference, and open the lock with that amount.
 
 ### PayoutPool (Whitechain, AquaApp)
 
