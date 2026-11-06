@@ -59,7 +59,7 @@ Sections 1–8 are the plan as approved. This section says what was built and wh
 
 ## 3. B6: notifier and receipts
 
-- **Migration `0004_webhooks.sql`:** `webhook_log` (order, event, attempt, status code, next try, delivered).
+- **Migration `0005_webhooks.sql`:** `webhook_log` (order, event, attempt, status code, next try, delivered).
 - **Order Desk:**
   - writes one webhook row whenever an order becomes `paid`, `returned` or `expired`, in the same transaction as the status change;
   - the refund sweeper also marks unpaid orders `expired` after their time runs out.
