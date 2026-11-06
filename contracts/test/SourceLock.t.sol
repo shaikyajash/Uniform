@@ -4,6 +4,7 @@ pragma solidity 0.8.30;
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {SourceLock} from "../src/SourceLock.sol";
 import {MockEIP3009} from "./mocks/MockEIP3009.sol";
+import {MockFeeToken, MockWbtc} from "./mocks/MockERC20s.sol";
 import {Sign3009} from "./utils/Sign3009.sol";
 
 contract SourceLockTest is Sign3009 {
@@ -362,25 +363,88 @@ contract SourceLockTest is Sign3009 {
         _lockEurc(p, 5e6, a);
     }
 
-    function test_directLockOfEurcAndUnsupportedTokens() public {
+    function test_directLockOfEurcAndAddressesWithoutCode() public {
         SourceLock.LockParams memory p = _params(0);
         vm.startPrank(customer);
         eurc.approve(address(lock), 3e6);
         bytes32 id = lock.lock(p, address(eurc), 3e6);
-        MockEIP3009 other = new MockEIP3009();
-        vm.expectRevert(abi.encodeWithSelector(SourceLock.UnsupportedToken.selector, address(other)));
-        lock.lock(p, address(other), 1e6);
+        address noCode = makeAddr("noCode");
+        vm.expectRevert(abi.encodeWithSelector(SourceLock.UnsupportedToken.selector, noCode));
+        lock.lock(p, noCode, 1e6);
+        vm.expectRevert(SourceLock.ZeroToken.selector);
+        lock.lock(p, address(0), 1e6);
         vm.stopPrank();
         lock.claim(id, secret);
         assertEq(eurc.balanceOf(bob), 3e6);
     }
 
-    function test_rejectsEitherAllowedTokenAsReceiver() public {
-        SourceLock.LockParams memory p = _params(1e6);
-        p.receiver = address(eurc);
-        Auth memory a = _sign(p, 1e6);
-        vm.expectRevert(abi.encodeWithSelector(SourceLock.InvalidReceiver.selector, address(eurc)));
-        _lock(p, 1e6, a);
+    function test_anyErc20LockThenClaimPaysReceiver() public {
+        MockWbtc wbtc = new MockWbtc();
+        wbtc.mint(customer, 1e8);
+        SourceLock.LockParams memory p = _params(12e6);
+        vm.startPrank(customer);
+        wbtc.approve(address(lock), 15_000);
+        bytes32 id = lock.lock(p, address(wbtc), 15_000);
+        vm.stopPrank();
+        assertEq(id, lock.lockIdFor(p, customer, address(wbtc), 15_000));
+        (address payer,, SourceLock.State state,, uint96 amount,,, address token) = lock.locks(id);
+        assertEq(payer, customer);
+        assertEq(uint8(state), uint8(SourceLock.State.Open));
+        assertEq(amount, 15_000);
+        assertEq(token, address(wbtc));
+        assertEq(wbtc.balanceOf(address(lock)), 15_000);
+
+        lock.claim(id, secret);
+        assertEq(wbtc.balanceOf(bob), 15_000);
+        assertEq(wbtc.balanceOf(address(lock)), 0);
+    }
+
+    function test_anyErc20RefundsTheSameTokenToPayer() public {
+        MockWbtc wbtc = new MockWbtc();
+        wbtc.mint(customer, 1e8);
+        SourceLock.LockParams memory p = _params(0);
+        vm.startPrank(customer);
+        wbtc.approve(address(lock), 15_000);
+        bytes32 id = lock.lock(p, address(wbtc), 15_000);
+        vm.stopPrank();
+        vm.warp(p.expiry);
+        lock.refund(id);
+        assertEq(wbtc.balanceOf(customer), 1e8);
+        assertEq(wbtc.balanceOf(address(lock)), 0);
+    }
+
+    function test_feeOnTransferTokenReverts() public {
+        MockFeeToken fee = new MockFeeToken();
+        fee.mint(customer, 1000);
+        SourceLock.LockParams memory p = _params(0);
+        vm.startPrank(customer);
+        fee.approve(address(lock), 1000);
+        vm.expectRevert(abi.encodeWithSelector(SourceLock.AmountNotReceived.selector, 1000, 990));
+        lock.lock(p, address(fee), 1000);
+        vm.stopPrank();
+        assertEq(fee.balanceOf(customer), 1000);
+    }
+
+    function test_rejectsTheLockedTokenAsReceiver() public {
+        MockWbtc wbtc = new MockWbtc();
+        wbtc.mint(customer, 1e8);
+        SourceLock.LockParams memory p = _params(0);
+        p.receiver = address(wbtc);
+        vm.startPrank(customer);
+        wbtc.approve(address(lock), 1);
+        vm.expectRevert(abi.encodeWithSelector(SourceLock.InvalidReceiver.selector, address(wbtc)));
+        lock.lock(p, address(wbtc), 1);
+        vm.stopPrank();
+    }
+
+    function test_authorizationPathTakesNoteTokensOnly() public {
+        MockWbtc wbtc = new MockWbtc();
+        SourceLock.LockParams memory p = _params(0);
+        Auth memory a = _sign(p, 1);
+        vm.expectRevert(abi.encodeWithSelector(SourceLock.UnsupportedToken.selector, address(wbtc)));
+        lock.lockWithAuthorization(p, customer, address(wbtc), 1, a.validAfter, a.validBefore, a.v, a.r, a.s, "");
+        assertTrue(lock.isNoteToken(address(usdc)) && lock.isNoteToken(address(eurc)));
+        assertFalse(lock.isNoteToken(address(wbtc)));
     }
 
     function test_constructorRejectsBadTokens() public {
