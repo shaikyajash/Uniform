@@ -17,9 +17,7 @@ const KEY_PREFIX: &str = "sk_test_";
 
 /// A new random API key and the hash to store for it.
 pub fn new_api_key() -> (String, String) {
-    let mut secret = [0u8; 32];
-    getrandom::fill(&mut secret).expect("the operating system has no random source");
-    let key = format!("{KEY_PREFIX}{}", hex::encode(secret));
+    let key = format!("{KEY_PREFIX}{}", hex::encode(crate::random::bytes32()));
     let hash = hash_api_key(&key);
     (key, hash)
 }

@@ -61,6 +61,35 @@ impl FromStr for Amount {
     }
 }
 
+impl Amount {
+    /// Reads a human amount: `"12.036"` with 6 decimals is `12036000`.
+    /// At most `decimals` digits after the dot; no sign, no exponent, no `"12."` or `".5"`.
+    pub fn from_decimal(text: &str, decimals: u8) -> Result<Amount, InvalidAmount> {
+        let invalid = || InvalidAmount(text.to_owned());
+        let (whole, fraction) = text.split_once('.').unwrap_or((text, ""));
+        let is_digits = |part: &str| part.bytes().all(|byte| byte.is_ascii_digit());
+        if whole.is_empty() || !is_digits(whole) || !is_digits(fraction) || fraction.len() > usize::from(decimals) {
+            return Err(invalid());
+        }
+        if text.contains('.') && fraction.is_empty() {
+            return Err(invalid());
+        }
+        let padded = format!("{whole}{fraction:0<width$}", width = usize::from(decimals));
+        padded.parse().map_err(|_| invalid())
+    }
+
+    /// Writes a human amount with every decimal: `12036000` with 6 decimals is `"12.036000"`.
+    pub fn to_decimal(self, decimals: u8) -> String {
+        let decimals = usize::from(decimals);
+        let digits = format!("{:0>width$}", self.0, width = decimals + 1);
+        if decimals == 0 {
+            return digits;
+        }
+        let (whole, fraction) = digits.split_at(digits.len() - decimals);
+        format!("{whole}.{fraction}")
+    }
+}
+
 impl Serialize for Amount {
     fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         serializer.collect_str(self)
@@ -100,5 +129,36 @@ mod tests {
         }
         let too_big = format!("1{}", "0".repeat(80));
         assert_eq!(too_big.parse::<Amount>(), Err(InvalidAmount(too_big.clone())));
+    }
+
+    #[test]
+    fn decimal_text_reads_into_smallest_units() {
+        for (text, units) in [
+            ("12", 12_000_000u64),
+            ("12.0", 12_000_000),
+            ("12.036", 12_036_000),
+            ("12.000000", 12_000_000),
+            ("0.000001", 1),
+            ("0", 0),
+        ] {
+            assert_eq!(Amount::from_decimal(text, 6), Ok(Amount::from(units)), "{text}");
+        }
+    }
+
+    #[test]
+    fn bad_decimal_text_is_rejected() {
+        for bad in ["", ".5", "12.", "12.0000001", "-1", "1e6", "1,5", " 1", "0x10", "1.2.3"] {
+            assert!(Amount::from_decimal(bad, 6).is_err(), "{bad:?} should be rejected");
+        }
+    }
+
+    #[test]
+    fn smallest_units_write_as_decimal_text() {
+        assert_eq!(Amount::from(12_036_000u64).to_decimal(6), "12.036000");
+        assert_eq!(Amount::from(1u64).to_decimal(6), "0.000001");
+        assert_eq!(Amount::from(0u64).to_decimal(6), "0.000000");
+        assert_eq!(Amount::from(5u64).to_decimal(0), "5");
+        let amount = Amount::from_decimal("98.76", 6).unwrap();
+        assert_eq!(Amount::from_decimal(&amount.to_decimal(6), 6), Ok(amount));
     }
 }
