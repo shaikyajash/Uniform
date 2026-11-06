@@ -69,11 +69,11 @@ pub struct OrdersPage {
 const ORDERS_SQL: &str = "
     SELECT o.id AS order_id, o.reference, o.amount::text AS amount, o.status, o.path, o.payer, o.created_at, o.paid_at,
            COALESCE((SELECT SUM((j.args->>'amount')::numeric) FROM relayer_jobs j
-                     WHERE j.order_id = o.id AND j.kind = 'direct_refund' AND j.status = 'confirmed'), 0)::text AS refunded,
+                     WHERE j.order_id = o.id AND j.kind IN ('direct_refund', 'transfer_refund') AND j.status = 'confirmed'), 0)::text AS refunded,
            r.status AS refund_status, r.last_error AS refund_error
     FROM orders o
     LEFT JOIN LATERAL (SELECT status, last_error FROM relayer_jobs
-                       WHERE order_id = o.id AND kind = 'direct_refund' AND status <> 'confirmed'
+                       WHERE order_id = o.id AND kind IN ('direct_refund', 'transfer_refund') AND status <> 'confirmed'
                        ORDER BY id DESC LIMIT 1) r ON TRUE
     WHERE o.merchant_id = $1 AND ($2::text[] IS NULL OR o.status = ANY($2)) AND o.created_at < $3
     ORDER BY o.created_at DESC, o.id
