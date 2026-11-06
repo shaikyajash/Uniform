@@ -10,7 +10,7 @@
 
 Tested on Base and Whitechain forks first, then once live. A source lock Bob never fills is refunded by the Relayer after it times out.
 
-**Not in this task:** Uniswap, EURC and ETH (EURC is already accepted by A's SourceLock, but the quote here is USDC only), Ethereum Sepolia live (its SourceLock is not deployed; the Relayer picks it up when its address is in `chains.json`), split payments (Path C), the pay page (B5), shop refunds on the cross-chain path (A9).
+**Not in this task:** Uniswap, EURC and ETH (EURC is already accepted by A's SourceLock, but the quote here is USDC only), split payments (Path C), the pay page (B5), shop refunds on the cross-chain path (A9).
 
 ## 1. The two locks and the six steps
 
@@ -71,8 +71,12 @@ The customer has no gas on any chain, so steps 1, 3 and the uncovered half of 6 
 - Writes a `destination_claim` job with the expected destination lock id, the shop's address and the order amount.
 
 ### 4d. Source refunds (Order Desk)
-- Every 30 s: for each leg that our Relayer locked, that is not claimed or returned, and whose lock is 2 minutes past expiry, write one `source_refund` job.
-- The 2 minutes give the Matchmaker its turn first; whoever loses the race finds the lock already refunded and sends nothing.
+- Every `REFUND_SWEEP_SECONDS` (default 5): for each leg that our Relayer locked, that is not claimed or returned, and whose lock is `REFUND_GRACE_SECONDS` (default 30) past expiry, write a `source_refund` job.
+- The grace gives the Matchmaker its turn first; whoever loses the race finds the lock already refunded and sends nothing.
+- A failed refund job is written again 2 minutes later, for as long as the lock stays open. A refusal costs no gas, and the Relayer dry-runs before it sends.
+- No refund is written while our claim for the order may still be mined: if it lands, the shop is paid and the lock is Bob's.
+- The shop's daily gas budget can stop only a payment or a lock, while the money is still in the customer's wallet. A claim or a refund finishes money already locked, so it is always sent.
+- When our claim or refund is mined, the Relayer marks the order `paid` or `returned` itself, so the order is right even while the Matchmaker is down.
 
 ### 4e. Relayer: several chains, four jobs
 - Runs one worker per chain: Whitechain, plus each customer chain whose SourceLock address is set. Each chain has its own nonces, gas budget and RPC (`RPC_<chainId>`, with `SHOP_CHAIN_RPC` kept for Whitechain).
