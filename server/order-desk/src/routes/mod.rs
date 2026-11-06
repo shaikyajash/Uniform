@@ -41,6 +41,8 @@ pub struct AppState {
     /// Bob, who fills cross-chain payments (`PROVIDER_ADDRESS`): the receiver of every source lock.
     /// `None` turns the cross-chain path off.
     pub provider: Option<Address>,
+    /// USD prices of tokens paid through a Calibur batch (WETH, WBTC, ...).
+    pub prices: Arc<crate::prices::Prices>,
 }
 
 impl FromRef<AppState> for PgPool {
@@ -172,6 +174,7 @@ pub mod test_support {
             internal_token: INTERNAL_TOKEN.into(),
             max_order: common::amount::Amount::from(100_000_000u64),
             provider: Some(PROVIDER),
+            prices: Arc::new(crate::prices::Prices::fixed(&[("bitcoin", 100_000_000_000), ("ethereum", 4_000_000_000)])),
         };
         TestApp { app: router(state), pool, key }
     }
