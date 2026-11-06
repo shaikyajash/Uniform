@@ -229,7 +229,7 @@ mod tests {
 
         let base = chains.by_id(84532).unwrap();
         assert_eq!(base.role, Role::Customer);
-        assert_eq!(base.contracts.source_lock, Some(address!("02dF2659B5B4956EAFEe3293584C2aaefC114871")));
+        assert_eq!(base.contracts.source_lock, Some(address!("3D79F7D2366D26c7325F58bEADbf7ECcB1d13E01")));
 
         assert_eq!(chains.customer_chains().count(), 2);
         assert_eq!(chains.timeouts_seconds.source_lock, 1200);
@@ -253,7 +253,7 @@ mod tests {
     #[test]
     fn not_deployed_is_none() {
         // A contract not deployed yet is "" in the file.
-        let file = REPO_FILE.replace("0x3aCDE874Eeb36dD28507B5b1FF29219Ba262F5d9", "");
+        let file = REPO_FILE.replace("0x7ff2630DD4620d7052eDD52B89e9248Bab878CB1", "");
         let chains = Chains::from_json(&file).unwrap();
         assert_eq!(chains.by_id(11_155_111).unwrap().contracts.source_lock, None);
     }
