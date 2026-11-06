@@ -146,7 +146,7 @@ struct Watched {
     chain_id: u64,
     provider: DynProvider,
     confirmations: u64,
-    /// Customer chains are rollups: read up to the "safe" block instead of a few confirmations.
+    /// Read up to the "safe" block instead of `confirmations` (rollup customer chains only).
     use_safe_tag: bool,
     contracts: Vec<(Address, Source)>,
     /// Block range used for `eth_getLogs`: halved when a provider refuses a range, grown back after.
@@ -248,7 +248,8 @@ impl Worker {
                     chain_id,
                     provider,
                     confirmations,
-                    use_safe_tag: role == Role::Customer,
+                    use_safe_tag: role == Role::Customer
+                        && config.safe_tag_chains.contains(&chain_id),
                     contracts,
                     range: AtomicU64::new(config.max_block_range),
                     ceiling: AtomicU64::new(config.max_block_range),
