@@ -390,6 +390,138 @@ contract SourceLockTest is Sign3009 {
         new SourceLock(IERC20(address(usdc)), IERC20(address(usdc)));
     }
 
+    function test_amountAboveUint96IsRejected() public {
+        uint256 huge = uint256(type(uint96).max) + 1;
+        usdc.mint(customer, huge);
+        SourceLock.LockParams memory p = _params(0);
+        vm.startPrank(customer);
+        usdc.approve(address(lock), huge);
+        vm.expectRevert(abi.encodeWithSelector(SourceLock.AmountTooLarge.selector, huge));
+        lock.lock(p, address(usdc), huge);
+        vm.stopPrank();
+    }
+
+    function test_rejectsAnOutTokenOtherThanUsdc() public {
+        SourceLock.LockParams memory p = _params(1e6);
+        p.outToken = address(eurc);
+        Auth memory a = _sign(p, 1e6);
+        vm.expectRevert(abi.encodeWithSelector(SourceLock.UnsupportedToken.selector, address(eurc)));
+        _lock(p, 1e6, a);
+    }
+
+    function test_exactLimitsAreAccepted() public {
+        // Lock time of exactly 3 hours through lock(); exactly 5 minutes too.
+        SourceLock.LockParams memory p = _params(0);
+        vm.startPrank(customer);
+        usdc.approve(address(lock), 2e6);
+        p.expiry = uint64(block.timestamp + 3 hours);
+        lock.lock(p, address(usdc), 1e6);
+        p.expiry = uint64(block.timestamp + 5 minutes);
+        lock.lock(p, address(usdc), 1e6);
+        vm.stopPrank();
+
+        // An authorization of exactly 1 hour that ends exactly 15 minutes before expiry.
+        SourceLock.LockParams memory q = _params(1e6);
+        q.expiry = uint64(block.timestamp + 1 hours + 15 minutes);
+        bytes32 nonce = lock.lockIdFor(q, customer, address(usdc), 1e6);
+        Auth memory a =
+            signReceive(address(usdc), customerKey, address(lock), 1e6, block.timestamp - 1, block.timestamp - 1 + 1 hours, nonce);
+        q.expiry = uint64(a.validBefore + 15 minutes);
+        nonce = lock.lockIdFor(q, customer, address(usdc), 1e6);
+        a = signReceive(address(usdc), customerKey, address(lock), 1e6, block.timestamp - 1, block.timestamp - 1 + 1 hours, nonce);
+        _lock(q, 1e6, a);
+    }
+
+    function test_aSignatureOnlyWorksForItsSigner() public {
+        // The Gas Payer names someone else as payer: the nonce and the signer no longer match.
+        SourceLock.LockParams memory p = _params(5e6);
+        Auth memory a = _sign(p, 5e6);
+        address other = makeAddr("other");
+        usdc.mint(other, 5e6);
+        vm.prank(gasPayer);
+        vm.expectRevert("invalid signature");
+        lock.lockWithAuthorization(p, other, address(usdc), 5e6, a.validAfter, a.validBefore, a.v, a.r, a.s, "");
+    }
+
+    function test_directLockChecksReuseAndTheUsdcMinimum() public {
+        SourceLock.LockParams memory p = _params(2e6);
+        vm.startPrank(customer);
+        usdc.approve(address(lock), 10e6);
+        vm.expectRevert(abi.encodeWithSelector(SourceLock.BelowMinimum.selector, 1e6, 2e6));
+        lock.lock(p, address(usdc), 1e6);
+        bytes32 id = lock.lock(p, address(usdc), 2e6);
+        vm.expectRevert(abi.encodeWithSelector(SourceLock.LockExists.selector, id));
+        lock.lock(p, address(usdc), 2e6);
+        vm.stopPrank();
+    }
+
+    function test_aThirdPartyCanClaimButOnlyTheReceiverIsPaid() public {
+        SourceLock.LockParams memory p = _params(12e6);
+        bytes32 id = _lock(p, 12e6, _sign(p, 12e6));
+        address stranger = makeAddr("stranger");
+        vm.prank(stranger);
+        lock.claim(id, secret);
+        assertEq(usdc.balanceOf(bob), 12e6);
+        assertEq(usdc.balanceOf(stranger), 0);
+    }
+
+    function test_payerRacingTheRelayerOpensTheSameLockOnce() public {
+        SourceLock.LockParams memory p = _params(5e6);
+        Auth memory a = _sign(p, 5e6);
+        vm.startPrank(customer);
+        usdc.approve(address(lock), 5e6);
+        bytes32 id = lock.lock(p, address(usdc), 5e6);
+        vm.stopPrank();
+        vm.expectRevert(abi.encodeWithSelector(SourceLock.LockExists.selector, id));
+        _lock(p, 5e6, a);
+        vm.warp(p.expiry);
+        lock.refund(id);
+        vm.expectRevert();
+        _lock(p, 5e6, a);
+        (,, SourceLock.State state,,,,,) = lock.locks(id);
+        assertEq(uint8(state), uint8(SourceLock.State.Refunded));
+    }
+
+    /// Any mix of USDC and EURC locks, claimed or refunded, pays each party exactly its own token
+    /// and leaves nothing behind.
+    function testFuzz_eachTokenStaysExact(uint8 count, uint256 seed) public {
+        count = uint8(bound(count, 1, 12));
+        bytes32[] memory ids = new bytes32[](count);
+        bool[] memory isEurc = new bool[](count);
+        uint256[] memory amounts = new uint256[](count);
+        bool[] memory claimIt = new bool[](count);
+        uint256 bobUsdc;
+        uint256 bobEurc;
+        for (uint256 k; k < count; k++) {
+            uint256 r = uint256(keccak256(abi.encode(seed, k)));
+            isEurc[k] = r % 2 == 0;
+            amounts[k] = 1 + (r >> 8) % 3e6;
+            claimIt[k] = (r >> 64) % 2 == 0;
+            SourceLock.LockParams memory p = _params(0);
+            p.orderId = bytes32(k);
+            ids[k] = isEurc[k]
+                ? _lockEurc(p, amounts[k], _signEurc(p, amounts[k]))
+                : _lock(p, amounts[k], _sign(p, amounts[k]));
+            if (claimIt[k]) {
+                if (isEurc[k]) bobEurc += amounts[k];
+                else bobUsdc += amounts[k];
+            }
+        }
+        for (uint256 k; k < count; k++) {
+            if (claimIt[k]) lock.claim(ids[k], secret);
+        }
+        vm.warp(block.timestamp + 20 minutes);
+        for (uint256 k; k < count; k++) {
+            if (!claimIt[k]) lock.refund(ids[k]);
+        }
+        assertEq(usdc.balanceOf(address(lock)), 0);
+        assertEq(eurc.balanceOf(address(lock)), 0);
+        assertEq(usdc.balanceOf(bob), bobUsdc);
+        assertEq(eurc.balanceOf(bob), bobEurc);
+        assertEq(usdc.balanceOf(customer), 50e6 - bobUsdc);
+        assertEq(eurc.balanceOf(customer), 50e6 - bobEurc);
+    }
+
     function testFuzz_onlyTheSecretOpensTheLock(bytes32 guess) public {
         vm.assume(guess != secret);
         SourceLock.LockParams memory p = _params(12e6);
