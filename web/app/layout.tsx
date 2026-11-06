@@ -12,9 +12,16 @@ export const metadata: Metadata = {
   description: "Stablecoin checkout. Shops receive USDT on Whitechain, customers pay no gas.",
 };
 
+// Inside the checkout widget's card (an iframe on a shop's page) the site's nav and side lines are
+// hidden. Set before the first paint, so they never flash.
+const MARK_EMBEDDED = "try{if(self!==top)document.documentElement.dataset.embedded=''}catch(e){document.documentElement.dataset.embedded=''}";
+
 export default function RootLayout({ children }: LayoutProps<"/">) {
   return (
-    <html lang="en" className={`${geist.variable} ${geistMono.variable} ${display.variable}`}>
+    <html lang="en" className={`${geist.variable} ${geistMono.variable} ${display.variable}`} suppressHydrationWarning>
+      <head>
+        <script dangerouslySetInnerHTML={{ __html: MARK_EMBEDDED }} />
+      </head>
       <body>
         <Providers>{children}</Providers>
       </body>

@@ -1,7 +1,12 @@
-//! API keys: how a shop's server proves which shop it is.
+//! Who is calling: a shop's server (API key) or a shop's owner in the dashboard (session).
 //!
-//! The key is shown to the shop once. Only its sha256 is stored (`merchants.api_key_hash`), so a
-//! leaked database does not leak working keys.
+//! - **API key** `sk_test_...`: shown to the shop once. Only its sha256 is stored
+//!   (`merchants.api_key_hash`), so a leaked database does not leak working keys.
+//! - **Session** `sess_...`: given after the owner signs in with the payout wallet
+//!   (`routes/login.rs`). Also stored only as a sha256, and it runs out.
+//!
+//! [`Shop`] accepts either. [`Owner`] accepts only a session: changing settings and refunding are
+//! for the person holding the payout wallet, not for whoever has the server's key.
 
 use alloy::hex;
 use axum::{
@@ -14,6 +19,7 @@ use sqlx::PgPool;
 use crate::error::ApiError;
 
 const KEY_PREFIX: &str = "sk_test_";
+const SESSION_PREFIX: &str = "sess_";
 
 /// A new random API key and the hash to store for it.
 pub fn new_api_key() -> (String, String) {
@@ -26,11 +32,27 @@ pub fn hash_api_key(key: &str) -> String {
     hex::encode(Sha256::digest(key.as_bytes()))
 }
 
-/// The shop behind a request's `Authorization: Bearer sk_test_...` header.
-/// Add it as a handler argument; a missing or unknown key answers 401 before the handler runs.
+/// A new random session token and the hash to store for it.
+pub fn new_session_token() -> (String, String) {
+    let token = format!("{SESSION_PREFIX}{}", hex::encode(crate::random::bytes32()));
+    let hash = hash_api_key(&token);
+    (token, hash)
+}
+
+/// The shop behind a request's `Authorization: Bearer ...` header: its API key or a dashboard
+/// session. Add it as a handler argument; a missing or unknown credential answers 401 before the
+/// handler runs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Shop {
     pub merchant_id: i64,
+}
+
+/// The shop's owner, signed in to the dashboard with the payout wallet. Never an API key.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Owner {
+    pub merchant_id: i64,
+    /// sha256 of the session token, to sign out.
+    pub session_hash: String,
 }
 
 impl<S> FromRequestParts<S> for Shop
@@ -41,19 +63,50 @@ where
     type Rejection = ApiError;
 
     async fn from_request_parts(parts: &mut Parts, state: &S) -> Result<Self, Self::Rejection> {
-        let key = bearer_token(parts).ok_or_else(ApiError::unauthorized)?;
+        let token = bearer_token(parts).ok_or_else(ApiError::unauthorized)?;
         let pool = PgPool::from_ref(state);
+        if token.starts_with(SESSION_PREFIX) {
+            let owner = session_owner(&pool, token).await?;
+            return Ok(Shop { merchant_id: owner.merchant_id });
+        }
+        if !token.starts_with(KEY_PREFIX) {
+            return Err(ApiError::unauthorized());
+        }
         let merchant_id: Option<i64> = sqlx::query_scalar("SELECT id FROM merchants WHERE api_key_hash = $1")
-            .bind(hash_api_key(key))
+            .bind(hash_api_key(token))
             .fetch_optional(&pool)
             .await?;
         merchant_id.map(|merchant_id| Shop { merchant_id }).ok_or_else(ApiError::unauthorized)
     }
 }
 
+impl<S> FromRequestParts<S> for Owner
+where
+    PgPool: FromRef<S>,
+    S: Send + Sync,
+{
+    type Rejection = ApiError;
+
+    async fn from_request_parts(parts: &mut Parts, state: &S) -> Result<Self, Self::Rejection> {
+        let token = bearer_token(parts).filter(|token| token.starts_with(SESSION_PREFIX));
+        session_owner(&PgPool::from_ref(state), token.ok_or_else(ApiError::unauthorized)?).await
+    }
+}
+
+async fn session_owner(pool: &PgPool, token: &str) -> Result<Owner, ApiError> {
+    let session_hash = hash_api_key(token);
+    let merchant_id: Option<i64> =
+        sqlx::query_scalar("SELECT merchant_id FROM sessions WHERE token_hash = $1 AND expires_at > $2")
+            .bind(&session_hash)
+            .bind(crate::routes::now())
+            .fetch_optional(pool)
+            .await?;
+    merchant_id.map(|merchant_id| Owner { merchant_id, session_hash }).ok_or_else(ApiError::unauthorized)
+}
+
 fn bearer_token(parts: &Parts) -> Option<&str> {
     let value = parts.headers.get(AUTHORIZATION)?.to_str().ok()?;
-    value.strip_prefix("Bearer ").filter(|key| key.starts_with(KEY_PREFIX))
+    value.strip_prefix("Bearer ")
 }
 
 #[cfg(test)]
@@ -97,6 +150,33 @@ mod tests {
         let (key, hash) = new_api_key();
         let id = add_shop(&pool, &hash).await;
         assert_eq!(shop_for(&pool, Some(&format!("Bearer {key}"))).await, Ok(Shop { merchant_id: id }));
+    }
+
+    async fn owner_for(pool: &PgPool, header: &str) -> Result<i64, StatusCode> {
+        let request = Request::builder().uri("/v1/shop").header(AUTHORIZATION, header);
+        let (mut parts, ()) = request.body(()).unwrap().into_parts();
+        Owner::from_request_parts(&mut parts, pool).await.map(|owner| owner.merchant_id).map_err(|error| error.status)
+    }
+
+    #[sqlx::test]
+    async fn a_live_session_is_the_owner_and_an_api_key_is_not(pool: PgPool) {
+        let (key, hash) = new_api_key();
+        let id = add_shop(&pool, &hash).await;
+        let (token, token_hash) = new_session_token();
+        let (old, old_hash) = new_session_token();
+        for (hash, expires_at) in [(&token_hash, i64::MAX), (&old_hash, 1)] {
+            sqlx::query("INSERT INTO sessions (token_hash, merchant_id, created_at, expires_at) VALUES ($1, $2, 1, $3)")
+                .bind(hash)
+                .bind(id)
+                .bind(expires_at)
+                .execute(&pool)
+                .await
+                .unwrap();
+        }
+        assert_eq!(owner_for(&pool, &format!("Bearer {token}")).await, Ok(id));
+        assert_eq!(shop_for(&pool, Some(&format!("Bearer {token}"))).await, Ok(Shop { merchant_id: id }));
+        assert_eq!(owner_for(&pool, &format!("Bearer {key}")).await, Err(StatusCode::UNAUTHORIZED), "an API key");
+        assert_eq!(owner_for(&pool, &format!("Bearer {old}")).await, Err(StatusCode::UNAUTHORIZED), "expired");
     }
 
     #[sqlx::test]

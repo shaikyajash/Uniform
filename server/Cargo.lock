@@ -3818,6 +3818,16 @@ dependencies = [
 [[package]]
 name = "notifier"
 version = "0.1.0"
+dependencies = [
+ "alloy",
+ "common",
+ "hmac 0.13.0",
+ "reqwest 0.13.5",
+ "serde_json",
+ "sha2 0.11.1",
+ "sqlx",
+ "tokio",
+]
 
 [[package]]
 name = "num-bigint"

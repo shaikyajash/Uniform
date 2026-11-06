@@ -33,6 +33,14 @@ sol! {
                      uint256 validBefore, uint8 v, bytes32 r, bytes32 s) external returns (bytes32 paymentId);
         event Paid(bytes32 indexed paymentId, bytes32 indexed orderId, address indexed merchant,
                    address payer, uint256 amount);
+        function refund(bytes32 paymentId, uint256 amount, uint256 validAfter, uint256 validBefore, uint8 v,
+                        bytes32 r, bytes32 s) external;
+        function payments(bytes32 paymentId) external view returns (address payer, uint96 amount,
+            address merchant, uint96 refunded, bytes32 orderId);
+        function refundNonceFor(bytes32 paymentId, uint256 amount, uint256 refundedBefore)
+            external view returns (bytes32);
+        event Refunded(bytes32 indexed paymentId, bytes32 indexed orderId, address indexed payer, uint256 amount,
+                       uint256 totalRefunded);
     }
 
     /// USDT on Whitechain, and USDC or EURC on customer chains: the EIP-3009 parts.
@@ -162,6 +170,22 @@ pub struct LockCall {
     pub s: B256,
 }
 
+/// `DirectPay.refund`'s arguments, from the note the shop signed, with what the note was made against.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RefundCall {
+    pub payment_id: B256,
+    pub merchant: Address,
+    pub amount: Amount,
+    pub refunded_before: Amount,
+    pub valid_after: u64,
+    pub valid_before: u64,
+    /// `refundNonceFor(paymentId, amount, refundedBefore)`: the note's nonce.
+    pub nonce: B256,
+    pub v: u8,
+    pub r: B256,
+    pub s: B256,
+}
+
 /// `DestinationLock.claim`, and what the lock must promise before the secret is sent.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ClaimCall {
@@ -180,6 +204,7 @@ pub enum Call {
     SourceLock(LockCall),
     DestinationClaim(ClaimCall),
     SourceRefund { lock_id: B256 },
+    DirectRefund(RefundCall),
 }
 
 impl Call {
@@ -225,17 +250,52 @@ impl Call {
                 })
             }
             Job::SourceRefund { lock_id } => Call::SourceRefund { lock_id: *lock_id },
+            Job::DirectRefund {
+                order_id: _,
+                payment_id,
+                merchant,
+                amount,
+                refunded_before,
+                valid_after,
+                valid_before,
+                nonce,
+                signature,
+            } => {
+                let (v, r, s) = split_signature(signature)?;
+                Call::DirectRefund(RefundCall {
+                    payment_id: *payment_id,
+                    merchant: *merchant,
+                    amount: *amount,
+                    refunded_before: *refunded_before,
+                    valid_after: *valid_after,
+                    valid_before: *valid_before,
+                    nonce: *nonce,
+                    v,
+                    r,
+                    s,
+                })
+            }
         })
     }
 
-    /// What marks this call as done on chain, by anyone: the note's nonce (a payment or a lock),
-    /// or the lock id (a claim or a refund). Also the indexed topic of the log it emits.
+    /// What marks this call as done on chain, by anyone: the note's nonce (a payment, a lock or a
+    /// shop refund), or the lock id (a claim or a lock refund).
     pub fn done_id(&self) -> B256 {
         match self {
             Call::DirectPay(call) => call.nonce,
             Call::SourceLock(call) => call.lock_id,
             Call::DestinationClaim(call) => call.lock_id,
             Call::SourceRefund { lock_id } => *lock_id,
+            Call::DirectRefund(call) => call.nonce,
+        }
+    }
+
+    /// The first indexed topic of the log this call emits. The done id, except for a shop refund,
+    /// whose `Refunded` log is under the payment id.
+    pub fn log_topic(&self) -> B256 {
+        match self {
+            Call::DirectRefund(call) => call.payment_id,
+            _ => self.done_id(),
         }
     }
 
@@ -246,14 +306,16 @@ impl Call {
             Call::SourceLock(call) => Some(call.valid_before),
             Call::DestinationClaim(call) => Some(call.deadline),
             Call::SourceRefund { .. } => None,
+            Call::DirectRefund(call) => Some(call.valid_before),
         }
     }
 
-    /// Whether the shop's daily gas budget can stop this call. It can stop only a call that starts
-    /// a payment, while the customer's money is still in their wallet. A claim or a refund finishes
-    /// money already locked, so it is sent even when the shop has spent its budget.
+    /// Whether the shop's daily gas budget can stop this call. It can stop a call that starts a
+    /// payment, while the customer's money is still in their wallet, and a shop's own refund. A
+    /// claim or a lock refund finishes money already locked, so it is sent even when the shop has
+    /// spent its budget.
     pub fn uses_shop_budget(&self) -> bool {
-        matches!(self, Call::DirectPay(_) | Call::SourceLock(_))
+        matches!(self, Call::DirectPay(_) | Call::SourceLock(_) | Call::DirectRefund(_))
     }
 
     /// The amount checked against the Relayer's order limit, in 6-decimal units. A lock carries
@@ -262,7 +324,7 @@ impl Call {
         match self {
             Call::DirectPay(call) => Some(call.amount.0),
             Call::SourceLock(call) => Some(call.amount.0 * U256::from(100u64) / U256::from(101u64)),
-            Call::DestinationClaim(_) | Call::SourceRefund { .. } => None,
+            Call::DestinationClaim(_) | Call::SourceRefund { .. } | Call::DirectRefund(_) => None,
         }
     }
 
@@ -274,7 +336,10 @@ impl Call {
 
     /// For messages: what runs out at the deadline.
     pub fn what_runs_out(&self) -> &'static str {
-        if self.reopens_order() { "the note" } else { "the lock" }
+        match self {
+            Call::DirectPay(_) | Call::SourceLock(_) | Call::DirectRefund(_) => "the note",
+            Call::DestinationClaim(_) | Call::SourceRefund { .. } => "the lock",
+        }
     }
 }
 
@@ -285,6 +350,20 @@ impl PayCall {
             merchant: self.merchant,
             amount: self.amount.0,
             payer: self.payer,
+            validAfter: U256::from(self.valid_after),
+            validBefore: U256::from(self.valid_before),
+            v: self.v,
+            r: self.r,
+            s: self.s,
+        }
+    }
+}
+
+impl RefundCall {
+    fn abi(&self) -> IDirectPay::refundCall {
+        IDirectPay::refundCall {
+            paymentId: self.payment_id,
+            amount: self.amount.0,
             validAfter: U256::from(self.valid_after),
             validBefore: U256::from(self.valid_before),
             v: self.v,
@@ -445,6 +524,7 @@ impl Rpc {
                 self.need(self.contracts.source_lock, "SourceLock")?,
                 ISourceLock::refundCall { lockId: *lock_id }.abi_encode(),
             ),
+            Call::DirectRefund(call) => (self.need(self.contracts.direct_pay, "DirectPay")?, call.abi().abi_encode()),
         })
     }
 
@@ -537,6 +617,37 @@ impl Rpc {
         Ok(())
     }
 
+    /// A shop refund only for the payment's own shop, against the refunds DirectPay has now, with
+    /// the nonce DirectPay itself computes, and only if the shop holds the USDT.
+    async fn check_direct_refund(&self, call: &RefundCall) -> Result<(), ChainError> {
+        let direct_pay = IDirectPay::new(self.need(self.contracts.direct_pay, "DirectPay")?, &self.provider);
+        let payment = self.contract(async { direct_pay.payments(call.payment_id).call().await }).await?;
+        if payment.payer == Address::ZERO {
+            return refuse("DirectPay has no such payment");
+        }
+        if payment.merchant != call.merchant {
+            return refuse("the payment went to another shop");
+        }
+        if U256::from(payment.refunded) != call.refunded_before.0 {
+            return refuse("another refund landed first; the shop must sign a new note");
+        }
+        if call.amount.0 > U256::from(payment.amount) - U256::from(payment.refunded) {
+            return refuse("the refund is more than what is left of the payment");
+        }
+        let nonce = self
+            .contract(async {
+                direct_pay.refundNonceFor(call.payment_id, call.amount.0, call.refunded_before.0).call().await
+            })
+            .await?;
+        if nonce != call.nonce {
+            return refuse("the note's nonce is not DirectPay's for this refund");
+        }
+        if self.balance(self.need(self.contracts.usdt, "USDT")?, call.merchant).await? < call.amount.0 {
+            return refuse("the shop does not have enough USDT for the refund");
+        }
+        Ok(())
+    }
+
     /// Whether the lock has timed out is the chain's call: the dry run runs on its clock.
     async fn check_refund(&self, lock_id: B256) -> Result<(), ChainError> {
         match self.source_lock_state(lock_id).await?.state {
@@ -558,6 +669,9 @@ impl Chain for Rpc {
             Call::SourceLock(call) => self.note_used(call.token, call.payer, call.lock_id).await,
             Call::DestinationClaim(call) => Ok(self.destination_lock_state(call.lock_id).await?.state == LOCK_CLAIMED),
             Call::SourceRefund { lock_id } => Ok(self.source_lock_state(*lock_id).await?.state == LOCK_REFUNDED),
+            Call::DirectRefund(call) => {
+                self.note_used(self.need(self.contracts.usdt, "USDT")?, call.merchant, call.nonce).await
+            }
         }
     }
 
@@ -567,6 +681,7 @@ impl Chain for Rpc {
             Call::SourceLock(call) => self.check_lock(call, now).await?,
             Call::DestinationClaim(call) => self.check_claim(call, now).await?,
             Call::SourceRefund { lock_id } => self.check_refund(*lock_id).await?,
+            Call::DirectRefund(call) => self.check_direct_refund(call).await?,
         }
         self.dry_run(call).await
     }
@@ -629,16 +744,24 @@ impl Chain for Rpc {
             Call::SourceRefund { .. } => {
                 (self.need(self.contracts.source_lock, "SourceLock")?, ISourceLock::Refunded::SIGNATURE_HASH)
             }
+            Call::DirectRefund(_) => (self.need(self.contracts.direct_pay, "DirectPay")?, IDirectPay::Refunded::SIGNATURE_HASH),
         };
         let latest = self.rpc(self.provider.get_block_number().into_future()).await?;
         let filter = Filter::new()
             .address(contract)
             .event_signature(event)
-            .topic1(call.done_id())
+            .topic1(call.log_topic())
             .from_block(latest.saturating_sub(LOG_LOOKBACK_BLOCKS))
             .to_block(latest);
         let logs = self.rpc(self.provider.get_logs(&filter).into_future()).await?;
-        Ok(logs.first().and_then(|log| log.transaction_hash))
+        // A payment can be refunded in parts, all under its id: ours is the one that brought the
+        // total to what this note was for.
+        let ours = |log: &&alloy::rpc::types::Log| match call {
+            Call::DirectRefund(call) => IDirectPay::Refunded::decode_log_data(log.data())
+                .is_ok_and(|event| event.totalRefunded == call.refunded_before.0 + call.amount.0),
+            _ => true,
+        };
+        Ok(logs.iter().find(ours).and_then(|log| log.transaction_hash))
     }
 }
 

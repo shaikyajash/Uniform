@@ -57,6 +57,52 @@
   justify-content: space-between;
 }
 
+/* The nav's right side. "How it works" comes first: while it waits for the hero's button to
+   scroll away, its empty space sits on the open side, so the links never jump. */
+.navRight {
+  display: flex;
+  align-items: center;
+  gap: 24px;
+}
+
+.navLink {
+  border-radius: 4px;
+  color: rgba(242, 242, 243, 0.62);
+  font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+  font-size: 13px;
+  white-space: nowrap;
+  transition: color 0.2s ease;
+}
+
+.navLink:hover {
+  color: #f2f2f3;
+}
+
+.navLink:focus-visible {
+  outline: 1px solid rgba(255, 255, 255, 0.5);
+  outline-offset: 4px;
+}
+
+.navCta {
+  display: inline-flex;
+  transition:
+    opacity 0.3s ease,
+    transform 0.3s ease,
+    visibility 0s linear 0s;
+}
+
+/* visibility (after the fade) also takes the hidden button out of the Tab order. */
+.navCtaHidden {
+  opacity: 0;
+  transform: translateY(-4px);
+  visibility: hidden;
+  pointer-events: none;
+  transition:
+    opacity 0.3s ease,
+    transform 0.3s ease,
+    visibility 0s linear 0.3s;
+}
+
 .headerBox::before,
 .headerBox::after {
   content: "";
@@ -135,17 +181,26 @@
 .logo {
   display: inline-flex;
   align-items: center;
-  gap: 8px;
   height: 28px;
-  font-weight: 600;
-  font-size: 17px;
-  letter-spacing: 0.04em;
-  color: #fff;
+  border-radius: 4px;
+  color: #f2f2f3;
+  transition: opacity 0.2s ease;
 }
 
-.logo svg {
-  width: 24px;
-  height: 24px;
+.logo:hover {
+  opacity: 0.75;
+}
+
+.logo:focus-visible {
+  outline: 1px solid rgba(255, 255, 255, 0.5);
+  outline-offset: 6px;
+}
+
+/* The drawn wordmark (wordmark.tsx). 15px tall: its strokes land just under 2px. */
+.wordmark {
+  display: block;
+  height: 15px;
+  width: auto;
 }
 
 /* ---------- Buttons ---------- */
@@ -252,6 +307,12 @@
   transition: opacity 0.2s, visibility 0.2s;
 }
 
+/* Inside the checkout widget's card (see layout.tsx): the card is the frame. */
+:global(html[data-embedded]) .guides,
+:global(html[data-embedded]) .header {
+  display: none;
+}
+
 /* Narrower screens: the side lines sit at the window's edge. */
 @media (max-width: 1023px) {
   .guideOuterLeft {
@@ -274,5 +335,14 @@
 @media (max-width: 760px) {
   .headerBox {
     padding: 0 14px;
+  }
+
+  .navRight {
+    gap: 16px;
+  }
+
+  /* No room beside the links on a phone; the hero and the footer still have it. */
+  .navCta {
+    display: none;
   }
 }

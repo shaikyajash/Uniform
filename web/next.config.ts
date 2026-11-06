@@ -26,14 +26,16 @@ type ChainEntry = {
   rpc: string;
   explorer: string;
   tokens: Record<string, { address: string; decimals: number }>;
+  contracts: Record<string, string>;
 };
 
 // shared/chains.json is the one list of chains and addresses. Turbopack cannot import files
 // outside web/, so it is read here and handed to the browser as one public value.
 const chains: Record<string, unknown> = JSON.parse(readFileSync(path.join(repo, "shared/chains.json"), "utf8"));
-const shop = Object.values(chains).find(
-  (entry): entry is ChainEntry => typeof entry === "object" && entry !== null && (entry as ChainEntry).role === "shop",
+const entries = Object.entries(chains).filter(
+  (pair): pair is [string, ChainEntry] => typeof pair[1] === "object" && pair[1] !== null && "chainId" in pair[1],
 );
+const shop = entries.find(([, entry]) => entry.role === "shop")?.[1];
 if (!shop) throw new Error("shared/chains.json has no chain with role \"shop\"");
 
 const shopChain = {
@@ -42,9 +44,31 @@ const shopChain = {
   explorer: shop.explorer,
   usdt: shop.tokens.USDT.address,
   usdtDecimals: shop.tokens.USDT.decimals,
+  destinationLock: shop.contracts.destinationLock || null,
 };
 
+// Customer chains a payment can come from: those whose SourceLock is deployed and that list USDC.
+const customerChains = entries
+  .filter(([, entry]) => entry.role === "customer" && entry.contracts.sourceLock && entry.tokens.USDC)
+  .map(([key, entry]) => ({
+    key,
+    id: entry.chainId,
+    rpc: entry.rpc,
+    explorer: entry.explorer,
+    usdc: entry.tokens.USDC.address,
+    usdcDecimals: entry.tokens.USDC.decimals,
+    sourceLock: entry.contracts.sourceLock,
+  }));
+
 const orderDesk = fromRepoEnv("ORDER_DESK_URL") ?? "http://localhost:4000";
+
+// Server-only settings for the Demo Shop's own routes (/demo/api/*). They go into this server
+// process's environment, never into `env` below, so the browser never sees them.
+process.env.ORDER_DESK_URL ??= orderDesk;
+for (const key of ["DEMO_SHOP_API_KEY", "DEMO_WEBHOOK_SECRET"]) {
+  const value = fromRepoEnv(key);
+  if (value) process.env[key] ??= value;
+}
 
 const nextConfig: NextConfig = {
   cacheComponents: true,
@@ -52,6 +76,9 @@ const nextConfig: NextConfig = {
   env: {
     NEXT_PUBLIC_PRIVY_APP_ID: fromRepoEnv("NEXT_PUBLIC_PRIVY_APP_ID") ?? "",
     NEXT_PUBLIC_SHOP_CHAIN: JSON.stringify(shopChain),
+    NEXT_PUBLIC_CUSTOMER_CHAINS: JSON.stringify(customerChains),
+    NEXT_PUBLIC_PROVIDER_FEE_BPS: String(chains.providerFeeBps ?? 30),
+    NEXT_PUBLIC_TIMEOUTS: JSON.stringify(chains.timeoutsSeconds ?? {}),
   },
   // The pay page calls the Order Desk through this same site, so the browser never makes a
   // cross-site request and the Order Desk needs no CORS. Only the public /v1 API is forwarded.

@@ -53,6 +53,26 @@ pub enum Job {
     /// Path B, step 6: `SourceLock.refund(lockId)` once it has timed out: the customer's tokens go
     /// back to them. For locks Bob never filled; the Matchmaker refunds the ones he did.
     SourceRefund { lock_id: B256 },
+    /// A shop refund of a Path A payment: `DirectPay.refund(paymentId, amount, validAfter,
+    /// validBefore, v, r, s)` on the shop chain, from the note the shop's payout wallet signed.
+    /// The USDT goes from the shop back to the customer who paid.
+    DirectRefund {
+        order_id: B256,
+        /// The payment being refunded (`paymentIdFor`, the customer's note nonce).
+        payment_id: B256,
+        /// The shop's payout address: the note's `from`.
+        merchant: Address,
+        amount: Amount,
+        /// What DirectPay had refunded of this payment when the note was made. The nonce commits
+        /// to it, so the note is void once another refund lands first.
+        refunded_before: Amount,
+        valid_after: u64,
+        valid_before: u64,
+        /// `refundNonceFor(paymentId, amount, refundedBefore)`. The Relayer asks DirectPay for it again.
+        nonce: B256,
+        /// 65 bytes: r, s, v.
+        signature: Bytes,
+    },
 }
 
 impl Job {
@@ -63,6 +83,7 @@ impl Job {
             Job::SourceLock { .. } => "source_lock",
             Job::DestinationClaim { .. } => "destination_claim",
             Job::SourceRefund { .. } => "source_refund",
+            Job::DirectRefund { .. } => "direct_refund",
         }
     }
 }

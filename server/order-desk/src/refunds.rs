@@ -34,13 +34,17 @@ impl Default for Sweep {
     }
 }
 
-/// Runs forever, in the background of `serve`.
+/// Runs forever, in the background of `serve`. Also marks unpaid orders `expired` once their
+/// time to pay has run out (which sends the shop `order.expired`).
 pub async fn run(pool: PgPool, sweep: Sweep) {
     loop {
         match queue_refunds(&pool, now(), sweep.grace_seconds).await {
             Ok(0) => {}
             Ok(count) => println!("order-desk: queued {count} source refund(s)"),
             Err(error) => eprintln!("order-desk: refund sweep failed: {error}"),
+        }
+        if let Err(error) = expire_orders(&pool, now()).await {
+            eprintln!("order-desk: expiry sweep failed: {error}");
         }
         tokio::time::sleep(sweep.every).await;
     }
@@ -89,6 +93,16 @@ pub async fn queue_refunds(pool: &PgPool, now: i64, grace_seconds: i64) -> Resul
     Ok(written.rows_affected())
 }
 
+/// `created` or `quoted` orders past `expires_at` become `expired`: no money moved, and no payment
+/// is being sent (that would be `paying`). Returns how many.
+pub async fn expire_orders(pool: &PgPool, now: i64) -> Result<u64, sqlx::Error> {
+    let expired = sqlx::query("UPDATE orders SET status = 'expired' WHERE status IN ('created', 'quoted') AND expires_at <= $1")
+        .bind(now)
+        .execute(pool)
+        .await?;
+    Ok(expired.rows_affected())
+}
+
 #[cfg(test)]
 mod tests {
     use alloy::signers::local::PrivateKeySigner;
@@ -97,7 +111,7 @@ mod tests {
     use serde_json::Value;
     use sqlx::PgPool;
 
-    use super::{RETRY_AFTER_SECONDS, queue_refunds};
+    use super::{RETRY_AFTER_SECONDS, expire_orders, queue_refunds};
     use crate::routes::{
         legs::tests::{quoted, sign, submit},
         test_support::{call, test_app},
@@ -205,6 +219,20 @@ mod tests {
         // The claim ran out unmined: now the customer is refunded.
         sqlx::query("UPDATE relayer_jobs SET status = 'failed' WHERE kind = 'destination_claim'").execute(&pool).await.unwrap();
         assert_eq!(queue_refunds(&pool, late, GRACE_SECONDS).await.unwrap(), 1);
+    }
+
+    #[sqlx::test]
+    async fn unpaid_orders_expire_and_moving_ones_do_not(pool: PgPool) {
+        let (pool, _, _) = locked(pool).await; // one order, `paying`
+        let test_order: String = sqlx::query_scalar("SELECT id FROM orders").fetch_one(&pool).await.unwrap();
+        let expires_at: i64 = sqlx::query_scalar("SELECT expires_at FROM orders").fetch_one(&pool).await.unwrap();
+        assert_eq!(expire_orders(&pool, expires_at + 1).await.unwrap(), 0, "a payment on its way never expires");
+
+        sqlx::query("UPDATE orders SET status = 'quoted' WHERE id = $1").bind(&test_order).execute(&pool).await.unwrap();
+        assert_eq!(expire_orders(&pool, expires_at - 1).await.unwrap(), 0, "not before its time");
+        assert_eq!(expire_orders(&pool, expires_at).await.unwrap(), 1);
+        let status: String = sqlx::query_scalar("SELECT status FROM orders").fetch_one(&pool).await.unwrap();
+        assert_eq!(status, "expired");
     }
 
     #[sqlx::test]

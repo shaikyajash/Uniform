@@ -2,7 +2,8 @@
 //!
 //! Every event is stored once (`events`, keyed by chain, tx and log index). Money facts come only
 //! from here: `Paid` (Path A) is applied below; the cross-chain kinds in `crosschain_events.rs`.
-//! `DirectRefunded` is stored only, until shop refunds (B7).
+//! `DirectRefunded` is stored only: shop refunds go through our Relayer, which moves the order when
+//! the refund is mined (relayer `apply_to_order`).
 
 use alloy::primitives::Address;
 use axum::{

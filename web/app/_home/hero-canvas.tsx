@@ -1,10 +1,10 @@
 "use client";
 
-// The hero's background: the 3D vortex (see vortex-scene.ts) with two dark gradients over it so
-// the headline stays readable.
+// The hero's background: the light ray (see ray-shader.ts), with a fade at the bottom for the
+// logo strip.
 
 import { useEffect, useRef } from "react";
-import { startVortex } from "./vortex-scene";
+import { startRay } from "./ray-shader";
 import styles from "./home.module.css";
 
 export function HeroCanvas() {
@@ -13,7 +13,7 @@ export function HeroCanvas() {
   useEffect(() => {
     const stage = ref.current;
     if (!stage) return;
-    // A new canvas each time: stopping the vortex ends its WebGL context, and a canvas whose
+    // A new canvas each time: stopping the ray ends its WebGL context, and a canvas whose
     // context has ended cannot draw again (React runs this effect twice in development).
     const canvas = document.createElement("canvas");
     canvas.className = styles.heroCanvas;
@@ -21,10 +21,10 @@ export function HeroCanvas() {
     const still = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
     let stop: (() => void) | undefined;
     try {
-      stop = startVortex(canvas, still);
+      stop = startRay(canvas, still);
     } catch (error) {
       // No WebGL: the hero still works on plain black.
-      console.warn("Vortex could not start:", error);
+      console.warn("The hero light could not start:", error);
     }
     return () => {
       stop?.();
@@ -34,7 +34,6 @@ export function HeroCanvas() {
 
   return (
     <div ref={ref} className={styles.heroStage} aria-hidden="true">
-      <div className={styles.heroShadeSide} />
       <div className={styles.heroShadeDown} />
     </div>
   );

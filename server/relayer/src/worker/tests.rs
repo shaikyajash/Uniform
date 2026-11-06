@@ -142,6 +142,7 @@ impl Chain for FakeChain {
         let amount = match call {
             Call::DirectPay(call) => call.amount.0,
             Call::SourceLock(call) => call.amount.0,
+            Call::DirectRefund(call) => call.amount.0,
             Call::DestinationClaim(_) | Call::SourceRefund { .. } => U256::ZERO,
         };
         self.with(|state| {
@@ -732,6 +733,58 @@ async fn a_claim_is_sent_even_when_the_shop_has_spent_its_gas_budget(pool: PgPoo
     chain.mine(hash, false);
     assert_eq!(outcome(&pool, &chain, NOW + RECEIPT_POLL_SECONDS).await, Some(Outcome::Confirmed(hash)));
     assert_eq!(statuses(&pool, job).await, ("confirmed".into(), "paid".into()));
+}
+
+/// A shop refund of `amount` from order 1's payment, after `refunded_before` was already given back.
+fn shop_refund(amount: u64, refunded_before: u64) -> Job {
+    let signature = PrivateKeySigner::random().sign_hash_sync(&note(9)).unwrap();
+    Job::DirectRefund {
+        order_id: order_id(1).parse().unwrap(),
+        payment_id: note(1),
+        merchant: SHOP,
+        amount: Amount::from(amount),
+        refunded_before: Amount::from(refunded_before),
+        valid_after: NOW - 60,
+        valid_before: NOW + 1_800,
+        // Each refund of a payment has its own nonce (it commits to `refunded_before`).
+        nonce: B256::repeat_byte(if refunded_before == 0 { 0xa1 } else { 0xa2 }),
+        signature: Bytes::from(signature.as_bytes().to_vec()),
+    }
+}
+
+#[sqlx::test(migrations = "../order-desk/migrations")]
+async fn a_mined_shop_refund_marks_the_order_partly_then_fully_refunded(pool: PgPool) {
+    let first = add_order_and_job(&pool, 1, AMOUNT, "paid", &shop_refund(AMOUNT / 4, 0)).await;
+    let chain = FakeChain::new();
+    let hash = sent(&pool, &chain, NOW).await;
+    chain.mine(hash, false);
+    assert_eq!(outcome(&pool, &chain, NOW + RECEIPT_POLL_SECONDS).await, Some(Outcome::Confirmed(hash)));
+    assert_eq!(statuses(&pool, first).await, ("confirmed".into(), "partially_refunded".into()));
+
+    let rest = sqlx::query_scalar(
+        "INSERT INTO relayer_jobs (order_id, merchant_id, chain_id, kind, args, created_at, updated_at)
+         SELECT $1, id, $2, 'direct_refund', $3, 1, 1 FROM merchants RETURNING id",
+    )
+    .bind(order_id(1))
+    .bind(i64::try_from(CHAIN_ID).unwrap())
+    .bind(serde_json::to_value(shop_refund(AMOUNT - AMOUNT / 4, AMOUNT / 4)).unwrap())
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    let hash = sent(&pool, &chain, NOW + 100).await;
+    chain.mine(hash, false);
+    assert_eq!(outcome(&pool, &chain, NOW + 100 + RECEIPT_POLL_SECONDS).await, Some(Outcome::Confirmed(hash)));
+    assert_eq!(statuses(&pool, rest).await, ("confirmed".into(), "refunded".into()));
+}
+
+#[sqlx::test(migrations = "../order-desk/migrations")]
+async fn a_shop_refund_that_fails_its_checks_leaves_the_order_paid(pool: PgPool) {
+    let job = add_order_and_job(&pool, 1, AMOUNT, "paid", &shop_refund(AMOUNT, 0)).await;
+    let chain = FakeChain::new();
+    chain.with(|state| state.dry_run = Some(ChainError::Revert("another refund landed first".into())));
+    assert!(failed(outcome(&pool, &chain, NOW).await));
+    assert_eq!(chain.signed_count(), 0);
+    assert_eq!(statuses(&pool, job).await, ("failed".into(), "paid".into()));
 }
 
 #[sqlx::test(migrations = "../order-desk/migrations")]

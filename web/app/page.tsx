@@ -1,5 +1,6 @@
-import { Frame, Logo } from "./_ui/frame";
-import { StarButton } from "./_ui/star-button";
+import HalftoneWordmarkFooter, { type FooterColumn } from "@/components/ui/halftone-wordmark-footer";
+import { Frame, HERO_CTA_ID } from "./_ui/frame";
+import { SolidButton, StarButton } from "./_ui/star-button";
 import { HeroCanvas } from "./_home/hero-canvas";
 import { LiveLog } from "./_home/live-log";
 import styles from "./_home/home.module.css";
@@ -28,14 +29,15 @@ function Hero() {
       <HeroCanvas />
       <div className={styles.heroCopy}>
         <h1 className={styles.heroTitle}>
-          The checkout for stablecoins
-          <span className={styles.fade}>across chains</span>
+          Why fragment liquidity?
+          <span className={styles.fade}>Meet Uniform.</span>
         </h1>
         <p className={styles.heroLede}>
-          <span className={styles.line}>Customers pay with an email login and no gas.</span>{" "}
-          <span className={styles.line}>Shops receive USDT on Whitechain.</span>
+          <span className={styles.line}>Let your users pay with whatever they have</span>{" "}
+          <span className={styles.line}>You receive USDT on Whitechain.</span>
         </p>
-        <div className={styles.heroActions}>
+        <div id={HERO_CTA_ID} className={styles.heroActions}>
+          <SolidButton href="/demo">Try the demo shop</SolidButton>
           <StarButton href="#features" size="large">
             HOW IT WORKS
           </StarButton>
@@ -285,21 +287,40 @@ function CheckoutMock() {
 
 /* ---------- Footer ---------- */
 
+/** Only real places: this site's pages and the chains' block explorers. */
+const FOOTER_COLUMNS: FooterColumn[] = [
+  {
+    title: "Product",
+    links: [
+      { label: "How it works", href: "#features" },
+      { label: "Demo shop", href: "/demo" },
+      { label: "Dashboard", href: "/dashboard" },
+    ],
+  },
+  {
+    title: "Chains",
+    links: [
+      { label: "Whitechain", href: "https://explorer.testnet.whitechain.io" },
+      { label: "Base Sepolia", href: "https://sepolia.basescan.org" },
+      { label: "Ethereum Sepolia", href: "https://sepolia.etherscan.io" },
+    ],
+  },
+];
+
+/** The word "uniform" printed in halftone dots, cropped by the page's bottom edge, between the side
+ * lines. The component's own type; dots pushed by the pointer turn the blue of the hero's rays. */
 function Footer() {
   return (
-    <footer className={styles.footer}>
-      <div className={styles.footerTop}>
-        <div className={styles.footerBrand}>
-          <Logo />
-          <p>Stablecoin checkout across chains. Shops are paid in USDT on Whitechain, customers pay no gas.</p>
-        </div>
-      </div>
-      <div className={styles.footerBottom}>
-        <span>Built at ETHGlobal Mumbai, 2026.</span>
-        <span>
-          <i className={styles.okDot} /> Running on Whitechain testnet
-        </span>
-      </div>
-    </footer>
+    <div className={styles.footerFrame}>
+      <HalftoneWordmarkFooter
+        wordmark="uniform"
+        label="Uniform"
+        meta="© 2026 · Built at ETHGlobal Mumbai"
+        columns={FOOTER_COLUMNS}
+        fill={0.94}
+        palette={{ background: "#050506", ink: "#f2f2f3", warm: "#5a8cff" }}
+        height="480px"
+      />
+    </div>
   );
 }

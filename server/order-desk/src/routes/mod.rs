@@ -1,11 +1,14 @@
 //! The HTTP API: shared state and the route table.
 
 mod crosschain_events;
+pub mod dashboard;
 pub mod direct;
 pub mod events;
 pub mod legs;
+pub mod login;
 pub mod orders;
 pub mod quote;
+pub mod refunds;
 pub mod secret;
 
 use std::{
@@ -17,7 +20,7 @@ use alloy::primitives::Address;
 use axum::{
     Router,
     extract::FromRef,
-    routing::{get, post},
+    routing::{get, patch, post},
 };
 use common::{amount::Amount, chains::Chains, jobs::Job};
 use sqlx::{PgConnection, PgPool};
@@ -48,18 +51,29 @@ impl FromRef<AppState> for PgPool {
 
 pub fn router(state: AppState) -> Router {
     Router::new()
-        .route("/v1/orders", post(orders::create))
+        .route("/v1/orders", post(orders::create).get(dashboard::list_orders))
         .route("/v1/orders/{id}", get(orders::read))
         .route("/v1/orders/{id}/quote", post(quote::quote))
         .route("/v1/orders/{id}/direct", post(direct::direct))
         .route("/v1/orders/{id}/legs", post(legs::submit))
         .route("/v1/orders/{id}/secret", post(secret::reveal))
+        .route("/v1/orders/{id}/refund-note", post(refunds::note))
+        .route("/v1/orders/{id}/refunds", post(refunds::submit))
+        .route("/v1/payments.csv", get(dashboard::payments_csv))
+        .route("/v1/shop", get(dashboard::read_shop).merge(patch(dashboard::update_shop)))
+        .route("/v1/shop/webhook-secret", post(dashboard::rotate_webhook_secret))
+        .route("/v1/shop/api-key", post(dashboard::rotate_api_key))
+        .route("/v1/webhooks", get(dashboard::list_webhooks))
+        .route("/v1/webhooks/{id}/retry", post(dashboard::retry_webhook))
+        .route("/v1/auth/challenge", post(login::challenge))
+        .route("/v1/auth/verify", post(login::verify))
+        .route("/v1/auth/logout", post(login::logout))
         .route("/internal/events", post(events::report))
         .with_state(state)
 }
 
 /// Writes one job for the Relayer. A second unfinished job of the same kind for the order is a
-/// conflict (`relayer_jobs_one_live_per_order_and_kind`): a double click cannot send twice.
+/// conflict (`relayer_jobs_one_live_per_order_kind_and_chain`): a double click cannot send twice.
 pub async fn insert_job(
     tx: &mut PgConnection,
     order_id: &str,
