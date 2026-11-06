@@ -1,7 +1,8 @@
 //! `POST /internal/events`: the Matchmaker reports one chain event it has seen and confirmed.
 //!
 //! Every event is stored once (`events`, keyed by chain, tx and log index). Money facts come only
-//! from here: B1 applies `Paid` (Path A); the other kinds are stored and applied by later tasks.
+//! from here: `Paid` (Path A) is applied below; the cross-chain kinds in `crosschain_events.rs`.
+//! `DirectRefunded` is stored only, until shop refunds (B7).
 
 use alloy::primitives::Address;
 use axum::{
@@ -17,7 +18,11 @@ use common::{
 use serde::Serialize;
 use sqlx::{Postgres, Transaction};
 
-use super::{AppState, now};
+use super::{
+    AppState,
+    crosschain_events::{self, Applied},
+    now,
+};
 use crate::{direct_pay, error::ApiError};
 
 #[derive(Debug, Serialize)]
@@ -83,6 +88,20 @@ pub async fn report(
             let paid = PaidEvent { chain_id: event.chain_id, payment_id, order_id, payer: *payer, amount: *amount };
             apply_paid(&mut tx, &state, paid).await?
         }
+        EventKind::Locked { lock_id, token, amount, .. } => {
+            let applied = crosschain_events::locked(&mut tx, event.chain_id, event.tx_hash, *lock_id, *token, *amount);
+            receipt(applied.await?)
+        }
+        EventKind::Filled { order_id, destination_lock_id, amount } => {
+            receipt(crosschain_events::filled(&mut tx, &state, *order_id, *destination_lock_id, *amount).await?)
+        }
+        EventKind::Settled { order_id, amount } => receipt(crosschain_events::settled(&mut tx, *order_id, *amount).await?),
+        EventKind::Claimed { lock_id } => {
+            receipt(crosschain_events::claimed(&mut tx, event.chain_id, event.tx_hash, *lock_id).await?)
+        }
+        EventKind::Refunded { lock_id } => {
+            receipt(crosschain_events::refunded(&mut tx, &state, event.chain_id, event.tx_hash, *lock_id).await?)
+        }
         other => EventReceipt::not_applied(format!("{} events are applied in a later task", other.name())),
     };
     if !receipt.applied && receipt.reason.is_some() {
@@ -90,6 +109,16 @@ pub async fn report(
     }
     tx.commit().await?;
     Ok(Json(receipt))
+}
+
+fn receipt(applied: Applied) -> EventReceipt {
+    match applied {
+        Applied::Moved(status) => EventReceipt::moved_to(status),
+        Applied::LegOnly(what) => {
+            EventReceipt { stored: true, applied: true, order_status: None, reason: Some(what.into()) }
+        }
+        Applied::Skipped(reason) => EventReceipt::not_applied(reason),
+    }
 }
 
 struct PaidEvent<'a> {
@@ -293,7 +322,7 @@ mod tests {
     }
 
     #[sqlx::test]
-    async fn other_kinds_are_stored_for_later_tasks(pool: PgPool) {
+    async fn a_lock_we_did_not_plan_is_stored_but_moves_nothing(pool: PgPool) {
         let test = test_app(pool).await;
         let locked = json!({
             "chainId": 84532, "blockNumber": 1, "txHash": format!("0x{}", "11".repeat(32)), "logIndex": 0,

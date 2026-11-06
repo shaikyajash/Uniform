@@ -1,22 +1,28 @@
 //! The HTTP API: shared state and the route table.
 
+mod crosschain_events;
 pub mod direct;
 pub mod events;
+pub mod legs;
 pub mod orders;
 pub mod quote;
+pub mod secret;
 
 use std::{
     sync::Arc,
     time::{SystemTime, UNIX_EPOCH},
 };
 
+use alloy::primitives::Address;
 use axum::{
     Router,
     extract::FromRef,
     routing::{get, post},
 };
-use common::{amount::Amount, chains::Chains};
-use sqlx::PgPool;
+use common::{amount::Amount, chains::Chains, jobs::Job};
+use sqlx::{PgConnection, PgPool};
+
+use crate::error::ApiError;
 
 #[derive(Clone)]
 pub struct AppState {
@@ -29,6 +35,9 @@ pub struct AppState {
     pub internal_token: String,
     /// The largest order, in USDT base units: the Relayer's `RELAYER_MAX_ORDER_USDT`.
     pub max_order: Amount,
+    /// Bob, who fills cross-chain payments (`PROVIDER_ADDRESS`): the receiver of every source lock.
+    /// `None` turns the cross-chain path off.
+    pub provider: Option<Address>,
 }
 
 impl FromRef<AppState> for PgPool {
@@ -43,8 +52,40 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/orders/{id}", get(orders::read))
         .route("/v1/orders/{id}/quote", post(quote::quote))
         .route("/v1/orders/{id}/direct", post(direct::direct))
+        .route("/v1/orders/{id}/legs", post(legs::submit))
+        .route("/v1/orders/{id}/secret", post(secret::reveal))
         .route("/internal/events", post(events::report))
         .with_state(state)
+}
+
+/// Writes one job for the Relayer. A second unfinished job of the same kind for the order is a
+/// conflict (`relayer_jobs_one_live_per_order_and_kind`): a double click cannot send twice.
+pub async fn insert_job(
+    tx: &mut PgConnection,
+    order_id: &str,
+    merchant_id: i64,
+    chain_id: i64,
+    job: &Job,
+    now: i64,
+) -> Result<i64, ApiError> {
+    sqlx::query_scalar(
+        "INSERT INTO relayer_jobs (order_id, merchant_id, chain_id, kind, args, created_at, updated_at)
+         VALUES ($1, $2, $3, $4, $5, $6, $6) RETURNING id",
+    )
+    .bind(order_id)
+    .bind(merchant_id)
+    .bind(chain_id)
+    .bind(job.kind())
+    .bind(serde_json::to_value(job).map_err(ApiError::internal)?)
+    .bind(now)
+    .fetch_one(tx)
+    .await
+    .map_err(|error| match &error {
+        sqlx::Error::Database(db) if db.is_unique_violation() => {
+            ApiError::conflict("already_submitted", "this order's payment is already being sent")
+        }
+        _ => ApiError::from(error),
+    })
 }
 
 /// Unix seconds, the time unit of the database and the API.
@@ -79,6 +120,8 @@ pub mod test_support {
 
     const CHAINS_JSON: &str = include_str!("../../../../shared/chains.json");
     pub const INTERNAL_TOKEN: &str = "test-internal-token-0123456789";
+    /// Bob in tests.
+    pub const PROVIDER: alloy::primitives::Address = alloy::primitives::address!("b0b0000000000000000000000000000000000001");
 
     pub struct TestApp {
         pub app: Router,
@@ -114,6 +157,7 @@ pub mod test_support {
             pay_base_url: "https://pay.example/".into(),
             internal_token: INTERNAL_TOKEN.into(),
             max_order: common::amount::Amount::from(100_000_000u64),
+            provider: Some(PROVIDER),
         };
         TestApp { app: router(state), pool, key }
     }

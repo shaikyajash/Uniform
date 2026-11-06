@@ -111,8 +111,33 @@ pub struct OrderView {
     created_at: i64,
     expires_at: i64,
     paid_at: Option<i64>,
-    /// The Relayer's latest attempt to send this order's payment, if any.
+    /// The Relayer's latest attempt to send the customer's payment (Path A) or lock (cross-chain).
     payment: Option<PaymentView>,
+    /// Cross-chain: `keccak256(secret)` of the signed quote.
+    hashlock: Option<String>,
+    /// Cross-chain: the customer's locks, from the latest signed quote.
+    legs: Vec<LegView>,
+    /// Cross-chain: Bob's lock for the shop on Whitechain, once filled (its id was recomputed).
+    destination_lock_id: Option<String>,
+    /// Cross-chain: the Relayer's latest attempt to claim the shop's lock with the secret.
+    claim: Option<PaymentView>,
+}
+
+/// One customer lock. `lockId` is the only id to trust: SourceLock's `lockIdFor` of what was signed.
+#[derive(Debug, Serialize, sqlx::FromRow)]
+#[serde(rename_all = "camelCase")]
+pub struct LegView {
+    #[sqlx(try_from = "i64")]
+    chain_id: u64,
+    token: String,
+    /// Smallest units (6 decimals for USDC).
+    amount: String,
+    lock_id: String,
+    expiry: i64,
+    status: String,
+    lock_tx: Option<String>,
+    claim_tx: Option<String>,
+    refund_tx: Option<String>,
 }
 
 /// What the pay page shows while the Relayer works: `pending -> sending -> sent -> confirmed`, or
@@ -134,6 +159,7 @@ struct PaymentRow {
     status: String,
     tx_hash: Option<String>,
     last_error: Option<String>,
+    chain_id: i64,
 }
 
 #[derive(Debug, Serialize)]
@@ -155,6 +181,8 @@ struct OrderRow {
     created_at: i64,
     expires_at: i64,
     paid_at: Option<i64>,
+    hashlock: Option<String>,
+    destination_lock_id: Option<String>,
 }
 
 /// Public: the pay page has no login. The random 32-byte id is what keeps orders private.
@@ -162,7 +190,8 @@ pub async fn read(State(state): State<AppState>, Path(id): Path<String>) -> Resu
     let id = normalize_order_id(&id).ok_or_else(|| ApiError::not_found("order"))?;
     let row: Option<OrderRow> = sqlx::query_as(
         "SELECT o.id, m.name AS shop_name, m.payout_address AS shop_address, o.reference,
-                o.amount::text AS amount, o.status, o.path, o.payer, o.created_at, o.expires_at, o.paid_at
+                o.amount::text AS amount, o.status, o.path, o.payer, o.created_at, o.expires_at, o.paid_at,
+                o.hashlock, o.destination_lock_id
          FROM orders o JOIN merchants m ON m.id = o.merchant_id
          WHERE o.id = $1",
     )
@@ -174,7 +203,17 @@ pub async fn read(State(state): State<AppState>, Path(id): Path<String>) -> Resu
     let amount: Amount = row.amount.parse().map_err(ApiError::internal)?;
     let status: OrderStatus = row.status.parse().map_err(ApiError::internal)?;
     let path = row.path.map(|path| path.parse::<PayPath>()).transpose().map_err(ApiError::internal)?;
-    let payment = latest_payment(&state, &id).await?;
+    let payment = latest_job(&state, &id, &["direct_pay", "source_lock"]).await?;
+    let claim = latest_job(&state, &id, &["destination_claim"]).await?;
+    let legs: Vec<LegView> = sqlx::query_as(
+        "SELECT chain_id, token, amount::text AS amount, lock_id, expiry, status, lock_tx, claim_tx, refund_tx
+         FROM legs
+         WHERE quote_id = (SELECT quote_id FROM legs WHERE order_id = $1 ORDER BY id DESC LIMIT 1)
+         ORDER BY id",
+    )
+    .bind(&id)
+    .fetch_all(&state.pool)
+    .await?;
     Ok(Json(OrderView {
         order_id: row.id,
         shop: ShopView { name: row.shop_name, address: row.shop_address },
@@ -187,21 +226,29 @@ pub async fn read(State(state): State<AppState>, Path(id): Path<String>) -> Resu
         expires_at: row.expires_at,
         paid_at: row.paid_at,
         payment,
+        hashlock: row.hashlock,
+        legs,
+        destination_lock_id: row.destination_lock_id,
+        claim,
     }))
 }
 
-async fn latest_payment(state: &AppState, order_id: &str) -> Result<Option<PaymentView>, ApiError> {
+/// The latest Relayer job of these kinds for the order, as the pay page shows it.
+async fn latest_job(state: &AppState, order_id: &str, kinds: &[&str]) -> Result<Option<PaymentView>, ApiError> {
     let row: Option<PaymentRow> = sqlx::query_as(
-        "SELECT status, tx_hash, last_error FROM relayer_jobs WHERE order_id = $1 ORDER BY id DESC LIMIT 1",
+        "SELECT status, tx_hash, last_error, chain_id FROM relayer_jobs
+         WHERE order_id = $1 AND kind = ANY($2) ORDER BY id DESC LIMIT 1",
     )
     .bind(order_id)
+    .bind(kinds)
     .fetch_optional(&state.pool)
     .await?;
     let Some(row) = row else { return Ok(None) };
     let status: JobStatus = row.status.parse().map_err(ApiError::internal)?;
     // `sending` has a hash that may never reach a node; show it once a node accepted it.
     let tx_hash = row.tx_hash.filter(|_| matches!(status, JobStatus::Sent | JobStatus::Confirmed));
-    let explorer = state.chains.shop_chain().explorer.trim_end_matches('/');
+    let chain = u64::try_from(row.chain_id).ok().and_then(|id| state.chains.by_id(id));
+    let explorer = chain.unwrap_or_else(|| state.chains.shop_chain()).explorer.trim_end_matches('/');
     Ok(Some(PaymentView {
         status,
         explorer_url: tx_hash.as_ref().map(|hash| format!("{explorer}/tx/{hash}")),
@@ -266,6 +313,7 @@ mod tests {
         assert_eq!(order["amount"], "12.000000");
         assert_eq!(order["status"], "created");
         assert_eq!(order["path"], Value::Null);
+        assert_eq!((order["legs"].clone(), order["hashlock"].clone()), (json!([]), Value::Null));
     }
 
     #[sqlx::test]
