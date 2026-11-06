@@ -75,7 +75,9 @@ async fn serve(pool: PgPool) -> Result<(), String> {
             None
         }
     };
-    tokio::spawn(refunds::run(pool.clone()));
+    let sweep = refund_sweep()?;
+    println!("order-desk: refunds unfilled locks {}s after expiry, checking every {}s", sweep.grace_seconds, sweep.every.as_secs());
+    tokio::spawn(refunds::run(pool.clone(), sweep));
     let app = routes::router(routes::AppState {
         pool,
         chains: Arc::new(chains),
@@ -90,4 +92,25 @@ async fn serve(pool: PgPool) -> Result<(), String> {
         .map_err(|error| format!("cannot listen on port {port}: {error}"))?;
     println!("order-desk: listening on port {port}");
     axum::serve(listener, app).await.map_err(|error| error.to_string())
+}
+
+/// `REFUND_GRACE_SECONDS` (wait after a lock's expiry before we refund it, giving the Matchmaker
+/// its turn) and `REFUND_SWEEP_SECONDS` (how often to look). Both default to fast demo values.
+fn refund_sweep() -> Result<refunds::Sweep, String> {
+    let default = refunds::Sweep::default();
+    let seconds = |name: &str, default: u64, max: u64| -> Result<u64, String> {
+        match env::var(name) {
+            Ok(text) if !text.trim().is_empty() => match text.trim().parse::<u64>() {
+                Ok(value) if value <= max => Ok(value),
+                _ => Err(format!("{name} must be a whole number of seconds up to {max}, got {text:?}")),
+            },
+            _ => Ok(default),
+        }
+    };
+    let grace = seconds("REFUND_GRACE_SECONDS", u64::try_from(default.grace_seconds).unwrap_or(30), 3600)?;
+    let every = seconds("REFUND_SWEEP_SECONDS", default.every.as_secs(), 600)?.max(1);
+    Ok(refunds::Sweep {
+        every: std::time::Duration::from_secs(every),
+        grace_seconds: i64::try_from(grace).map_err(|e| e.to_string())?,
+    })
 }
