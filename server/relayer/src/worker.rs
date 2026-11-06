@@ -457,6 +457,20 @@ impl Taken<'_> {
                     .await?;
                 }
             }
+            // A shop refund: `refunded` once the whole payment is back with the customer.
+            Call::DirectRefund(call) => {
+                let total = call.refunded_before.0 + call.amount.0;
+                sqlx::query(
+                    "UPDATE orders
+                     SET status = CASE WHEN $2::numeric >= amount THEN 'refunded' ELSE 'partially_refunded' END
+                     WHERE id = (SELECT order_id FROM relayer_jobs WHERE id = $1)
+                       AND status IN ('paid', 'partially_refunded')",
+                )
+                .bind(self.id)
+                .bind(total.to_string())
+                .execute(&mut *tx)
+                .await?;
+            }
             Call::DirectPay(_) | Call::SourceLock(_) => {}
         }
         Ok(())
