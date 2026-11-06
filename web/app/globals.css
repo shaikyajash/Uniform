@@ -1,0 +1,38 @@
+/* Same look as the landing page: brushed light metal, navy ink, one glowing blue. */
+:root {
+  --white: #ffffff;
+  --metal-1: #eceef1;
+  --metal-2: #dfe1e5;
+  --metal-3: #cfd2d8;
+  --ink: #0f1730;
+  --ink-soft: #6c7383;
+  --navy: #0d1530;
+  --blue: #2563ff;
+  --blue-glow: rgba(56, 120, 255, 0.45);
+  --green: #1f9d6b;
+  --red: #c43c3c;
+  --line: #e7e8ec;
+}
+
+* {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+html,
+body {
+  min-height: 100%;
+  background: var(--white);
+  color: var(--ink);
+  font-family: var(--font-inter), system-ui, sans-serif;
+  -webkit-font-smoothing: antialiased;
+}
+
+a {
+  color: inherit;
+}
+
+button {
+  font: inherit;
+}
