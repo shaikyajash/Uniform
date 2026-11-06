@@ -399,7 +399,7 @@ export function PayCard({ orderId }: { orderId: string }) {
     }
     const signature = await signNote(
       batch.typedData,
-      `Pay ${formatTokenAmount(BigInt(batch.amount), batch.decimals)} ${symbol}`,
+      `Pay ${formatTokenAmount(parseUnits(batch.amount, batch.decimals), batch.decimals)} ${symbol}`,
       `From ${chainName(chainId)}. Held for the provider until ${order.merchant.name} is paid; it comes back to you if not.`,
     );
     setStep("submitting");
@@ -454,6 +454,8 @@ export function PayCard({ orderId }: { orderId: string }) {
       else if (source.kind === "token") await payToken(source.chainId, source.symbol);
       else await paySplit(source.parts);
     } catch (problem) {
+      // The customer sees a short message; the full error goes to the console for support.
+      console.error("pay failed", problem);
       setError(explain(problem));
     } finally {
       setStep("idle");
@@ -877,7 +879,7 @@ function batchFits(
   const calls = message?.batchedCall?.calls ?? [];
   let amount: bigint;
   try {
-    amount = BigInt(batch.amount);
+    amount = parseUnits(batch.amount, batch.decimals);
   } catch {
     return false;
   }

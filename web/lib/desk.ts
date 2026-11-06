@@ -98,7 +98,7 @@ export type BatchQuote = Omit<Quote, "toSign"> & {
     token: string;
     tokenAddress: string;
     decimals: number;
-    /** Token base units, decimal text. */
+    /** In whole tokens, as decimal text ("0.00001363"): `parseUnits(amount, decimals)` gives base units. */
     amount: string;
     lockId: string;
     calibur: string;
