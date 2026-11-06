@@ -1,20 +1,21 @@
 import type { Metadata } from "next";
-import { Inter, Outfit } from "next/font/google";
+import { Geist, Geist_Mono, Google_Sans } from "next/font/google";
 import { Providers } from "./providers";
 import "./globals.css";
 
-const inter = Inter({ variable: "--font-inter", subsets: ["latin"] });
-const outfit = Outfit({ variable: "--font-outfit", subsets: ["latin"], weight: ["500", "600"] });
+const geist = Geist({ variable: "--font-geist", subsets: ["latin"] });
+const geistMono = Geist_Mono({ variable: "--font-geist-mono", subsets: ["latin"] });
+const display = Google_Sans({ variable: "--font-display", subsets: ["latin"], weight: "400" });
 
 export const metadata: Metadata = {
   title: "Uniform",
-  description: "Pay from any chain. Shops receive USDT on Whitechain.",
+  description: "Stablecoin checkout. Shops receive USDT on Whitechain, customers pay no gas.",
 };
 
 export default function RootLayout({ children }: LayoutProps<"/">) {
   return (
-    <html lang="en" className={`${inter.variable} ${outfit.variable} !bg-black`}>
-      <body className="bg-black">
+    <html lang="en" className={`${geist.variable} ${geistMono.variable} ${display.variable}`}>
+      <body>
         <Providers>{children}</Providers>
       </body>
     </html>

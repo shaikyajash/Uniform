@@ -145,9 +145,11 @@ export function PayCard({ orderId }: { orderId: string }) {
   return (
     <section className={styles.card}>
       <header className={styles.header}>
-        <span className={styles.label}>Pay</span>
+        <div className={styles.bar}>
+          <span>PAY</span>
+          <span>ORDER {order.reference}</span>
+        </div>
         <h1 className={styles.shop}>{order.shop.name}</h1>
-        <p className={styles.muted}>Order {order.reference}</p>
       </header>
 
       <div className={styles.amount}>
@@ -180,10 +182,14 @@ export function PayCard({ orderId }: { orderId: string }) {
       ) : (
         <>
           <div className={styles.wallet}>
-            <span>
-              From <code title={address}>{shortAddress(address)}</code>
-            </span>
-            <span>Balance {myBalance === null ? "…" : `${formatUsdt(myBalance)} USDT`}</span>
+            <div>
+              <small>FROM</small>
+              <b title={address}>{shortAddress(address)}</b>
+            </div>
+            <div>
+              <small>BALANCE</small>
+              <b>{myBalance === null ? "…" : `${formatUsdt(myBalance)} USDT`}</b>
+            </div>
             <button className={styles.link} onClick={logout}>
               Not you?
             </button>

@@ -1,310 +1,9 @@
-/* Home page: black, framed by thin lines, cards with hairline borders. */
-
-/* Paint the root black while the home page is open, so overscroll at the top or bottom doesn't reveal the white page background. */
-:global(html):has(.home),
-:global(body):has(.home) {
-  background: #050506;
-}
+/* Home page: the hero, the feature blocks and the footer. Colours and fonts come from globals.css. */
 
 .home {
-  --bg: #050506;
-  --panel: #0c0c0e;
-  --panel-2: #111114;
-  --hair: rgba(255, 255, 255, 0.08);
-  --hair-strong: rgba(255, 255, 255, 0.14);
-  --text: #f2f2f3;
-  --muted: #9a9aa2;
-  --faint: #5d5d66;
-  --container: 1344px;
-  /* Where content starts: 28px in from the window, or centred at 1344px on wide screens. */
-  --gutter: max(28px, calc((100vw - var(--container)) / 2));
-
   position: relative;
   min-height: 100vh;
-  background: var(--bg);
-  color: var(--text);
-  font-family: var(--font-geist), system-ui, sans-serif;
   overflow-x: hidden;
-}
-
-.home a {
-  text-decoration: none;
-  color: inherit;
-}
-
-/* ---------- Frame ---------- */
-
-/* Two faint lines down each side, 8px apart; the inner one is the content edge. */
-.guides {
-  pointer-events: none;
-  position: fixed;
-  inset: 0;
-  z-index: 51;
-}
-
-.guides span {
-  position: absolute;
-  top: 0;
-  bottom: 0;
-  width: 1px;
-  background: rgba(255, 255, 255, 0.15);
-  mix-blend-mode: difference;
-}
-
-.guideOuterLeft {
-  left: calc(var(--gutter) - 8px);
-}
-
-.guideInnerLeft {
-  left: var(--gutter);
-}
-
-.guideInnerRight {
-  right: var(--gutter);
-}
-
-.guideOuterRight {
-  right: calc(var(--gutter) - 8px);
-}
-
-/* ---------- Header ---------- */
-
-/* A see-through box floating 12px below the top, with a hairline above and below and a
-   small + on each corner. */
-.header {
-  position: fixed;
-  top: 12px;
-  left: 0;
-  right: 0;
-  z-index: 50;
-}
-
-.headerBox {
-  position: relative;
-  height: 48px;
-  margin: 0 var(--gutter);
-  padding: 0 20px;
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-}
-
-.headerBox::before,
-.headerBox::after {
-  content: "";
-  position: absolute;
-  left: 0;
-  right: 0;
-  height: 1px;
-  background: rgba(236, 236, 236, 0.1);
-  z-index: 10;
-}
-
-.headerBox::before {
-  top: 0;
-}
-
-.headerBox::after {
-  bottom: 0;
-}
-
-.corner {
-  pointer-events: none;
-  position: absolute;
-  z-index: 20;
-  width: 12px;
-  height: 12px;
-}
-
-.corner::before,
-.corner::after {
-  content: "";
-  position: absolute;
-}
-
-.corner::before {
-  left: 50%;
-  top: 0;
-  width: 1px;
-  height: 100%;
-  transform: translateX(-50%);
-  background: linear-gradient(180deg, transparent, rgba(226, 232, 240, 0.65) 50%, transparent);
-}
-
-.corner::after {
-  left: 0;
-  top: 50%;
-  width: 100%;
-  height: 1px;
-  transform: translateY(-50%);
-  background: linear-gradient(90deg, transparent, rgba(226, 232, 240, 0.65) 50%, transparent);
-}
-
-.cornerTopLeft {
-  left: 0;
-  top: 0;
-  transform: translate(-50%, -50%);
-}
-
-.cornerTopRight {
-  right: 0;
-  top: 0;
-  transform: translate(50%, -50%);
-}
-
-.cornerBottomLeft {
-  left: 0;
-  bottom: 0;
-  transform: translate(-50%, 50%);
-}
-
-.cornerBottomRight {
-  right: 0;
-  bottom: 0;
-  transform: translate(50%, 50%);
-}
-
-.logo {
-  display: inline-flex;
-  align-items: center;
-  gap: 8px;
-  height: 28px;
-  font-weight: 600;
-  font-size: 17px;
-  letter-spacing: 0.04em;
-  color: #fff;
-}
-
-.logo svg {
-  width: 24px;
-  height: 24px;
-}
-
-.nav {
-  display: flex;
-  gap: 48px;
-  font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
-  font-size: 14px;
-  line-height: 20px;
-}
-
-.home .nav a {
-  position: relative;
-  color: rgba(255, 255, 255, 0.7);
-  transition: color 0.3s;
-}
-
-.home .nav a:hover {
-  color: #fff;
-}
-
-/* A line that grows under a link on hover. */
-.navUnderline {
-  position: absolute;
-  left: 0;
-  bottom: -4px;
-  width: 0;
-  height: 1px;
-  background: #fff;
-  transition: width 0.3s;
-}
-
-.nav a:hover .navUnderline {
-  width: 100%;
-}
-
-/* ---------- Buttons ---------- */
-
-/* A dark pill whose edge has a light running round it (see star-button.tsx). */
-.starButton {
-  position: relative;
-  isolation: isolate;
-  z-index: 3;
-  overflow: hidden;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  padding: 0 16px;
-  border: 1px solid rgba(226, 232, 240, 0.5);
-  border-radius: 999px;
-  font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
-  font-weight: 500;
-  white-space: nowrap;
-}
-
-.starSmall {
-  height: 32px;
-  font-size: 12px;
-}
-
-.starLarge {
-  height: 40px;
-  font-size: 14px;
-}
-
-.starLight {
-  position: absolute;
-  inset: 0;
-  width: 110px;
-  aspect-ratio: 1;
-  background: radial-gradient(ellipse at center, #fafafa, transparent, transparent);
-  offset-path: var(--path);
-  offset-distance: 0%;
-  animation: star 3s linear infinite;
-}
-
-@keyframes star {
-  to {
-    offset-distance: 100%;
-  }
-}
-
-.starFace {
-  position: absolute;
-  inset: 2px;
-  z-index: 4;
-  border: 2px solid rgba(255, 255, 255, 0.15);
-  border-radius: inherit;
-  background: #000;
-}
-
-.starLabel {
-  position: relative;
-  z-index: 10;
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
-  color: #fff;
-}
-
-.home .solidButton {
-  position: relative;
-  isolation: isolate;
-  overflow: hidden;
-  display: inline-flex;
-  align-items: center;
-  height: 40px;
-  padding: 0 20px;
-  border: 1px solid rgba(255, 255, 255, 0.3);
-  border-radius: 999px;
-  background: #fff;
-  color: #000;
-  font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
-  font-size: 14px;
-  font-weight: 500;
-  white-space: nowrap;
-  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.05);
-}
-
-/* A faint highlight along the top edge. */
-.solidShine {
-  pointer-events: none;
-  position: absolute;
-  top: 0;
-  left: 1.125rem;
-  width: calc(100% - 2.25rem);
-  height: 1px;
-  background: linear-gradient(90deg, rgba(10, 10, 10, 0), #737373, rgba(10, 10, 10, 0));
 }
 
 /* ---------- Hero ---------- */
@@ -567,6 +266,7 @@
 }
 
 .chip {
+  white-space: nowrap;
   padding: 4px 9px;
   border: 1px solid var(--hair-strong);
   border-radius: 999px;
@@ -588,11 +288,6 @@
 .okDot {
   background: #3ad58b;
   box-shadow: 0 0 8px rgba(58, 213, 139, 0.8);
-}
-
-.warnDot {
-  background: #f2a93b;
-  box-shadow: 0 0 8px rgba(242, 169, 59, 0.8);
 }
 
 /* Block 1: flow */
@@ -756,17 +451,6 @@
   padding-top: 8px;
 }
 
-.ticks {
-  display: grid;
-  grid-template-columns: repeat(7, 1fr);
-  font-family: var(--font-geist-mono), monospace;
-  font-size: 9px;
-  color: var(--faint);
-  padding: 10px 0 14px;
-  border-bottom: 1px solid var(--hair);
-  background: repeating-linear-gradient(90deg, transparent 0 calc(100% / 7 - 1px), var(--hair) calc(100% / 7 - 1px) calc(100% / 7));
-}
-
 .track {
   padding: 14px 0 4px;
   display: grid;
@@ -776,7 +460,9 @@
 .trackHead {
   display: flex;
   justify-content: space-between;
+  gap: 8px;
   font-size: 12px;
+  white-space: nowrap;
 }
 
 .trackHead .faint {
@@ -877,146 +563,61 @@
   color: var(--faint);
 }
 
+/* A rule's setting, shown as plain text: these are the Relayer's real defaults, not a form. */
 .select {
-  display: inline-flex;
-  justify-content: space-between;
-  align-items: center;
-  width: 110px;
-  padding: 7px 10px;
-  border: 1px solid var(--hair-strong);
-  border-radius: 6px;
+  font-family: var(--font-geist-mono), monospace;
   font-size: 11.5px;
   color: #c9c9cf;
+  white-space: nowrap;
 }
 
-.select i {
-  font-style: normal;
+/* ---------- Block 4: the pay page preview ---------- */
+
+.checkout {
+  display: grid;
+  justify-items: start;
+  gap: 8px;
+  margin-top: 14px;
+  padding: 18px;
+  border: 1px solid var(--hair);
+  border-radius: 10px;
+  background: #0a0a0c;
+}
+
+.checkout small {
+  font-family: var(--font-geist-mono), monospace;
+  font-size: 10.5px;
+  letter-spacing: 0.08em;
   color: var(--faint);
 }
 
-.popover {
-  position: absolute;
-  top: 66px;
-  right: -14px;
-  width: 150px;
-  padding: 8px;
-  display: grid;
-  gap: 2px;
-  border: 1px solid rgba(255, 255, 255, 0.22);
-  border-radius: 10px;
-  background: #141417;
-  box-shadow: 0 20px 40px rgba(0, 0, 0, 0.7);
-  font-size: 10.5px;
+.checkoutShop {
+  font-size: 15px;
+  font-weight: 500;
+}
+
+.checkoutAmount {
+  font-family: var(--font-display), sans-serif;
+  font-size: 34px;
+  letter-spacing: -0.03em;
+  line-height: 1.1;
+}
+
+.checkoutAmount span {
+  font-size: 14px;
   color: var(--muted);
 }
 
-.popoverHead {
-  padding: 7px 8px;
-  margin-bottom: 6px;
-  border: 1px solid var(--hair-strong);
-  border-radius: 6px;
-  color: #fff;
-  font-size: 11px;
-}
-
-.popover span {
-  display: flex;
-  justify-content: space-between;
-  padding: 6px 8px;
-  border-radius: 5px;
-}
-
-.popoverOn {
-  background: rgba(255, 255, 255, 0.08);
-  color: #fff;
-}
-
-.popoverOn i {
-  font-style: normal;
-  color: #3ad58b;
-}
-
-/* Block 4: inbox */
-
-.inbox {
-  list-style: none;
-  padding-top: 10px;
-  display: grid;
-  gap: 4px;
-}
-
-.inbox li {
-  display: grid;
-  grid-template-columns: 34px 1fr auto;
-  align-items: center;
-  gap: 12px;
-  padding: 10px;
-  border-radius: 8px;
-  font-size: 11px;
-}
-
-.inboxActive {
-  background: rgba(255, 255, 255, 0.05);
-}
-
-.avatar {
-  position: relative;
-  width: 32px;
-  height: 32px;
-  border-radius: 50%;
-  display: grid;
-  place-items: center;
-  font-weight: 600;
-  font-size: 15px;
-  color: #fff;
-}
-
-.avatar.green {
-  background: linear-gradient(135deg, #2fbf86, #18734f);
-  box-shadow: none;
-}
-
-.avatar.violet {
-  background: linear-gradient(135deg, #a58cff, #5a3bd1);
-  box-shadow: none;
-}
-
-.badgeOk,
-.badgeWarn {
-  position: absolute;
-  right: -3px;
-  bottom: -3px;
-  width: 12px;
-  height: 12px;
-  border-radius: 50%;
-  border: 2px solid #111114;
-}
-
-.badgeOk {
-  background: #3ad58b;
-}
-
-.badgeWarn {
-  background: #f2c33b;
-}
-
-.inboxText {
-  display: grid;
-  gap: 2px;
-  min-width: 0;
-}
-
-.inboxText b {
-  font-weight: 500;
+.checkoutButton {
+  justify-self: stretch;
+  margin-top: 6px;
+  padding: 10px 14px;
+  border-radius: 999px;
+  background: #fff;
+  color: #000;
+  text-align: center;
   font-size: 12.5px;
-}
-
-.inboxText small {
-  color: var(--faint);
-  font-size: 10.5px;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
+  font-weight: 500;
 }
 
 /* ---------- Footer ---------- */
@@ -1028,9 +629,8 @@
 
 .footerTop {
   display: grid;
-  grid-template-columns: 2fr repeat(4, 1fr);
   gap: 32px;
-  padding-bottom: 72px;
+  padding-bottom: 56px;
   border-bottom: 1px solid var(--hair);
 }
 
@@ -1040,47 +640,6 @@
   font-size: 13px;
   line-height: 1.7;
   color: var(--muted);
-}
-
-.socials {
-  margin-top: 28px;
-  display: flex;
-  gap: 36px;
-  font-size: 13px;
-  color: var(--muted);
-}
-
-.footerColumn {
-  display: grid;
-  align-content: start;
-  gap: 16px;
-  font-size: 13px;
-}
-
-.footerColumn h4 {
-  font-weight: 500;
-  font-size: 13.5px;
-  margin-bottom: 6px;
-}
-
-.footerColumn a {
-  color: var(--muted);
-  display: inline-flex;
-  align-items: center;
-  gap: 8px;
-}
-
-.footerColumn a:hover,
-.socials a:hover {
-  color: #fff;
-}
-
-.pill {
-  padding: 2px 8px;
-  border-radius: 999px;
-  background: #fff;
-  color: #050506;
-  font-size: 10.5px;
 }
 
 .footerBottom {
@@ -1094,29 +653,6 @@
 }
 
 /* ---------- Smaller screens ---------- */
-
-/* Narrower screens: content 16px in, and the side lines sit at the window's edge. */
-@media (max-width: 1023px) {
-  .home {
-    --gutter: 16px;
-  }
-
-  .guideOuterLeft {
-    left: 0;
-  }
-
-  .guideInnerLeft {
-    left: 1px;
-  }
-
-  .guideInnerRight {
-    right: 1px;
-  }
-
-  .guideOuterRight {
-    right: 0;
-  }
-}
 
 @media (max-width: 1000px) {
   .features {
@@ -1149,24 +685,9 @@
     padding: 56px 20px 24px;
   }
 
-  .footerTop {
-    grid-template-columns: 1fr 1fr;
-  }
-
-  .footerBrand {
-    grid-column: 1 / -1;
-  }
 }
 
 @media (max-width: 760px) {
-  .nav {
-    display: none;
-  }
-
-  .headerBox {
-    padding: 0 14px;
-  }
-
   .hero {
     padding: 110px 18px 120px;
   }

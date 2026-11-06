@@ -15,7 +15,7 @@ export function Providers({ children }: { children: ReactNode }) {
       appId={appId}
       config={{
         loginMethods: ["email"],
-        appearance: { theme: "light", accentColor: "#0d1530" },
+        appearance: { theme: "dark", accentColor: "#fafafa" },
         embeddedWallets: { ethereum: { createOnLogin: "users-without-wallets" } },
         defaultChain: shopViemChain,
         supportedChains: [shopViemChain],
