@@ -89,6 +89,7 @@ const nextConfig: NextConfig = {
     NEXT_PUBLIC_SHOP_CHAIN: JSON.stringify(shopChain),
     NEXT_PUBLIC_CUSTOMER_CHAINS: JSON.stringify(customerChains),
     NEXT_PUBLIC_PROVIDER_FEE_BPS: String(chains.providerFeeBps ?? 30),
+    NEXT_PUBLIC_PROVIDER_FEE_RANGE: JSON.stringify(chains.providerFeeBpsRange ?? { min: 10, max: 100 }),
     NEXT_PUBLIC_TIMEOUTS: JSON.stringify(chains.timeoutsSeconds ?? {}),
   },
   // The pay page calls the Order Desk through this same site, so the browser never makes a

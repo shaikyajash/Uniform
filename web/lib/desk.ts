@@ -43,6 +43,8 @@ export type Order = {
   destinationLockId: string | null;
   /** Cross-chain: the Relayer claiming the merchant's lock with the secret. */
   claim: Payment | null;
+  /** The fee a cross-chain quote would carry now (cheapest provider who can cover it); null if none can. */
+  providerFeeBps?: number | null;
 };
 
 export type Leg = {

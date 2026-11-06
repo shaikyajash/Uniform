@@ -24,6 +24,7 @@ import {
   estimateTokenUnits,
   explorerTx,
   formatTokenAmount,
+  providerFeeRange,
   shopChain,
   shortAddress,
   tokenBalance,
@@ -103,6 +104,9 @@ const STEP_LABEL: Record<Exclude<Step, "idle">, string> = {
 
 /** The Order Desk's smallest split leg: 0.1 USDC (A8). */
 const MIN_SPLIT_LEG = BigInt(100_000);
+/** Providers set their own fee: the order says the cheapest one now, else the highest allowed. */
+const feeNote = (feeBps: number | null) =>
+  feeBps === null ? `incl. provider fee, at most ${providerFeeRange.max / 100}%` : `incl. ${feeBps / 100}% provider fee`;
 
 /** How often to refresh the market prices behind the priced tokens' estimates. */
 const PRICE_POLL_MS = 60_000;
@@ -174,7 +178,11 @@ export function PayCard({ orderId }: { orderId: string }) {
   }, [moving, waiting, refresh]);
 
   // Every way to pay, with what it costs and whether the wallet has it.
-  const options = useMemo(() => paymentOptions(units, balances, address, prices), [units, balances, address, prices]);
+  const feeBps = order?.providerFeeBps ?? null;
+  const options = useMemo(
+    () => paymentOptions(units, balances, address, prices, feeBps),
+    [units, balances, address, prices, feeBps],
+  );
 
   // Market prices for the priced tokens' estimates. A failed read keeps the last prices.
   useEffect(() => {
@@ -370,7 +378,11 @@ export function PayCard({ orderId }: { orderId: string }) {
     // The most this page will sign for: its own estimate at the price it shows, plus 5% for the
     // price moving in between. Without a price it signs nothing.
     const price = prices[token.priceId];
-    const ceiling = price ? (estimateTokenUnits(withProviderFee(parseUnits(order.amount, 6)), price, token.decimals) * BigInt(105)) / BigInt(100) : BigInt(0);
+    const ceiling = price
+      ? (estimateTokenUnits(withProviderFee(parseUnits(order.amount, 6), order.providerFeeBps ?? undefined), price, token.decimals) *
+          BigInt(105)) /
+        BigInt(100)
+      : BigInt(0);
     const expected = { orderId: order.orderId, hashlock: made.hashlock, ceiling };
     if (quote.toSign.length !== 1 || !batch || !batchFits(batch, chain, token, address, balance, expected)) throw new Error(DIDNT_CHECK_OUT);
 
@@ -977,8 +989,10 @@ function paymentOptions(
   balances: Balances | null,
   address: Address | null,
   prices: Record<string, number>,
+  feeBps: number | null,
 ): SourceOption[] {
   if (units === null) return [];
+  const withFee = (amount: bigint) => withProviderFee(amount, feeBps ?? undefined);
   const mine = balances && balances.owner === address ? balances.units : {};
   const usdt: SourceOption = {
     source: { kind: "usdt" },
@@ -993,14 +1007,14 @@ function paymentOptions(
       source: { kind: "usdc", chainId: chain.id },
       token: "USDC",
       chain: chainName(chain.id),
-      cost: withProviderFee(units),
+      cost: withFee(units),
       decimals: chain.usdcDecimals,
       balance: mine[`usdc:${chain.id}`] ?? null,
-      note: "incl. 0.3% provider fee",
+      note: feeNote(feeBps),
     }),
   );
   const parts = planSplit(
-    withProviderFee(units),
+    withFee(units),
     customerChains.map((chain) => ({ chainId: chain.id, balance: mine[`usdc:${chain.id}`] ?? null })),
   );
   const split: SourceOption[] = parts
@@ -1009,10 +1023,10 @@ function paymentOptions(
           source: { kind: "split", parts },
           token: "USDC",
           chain: parts.map((part) => chainName(part.chainId)).join(" + "),
-          cost: withProviderFee(units),
+          cost: withFee(units),
           decimals: 6,
           balance: parts.reduce((sum, part) => sum + (mine[`usdc:${part.chainId}`] ?? BigInt(0)), BigInt(0)),
-          note: "incl. 0.3% provider fee",
+          note: feeNote(feeBps),
           detail: parts.map((part) => `${formatUsdc(part.amount)} on ${chainName(part.chainId)}`).join(" + "),
         },
       ]
@@ -1027,7 +1041,7 @@ function paymentOptions(
         source: { kind: "token", chainId: chain.id, symbol: token.symbol },
         token: token.symbol,
         chain: chainName(chain.id),
-        cost: estimateTokenUnits(withProviderFee(units), price, token.decimals),
+        cost: estimateTokenUnits(withFee(units), price, token.decimals),
         decimals: token.decimals,
         approx: true,
         balance,
