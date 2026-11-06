@@ -17,7 +17,12 @@ use alloy::{
     sol_types::{SolCall, SolEvent},
     transports::{RpcError, TransportErrorKind},
 };
-use common::{amount::Amount, chains::Chain as ChainConfig, jobs::Job};
+use common::{
+    amount::Amount,
+    chains::Chain as ChainConfig,
+    jobs::Job,
+    locks::{SourceLockParams, hashlock_of, source_lock_id},
+};
 
 sol! {
     // The contract's nine arguments, not ours to shorten.
@@ -30,18 +35,68 @@ sol! {
                    address payer, uint256 amount);
     }
 
+    /// USDT on Whitechain, and USDC or EURC on customer chains: the EIP-3009 parts.
     #[sol(rpc)]
-    interface IUsdt {
+    interface IToken {
         function balanceOf(address owner) external view returns (uint256);
-        function isBlocked(address account) external view returns (bool);
         function authorizationState(address authorizer, bytes32 nonce) external view returns (bool);
     }
+
+    /// Tether's block list (USDT).
+    #[sol(rpc)]
+    interface ITether {
+        function isBlocked(address account) external view returns (bool);
+    }
+
+    /// Circle's block list (USDC, EURC).
+    #[sol(rpc)]
+    interface ICircle {
+        function isBlacklisted(address account) external view returns (bool);
+    }
+
+    struct LockParams {
+        bytes32 orderId;
+        address receiver;
+        uint256 minUsdcOut;
+        bytes32 hashlock;
+        uint64 expiry;
+        address outToken;
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    #[sol(rpc)]
+    interface ISourceLock {
+        function lockWithAuthorization(LockParams p, address payer, address tokenIn, uint256 amountIn,
+                                       uint256 validAfter, uint256 validBefore, uint8 v, bytes32 r, bytes32 s,
+                                       bytes swapData) external returns (bytes32 lockId);
+        function refund(bytes32 lockId) external;
+        function locks(bytes32 lockId) external view returns (address payer, uint64 expiry, uint8 state,
+            address receiver, uint96 amount, bytes32 hashlock, bytes32 orderId, address token);
+        event Locked(bytes32 indexed lockId, bytes32 indexed orderId, address payer, address receiver,
+                     address token, uint256 amount, bytes32 hashlock, uint64 expiry);
+        event Refunded(bytes32 indexed lockId);
+    }
+
+    #[sol(rpc)]
+    interface IDestinationLock {
+        function claim(bytes32 lockId, bytes32 secret) external;
+        function locks(bytes32 lockId) external view returns (address maker, uint64 expiry, uint8 state,
+            address merchant, uint96 amount, bytes32 hashlock, bytes32 orderId, bytes32 strategyHash,
+            bytes32 srcLockId, uint64 srcChainId);
+        event Settled(bytes32 indexed lockId, bytes32 indexed orderId, address indexed merchant, uint256 amount,
+                      uint256 srcChainId, bytes32 srcLockId, bytes32 secret);
+    }
 }
+
+/// A lock's state in both lock contracts.
+const LOCK_OPEN: u8 = 1;
+const LOCK_CLAIMED: u8 = 2;
+const LOCK_REFUNDED: u8 = 3;
 
 /// Why a chain call failed. A revert is final for this job; anything else is worth a retry.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ChainError {
-    /// The contract refused (`execution reverted: ...`). Sending would waste gas.
+    /// The contract (or one of our checks) refused. Sending would waste gas.
     Revert(String),
     /// The RPC was down, slow or returned nonsense. Try again later.
     Rpc(String),
@@ -54,6 +109,10 @@ impl std::fmt::Display for ChainError {
             ChainError::Rpc(reason) => write!(f, "rpc: {reason}"),
         }
     }
+}
+
+fn refuse<T>(reason: impl Into<String>) -> Result<T, ChainError> {
+    Err(ChainError::Revert(reason.into()))
 }
 
 /// A mined transaction: who sent it, whether it succeeded and what its gas cost (wei).
@@ -88,25 +147,131 @@ pub struct PayCall {
     pub s: B256,
 }
 
-impl PayCall {
-    /// Every job kind the Relayer can send is listed here; there is no way to send anything else.
-    pub fn from_job(job: &Job) -> Result<PayCall, String> {
-        let Job::DirectPay { order_id, merchant, amount, payer, valid_after, valid_before, nonce, signature } = job;
-        let (v, r, s) = split_signature(signature)?;
-        Ok(PayCall {
-            order_id: *order_id,
-            merchant: *merchant,
-            amount: *amount,
-            payer: *payer,
-            valid_after: *valid_after,
-            valid_before: *valid_before,
-            nonce: *nonce,
-            v,
-            r,
-            s,
+/// `SourceLock.lockWithAuthorization`'s arguments, with the signature split into v, r, s.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LockCall {
+    pub params: SourceLockParams,
+    pub payer: Address,
+    pub token: Address,
+    pub amount: Amount,
+    pub valid_after: u64,
+    pub valid_before: u64,
+    pub lock_id: B256,
+    pub v: u8,
+    pub r: B256,
+    pub s: B256,
+}
+
+/// `DestinationLock.claim`, and what the lock must promise before the secret is sent.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ClaimCall {
+    pub lock_id: B256,
+    pub secret: B256,
+    pub merchant: Address,
+    pub min_amount: Amount,
+    pub deadline: u64,
+}
+
+/// One transaction the Relayer can send. Every job kind maps to exactly one of these; there is no
+/// way to send anything else.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Call {
+    DirectPay(PayCall),
+    SourceLock(LockCall),
+    DestinationClaim(ClaimCall),
+    SourceRefund { lock_id: B256 },
+}
+
+impl Call {
+    pub fn from_job(job: &Job) -> Result<Call, String> {
+        Ok(match job {
+            Job::DirectPay { order_id, merchant, amount, payer, valid_after, valid_before, nonce, signature } => {
+                let (v, r, s) = split_signature(signature)?;
+                Call::DirectPay(PayCall {
+                    order_id: *order_id,
+                    merchant: *merchant,
+                    amount: *amount,
+                    payer: *payer,
+                    valid_after: *valid_after,
+                    valid_before: *valid_before,
+                    nonce: *nonce,
+                    v,
+                    r,
+                    s,
+                })
+            }
+            Job::SourceLock { params, payer, token, amount, valid_after, valid_before, lock_id, signature } => {
+                let (v, r, s) = split_signature(signature)?;
+                Call::SourceLock(LockCall {
+                    params: *params,
+                    payer: *payer,
+                    token: *token,
+                    amount: *amount,
+                    valid_after: *valid_after,
+                    valid_before: *valid_before,
+                    lock_id: *lock_id,
+                    v,
+                    r,
+                    s,
+                })
+            }
+            Job::DestinationClaim { lock_id, secret, merchant, min_amount, deadline } => {
+                Call::DestinationClaim(ClaimCall {
+                    lock_id: *lock_id,
+                    secret: *secret,
+                    merchant: *merchant,
+                    min_amount: *min_amount,
+                    deadline: *deadline,
+                })
+            }
+            Job::SourceRefund { lock_id } => Call::SourceRefund { lock_id: *lock_id },
         })
     }
 
+    /// What marks this call as done on chain, by anyone: the note's nonce (a payment or a lock),
+    /// or the lock id (a claim or a refund). Also the indexed topic of the log it emits.
+    pub fn done_id(&self) -> B256 {
+        match self {
+            Call::DirectPay(call) => call.nonce,
+            Call::SourceLock(call) => call.lock_id,
+            Call::DestinationClaim(call) => call.lock_id,
+            Call::SourceRefund { lock_id } => *lock_id,
+        }
+    }
+
+    /// After this (unix seconds) the call can no longer succeed. A refund never runs out.
+    pub fn deadline(&self) -> Option<u64> {
+        match self {
+            Call::DirectPay(call) => Some(call.valid_before),
+            Call::SourceLock(call) => Some(call.valid_before),
+            Call::DestinationClaim(call) => Some(call.deadline),
+            Call::SourceRefund { .. } => None,
+        }
+    }
+
+    /// The amount checked against the Relayer's order limit, in 6-decimal units. A lock carries
+    /// Bob's fee on top of the order, so it is allowed 1% more.
+    pub fn amount_for_limit(&self) -> Option<U256> {
+        match self {
+            Call::DirectPay(call) => Some(call.amount.0),
+            Call::SourceLock(call) => Some(call.amount.0 * U256::from(100u64) / U256::from(101u64)),
+            Call::DestinationClaim(_) | Call::SourceRefund { .. } => None,
+        }
+    }
+
+    /// Whether a failure that leaves nothing on chain hands the order back to `quoted`, so the
+    /// customer can sign again. Only the calls that carry the customer's note do.
+    pub fn reopens_order(&self) -> bool {
+        matches!(self, Call::DirectPay(_) | Call::SourceLock(_))
+    }
+
+    /// For messages: what runs out at the deadline.
+    pub fn what_runs_out(&self) -> &'static str {
+        if self.reopens_order() { "the note" } else { "the lock" }
+    }
+}
+
+impl PayCall {
     fn abi(&self) -> IDirectPay::payCall {
         IDirectPay::payCall {
             orderId: self.order_id,
@@ -122,6 +287,31 @@ impl PayCall {
     }
 }
 
+impl LockCall {
+    fn abi(&self) -> ISourceLock::lockWithAuthorizationCall {
+        let p = self.params;
+        ISourceLock::lockWithAuthorizationCall {
+            p: LockParams {
+                orderId: p.order_id,
+                receiver: p.receiver,
+                minUsdcOut: p.min_usdc_out.0,
+                hashlock: p.hashlock,
+                expiry: p.expiry,
+                outToken: p.out_token,
+            },
+            payer: self.payer,
+            tokenIn: self.token,
+            amountIn: self.amount.0,
+            validAfter: U256::from(self.valid_after),
+            validBefore: U256::from(self.valid_before),
+            v: self.v,
+            r: self.r,
+            s: self.s,
+            swapData: Bytes::new(),
+        }
+    }
+}
+
 /// 65 bytes into the `v` (27 or 28), `r`, `s` that `receiveWithAuthorization` takes.
 pub fn split_signature(signature: &Bytes) -> Result<(u8, B256, B256), String> {
     let parsed = Signature::from_raw(signature).map_err(|error| format!("bad signature: {error}"))?;
@@ -131,21 +321,33 @@ pub fn split_signature(signature: &Bytes) -> Result<(u8, B256, B256), String> {
 pub trait Chain {
     /// The Relayer's own address on this chain.
     fn sender(&self) -> Address;
-    /// Has this EIP-3009 note been used? Only a mined transaction uses it, never a pending one.
-    async fn note_used(&self, payer: Address, nonce: B256) -> Result<bool, ChainError>;
-    async fn usdt_balance(&self, owner: Address) -> Result<U256, ChainError>;
-    async fn is_blocked(&self, account: Address) -> Result<bool, ChainError>;
-    /// `eth_call` of the exact transaction: free, and says whether sending would succeed.
-    async fn dry_run(&self, call: &PayCall) -> Result<(), ChainError>;
-    /// Signs `DirectPay.pay` with `nonce` (or the next free one) and the fee raised `fee_bumps`
-    /// times by 25%. Sends nothing.
-    async fn sign(&self, call: &PayCall, nonce: Option<u64>, fee_bumps: u32) -> Result<SignedTx, ChainError>;
+    /// Has this call's effect happened on chain, by anyone? A note is used, or a lock claimed or
+    /// refunded, only by a mined transaction, never by a pending one.
+    async fn done(&self, call: &Call) -> Result<bool, ChainError>;
+    /// Every check before signing, ending with a dry run (`eth_call` of the exact transaction).
+    /// `Revert` means sending would fail or do harm; `Rpc` means try again.
+    async fn check(&self, call: &Call, now: u64) -> Result<(), ChainError>;
+    /// Signs the call with `nonce` (or the next free one) and the fee raised `fee_bumps` times by
+    /// 25%. Sends nothing.
+    async fn sign(&self, call: &Call, nonce: Option<u64>, fee_bumps: u32) -> Result<SignedTx, ChainError>;
     /// Sends signed bytes. Sending the same bytes again is harmless: it is the same transaction.
     async fn broadcast(&self, raw: &Bytes) -> Result<(), ChainError>;
     /// `None` while not mined yet.
     async fn receipt(&self, tx_hash: B256) -> Result<Option<Mined>, ChainError>;
-    /// The transaction that emitted `Paid` for this payment id (the note's nonce), if any.
-    async fn find_payment(&self, payment_id: B256) -> Result<Option<B256>, ChainError>;
+    /// The transaction that did this call's effect (its log), if any.
+    async fn find_done(&self, call: &Call) -> Result<Option<B256>, ChainError>;
+}
+
+/// Our contracts and tokens on one chain, from chains.json. A call for a contract that is not on
+/// this chain is refused.
+#[derive(Debug, Clone, Default)]
+struct Contracts {
+    direct_pay: Option<Address>,
+    source_lock: Option<Address>,
+    destination_lock: Option<Address>,
+    usdt: Option<Address>,
+    /// The tokens a SourceLock here may hold for us (USDC, EURC).
+    lockable: Vec<Address>,
 }
 
 /// A real chain over JSON-RPC, signing with the Relayer's key.
@@ -154,34 +356,44 @@ pub struct Rpc {
     wallet: EthereumWallet,
     sender: Address,
     chain_id: u64,
-    usdt: Address,
-    direct_pay: Address,
+    contracts: Contracts,
     /// The RPC address, kept only to remove it from error text: it may hold an API key.
     url: String,
 }
 
-/// How far back to look for a `Paid` log. Notes live 10 minutes; Whitechain makes about one block
-/// a second, so this is over an hour.
-const PAYMENT_LOOKBACK_BLOCKS: u64 = 5_000;
+/// How far back to look for the log that shows a call was done. Notes live 10 minutes and locks
+/// 20; Whitechain makes about one block a second and Base one every two, so this is over an hour.
+const LOG_LOOKBACK_BLOCKS: u64 = 5_000;
 /// Every RPC call gives up after this, well inside the worker's lease.
 pub const RPC_TIMEOUT: Duration = Duration::from_secs(10);
 /// Gas limit = estimate + 20%.
 const GAS_MARGIN_PERCENT: u64 = 20;
+/// SPEC: do not send a claim with less than this left on the destination lock. A claim that
+/// reverts still puts the secret on chain, where Bob could use it.
+const MIN_CLAIM_TIME_LEFT: u64 = 120;
+/// Do not lock a customer's tokens unless Bob still has this long to fill: chains.json
+/// `fillCutoff` (900 s) plus a minute for the transaction and Base's safe block.
+pub const MIN_LOCK_TIME_LEFT: u64 = 960;
 
 impl Rpc {
     pub fn connect(config: &ChainConfig, rpc_url: &str, signer: PrivateKeySigner) -> Result<Rpc, String> {
-        let usdt = config.tokens.get("USDT").ok_or("chains.json: no USDT on the shop chain")?.address;
-        let direct_pay = config.contracts.direct_pay.ok_or("chains.json: no DirectPay on the shop chain")?;
+        let token = |symbol: &str| config.tokens.get(symbol).map(|token| token.address);
+        let contracts = Contracts {
+            direct_pay: config.contracts.direct_pay,
+            source_lock: config.contracts.source_lock,
+            destination_lock: config.contracts.destination_lock,
+            usdt: token("USDT"),
+            lockable: ["USDC", "EURC"].into_iter().filter_map(token).collect(),
+        };
         let sender = signer.address();
-        let url = rpc_url.parse().map_err(|_| "the shop chain's RPC address is not a valid URL".to_owned())?;
+        let url = rpc_url.parse().map_err(|_| format!("chain {}: the RPC address is not a valid URL", config.chain_id))?;
         let provider = ProviderBuilder::new().connect_http(url).erased();
         Ok(Rpc {
             provider,
             wallet: EthereumWallet::from(signer),
             sender,
             chain_id: config.chain_id,
-            usdt,
-            direct_pay,
+            contracts,
             url: rpc_url.trim_end_matches('/').to_owned(),
         })
     }
@@ -208,6 +420,124 @@ impl Rpc {
             ChainError::Rpc(text) => ChainError::Rpc(scrub(text)),
         }
     }
+
+    fn need(&self, address: Option<Address>, what: &str) -> Result<Address, ChainError> {
+        address.map_or_else(|| refuse(format!("no {what} on chain {}", self.chain_id)), Ok)
+    }
+
+    /// Where the call goes and its calldata.
+    fn target(&self, call: &Call) -> Result<(Address, Vec<u8>), ChainError> {
+        Ok(match call {
+            Call::DirectPay(call) => (self.need(self.contracts.direct_pay, "DirectPay")?, call.abi().abi_encode()),
+            Call::SourceLock(call) => (self.need(self.contracts.source_lock, "SourceLock")?, call.abi().abi_encode()),
+            Call::DestinationClaim(call) => (
+                self.need(self.contracts.destination_lock, "DestinationLock")?,
+                IDestinationLock::claimCall { lockId: call.lock_id, secret: call.secret }.abi_encode(),
+            ),
+            Call::SourceRefund { lock_id } => (
+                self.need(self.contracts.source_lock, "SourceLock")?,
+                ISourceLock::refundCall { lockId: *lock_id }.abi_encode(),
+            ),
+        })
+    }
+
+    /// `eth_call` of the exact transaction: free, and says whether sending would succeed.
+    async fn dry_run(&self, call: &Call) -> Result<(), ChainError> {
+        let (to, input) = self.target(call)?;
+        let request = TransactionRequest::default().with_from(self.sender).with_to(to).with_input(input);
+        self.rpc(self.provider.call(request).into_future()).await.map(|_| ())
+    }
+
+    async fn note_used(&self, token: Address, payer: Address, nonce: B256) -> Result<bool, ChainError> {
+        let token = IToken::new(token, &self.provider);
+        self.contract(async { token.authorizationState(payer, nonce).call().await }).await
+    }
+
+    async fn balance(&self, token: Address, owner: Address) -> Result<U256, ChainError> {
+        let token = IToken::new(token, &self.provider);
+        self.contract(async { token.balanceOf(owner).call().await }).await
+    }
+
+    async fn source_lock_state(&self, lock_id: B256) -> Result<ISourceLock::locksReturn, ChainError> {
+        let lock = ISourceLock::new(self.need(self.contracts.source_lock, "SourceLock")?, &self.provider);
+        self.contract(async { lock.locks(lock_id).call().await }).await
+    }
+
+    async fn destination_lock_state(&self, lock_id: B256) -> Result<IDestinationLock::locksReturn, ChainError> {
+        let lock = IDestinationLock::new(self.need(self.contracts.destination_lock, "DestinationLock")?, &self.provider);
+        self.contract(async { lock.locks(lock_id).call().await }).await
+    }
+
+    async fn check_pay(&self, call: &PayCall) -> Result<(), ChainError> {
+        let usdt = self.need(self.contracts.usdt, "USDT")?;
+        let tether = ITether::new(usdt, &self.provider);
+        if self.contract(async { tether.isBlocked(call.payer).call().await }).await? {
+            return refuse("the payer is blocked by USDT");
+        }
+        if self.balance(usdt, call.payer).await? < call.amount.0 {
+            return refuse("the payer does not have enough USDT");
+        }
+        Ok(())
+    }
+
+    async fn check_lock(&self, call: &LockCall, now: u64) -> Result<(), ChainError> {
+        let source_lock = self.need(self.contracts.source_lock, "SourceLock")?;
+        if !self.contracts.lockable.contains(&call.token) {
+            return refuse("the token cannot be locked on this chain");
+        }
+        let expected = source_lock_id(self.chain_id, source_lock, &call.params, call.payer, call.token, call.amount);
+        if expected != call.lock_id {
+            return refuse("the lock id does not match its parameters");
+        }
+        if call.params.expiry < now + MIN_LOCK_TIME_LEFT {
+            return refuse("too little time left on the lock for Bob to fill it");
+        }
+        let circle = ICircle::new(call.token, &self.provider);
+        if self.contract(async { circle.isBlacklisted(call.payer).call().await }).await? {
+            return refuse("the payer is blacklisted by Circle");
+        }
+        if self.balance(call.token, call.payer).await? < call.amount.0 {
+            return refuse("the payer does not have enough USDC");
+        }
+        Ok(())
+    }
+
+    /// SPEC: before sending the secret, the lock must pay this shop at least the order amount,
+    /// under this secret, with time to spare, and Tether must not have blocked the lock.
+    async fn check_claim(&self, call: &ClaimCall, now: u64) -> Result<(), ChainError> {
+        let lock = self.destination_lock_state(call.lock_id).await?;
+        if lock.state != LOCK_OPEN {
+            return refuse("the shop's lock is not open");
+        }
+        if lock.merchant != call.merchant {
+            return refuse("the shop's lock pays someone else");
+        }
+        if U256::from(lock.amount) < call.min_amount.0 {
+            return refuse("the shop's lock holds less than the order");
+        }
+        if lock.hashlock != hashlock_of(call.secret) {
+            return refuse("the shop's lock is under another secret");
+        }
+        if lock.expiry < now + MIN_CLAIM_TIME_LEFT {
+            return refuse("too little time left on the shop's lock to send the secret safely");
+        }
+        let usdt = self.need(self.contracts.usdt, "USDT")?;
+        let destination_lock = self.need(self.contracts.destination_lock, "DestinationLock")?;
+        let tether = ITether::new(usdt, &self.provider);
+        if self.contract(async { tether.isBlocked(destination_lock).call().await }).await? {
+            return refuse("USDT has blocked the DestinationLock");
+        }
+        Ok(())
+    }
+
+    /// Whether the lock has timed out is the chain's call: the dry run runs on its clock.
+    async fn check_refund(&self, lock_id: B256) -> Result<(), ChainError> {
+        match self.source_lock_state(lock_id).await?.state {
+            LOCK_OPEN => Ok(()),
+            LOCK_CLAIMED => refuse("Bob claimed the lock; there is nothing to refund"),
+            _ => refuse("there is no open lock with this id"),
+        }
+    }
 }
 
 impl Chain for Rpc {
@@ -215,28 +545,27 @@ impl Chain for Rpc {
         self.sender
     }
 
-    async fn note_used(&self, payer: Address, nonce: B256) -> Result<bool, ChainError> {
-        let usdt = IUsdt::new(self.usdt, &self.provider);
-        self.contract(async { usdt.authorizationState(payer, nonce).call().await }).await
+    async fn done(&self, call: &Call) -> Result<bool, ChainError> {
+        match call {
+            Call::DirectPay(call) => self.note_used(self.need(self.contracts.usdt, "USDT")?, call.payer, call.nonce).await,
+            Call::SourceLock(call) => self.note_used(call.token, call.payer, call.lock_id).await,
+            Call::DestinationClaim(call) => Ok(self.destination_lock_state(call.lock_id).await?.state == LOCK_CLAIMED),
+            Call::SourceRefund { lock_id } => Ok(self.source_lock_state(*lock_id).await?.state == LOCK_REFUNDED),
+        }
     }
 
-    async fn usdt_balance(&self, owner: Address) -> Result<U256, ChainError> {
-        let usdt = IUsdt::new(self.usdt, &self.provider);
-        self.contract(async { usdt.balanceOf(owner).call().await }).await
+    async fn check(&self, call: &Call, now: u64) -> Result<(), ChainError> {
+        match call {
+            Call::DirectPay(call) => self.check_pay(call).await?,
+            Call::SourceLock(call) => self.check_lock(call, now).await?,
+            Call::DestinationClaim(call) => self.check_claim(call, now).await?,
+            Call::SourceRefund { lock_id } => self.check_refund(*lock_id).await?,
+        }
+        self.dry_run(call).await
     }
 
-    async fn is_blocked(&self, account: Address) -> Result<bool, ChainError> {
-        let usdt = IUsdt::new(self.usdt, &self.provider);
-        self.contract(async { usdt.isBlocked(account).call().await }).await
-    }
-
-    async fn dry_run(&self, call: &PayCall) -> Result<(), ChainError> {
-        let direct_pay = IDirectPay::new(self.direct_pay, &self.provider);
-        let abi = call.abi();
-        self.contract(async { direct_pay.call_builder(&abi).from(self.sender).call().await.map(|_| ()) }).await
-    }
-
-    async fn sign(&self, call: &PayCall, nonce: Option<u64>, fee_bumps: u32) -> Result<SignedTx, ChainError> {
+    async fn sign(&self, call: &Call, nonce: Option<u64>, fee_bumps: u32) -> Result<SignedTx, ChainError> {
+        let (to, input) = self.target(call)?;
         let nonce = match nonce {
             Some(nonce) => nonce,
             None => self.rpc(self.provider.get_transaction_count(self.sender).pending().into_future()).await?,
@@ -250,8 +579,8 @@ impl Chain for Rpc {
         }
         let mut request = TransactionRequest::default()
             .with_from(self.sender)
-            .with_to(self.direct_pay)
-            .with_input(call.abi().abi_encode())
+            .with_to(to)
+            .with_input(input)
             .with_chain_id(self.chain_id)
             .with_nonce(nonce)
             .with_max_fee_per_gas(max_fee)
@@ -265,7 +594,7 @@ impl Chain for Rpc {
     async fn broadcast(&self, raw: &Bytes) -> Result<(), ChainError> {
         match self.rpc(async { self.provider.send_raw_transaction(raw).await.map(|_| ()) }).await {
             // The node already has it, or its nonce is used (by this transaction, mined, or by
-            // another one): either way the receipt and the note decide what happened.
+            // another one): either way the receipt and the chain decide what happened.
             Err(ChainError::Rpc(text) | ChainError::Revert(text)) if already_handled(&text) => Ok(()),
             // A node never "reverts" a raw send; any refusal here is worth a retry.
             Err(ChainError::Revert(text)) => Err(ChainError::Rpc(text)),
@@ -283,13 +612,23 @@ impl Chain for Rpc {
         }))
     }
 
-    async fn find_payment(&self, payment_id: B256) -> Result<Option<B256>, ChainError> {
+    async fn find_done(&self, call: &Call) -> Result<Option<B256>, ChainError> {
+        let (contract, event) = match call {
+            Call::DirectPay(_) => (self.need(self.contracts.direct_pay, "DirectPay")?, IDirectPay::Paid::SIGNATURE_HASH),
+            Call::SourceLock(_) => (self.need(self.contracts.source_lock, "SourceLock")?, ISourceLock::Locked::SIGNATURE_HASH),
+            Call::DestinationClaim(_) => {
+                (self.need(self.contracts.destination_lock, "DestinationLock")?, IDestinationLock::Settled::SIGNATURE_HASH)
+            }
+            Call::SourceRefund { .. } => {
+                (self.need(self.contracts.source_lock, "SourceLock")?, ISourceLock::Refunded::SIGNATURE_HASH)
+            }
+        };
         let latest = self.rpc(self.provider.get_block_number().into_future()).await?;
         let filter = Filter::new()
-            .address(self.direct_pay)
-            .event_signature(IDirectPay::Paid::SIGNATURE_HASH)
-            .topic1(payment_id)
-            .from_block(latest.saturating_sub(PAYMENT_LOOKBACK_BLOCKS))
+            .address(contract)
+            .event_signature(event)
+            .topic1(call.done_id())
+            .from_block(latest.saturating_sub(LOG_LOOKBACK_BLOCKS))
             .to_block(latest);
         let logs = self.rpc(self.provider.get_logs(&filter).into_future()).await?;
         Ok(logs.first().and_then(|log| log.transaction_hash))
