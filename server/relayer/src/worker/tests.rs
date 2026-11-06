@@ -626,6 +626,90 @@ async fn a_refund_is_sent_even_when_the_shop_has_spent_its_gas_budget(pool: PgPo
     assert_eq!(statuses(&pool, job).await.0, "confirmed");
 }
 
+/// A leg for order `order`, as the Order Desk writes it when the customer signs.
+async fn add_leg(pool: &PgPool, order: u8, lock_id: B256, status: &str) {
+    sqlx::query(
+        "INSERT INTO quotes (id, order_id, path, payer, typed_data, nonce, valid_after, valid_before, expires_at, created_at)
+         VALUES ('q_test', $1, 'crosschain', $2, '{}', $3, 0, 1, 1, 1)",
+    )
+    .bind(order_id(order))
+    .bind(format!("{SHOP:#x}"))
+    .bind(lock_id.to_string())
+    .execute(pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO legs (order_id, quote_id, chain_id, token, amount, payer, lock_id, expiry, status, created_at)
+         VALUES ($1, 'q_test', $2, $3, $4::numeric, $3, $5, 1, $6, 1)",
+    )
+    .bind(order_id(order))
+    .bind(i64::try_from(CHAIN_ID).unwrap())
+    .bind(format!("{SHOP:#x}"))
+    .bind(AMOUNT.to_string())
+    .bind(lock_id.to_string())
+    .bind(status)
+    .execute(pool)
+    .await
+    .unwrap();
+}
+
+async fn leg_status(pool: &PgPool) -> (String, Option<String>) {
+    sqlx::query_as("SELECT status, refund_tx FROM legs").fetch_one(pool).await.unwrap()
+}
+
+#[sqlx::test(migrations = "../order-desk/migrations")]
+async fn our_mined_refund_returns_the_leg_and_the_order_without_waiting_for_the_matchmaker(pool: PgPool) {
+    let job = add_order_and_job(&pool, 1, AMOUNT, "source_locked", &Job::SourceRefund { lock_id: note(1) }).await;
+    add_leg(&pool, 1, note(1), "locked").await;
+    let chain = FakeChain::new();
+    let hash = sent(&pool, &chain, NOW).await;
+    chain.mine(hash, false);
+    assert_eq!(outcome(&pool, &chain, NOW + RECEIPT_POLL_SECONDS).await, Some(Outcome::Confirmed(hash)));
+    assert_eq!(statuses(&pool, job).await, ("confirmed".into(), "returned".into()));
+    assert_eq!(leg_status(&pool).await, ("returned".into(), Some(hash.to_string())));
+}
+
+#[sqlx::test(migrations = "../order-desk/migrations")]
+async fn a_refund_the_matchmaker_sent_first_also_returns_the_order(pool: PgPool) {
+    let job = add_order_and_job(&pool, 1, AMOUNT, "destination_locked", &Job::SourceRefund { lock_id: note(1) }).await;
+    add_leg(&pool, 1, note(1), "locked").await;
+    let chain = FakeChain::new();
+    let theirs = chain.front_run(note(1));
+    assert_eq!(outcome(&pool, &chain, NOW).await, Some(Outcome::Sent(theirs)));
+    assert_eq!(outcome(&pool, &chain, NOW).await, Some(Outcome::Confirmed(theirs)));
+    assert_eq!(statuses(&pool, job).await, ("confirmed".into(), "returned".into()));
+}
+
+#[sqlx::test(migrations = "../order-desk/migrations")]
+async fn a_refund_never_returns_a_paid_order(pool: PgPool) {
+    let job = add_order_and_job(&pool, 1, AMOUNT, "paid", &Job::SourceRefund { lock_id: note(1) }).await;
+    add_leg(&pool, 1, note(1), "locked").await;
+    let chain = FakeChain::new();
+    let hash = sent(&pool, &chain, NOW).await;
+    chain.mine(hash, false);
+    assert_eq!(outcome(&pool, &chain, NOW + RECEIPT_POLL_SECONDS).await, Some(Outcome::Confirmed(hash)));
+    assert_eq!(statuses(&pool, job).await, ("confirmed".into(), "paid".into()));
+}
+
+#[sqlx::test(migrations = "../order-desk/migrations")]
+async fn our_mined_claim_marks_the_order_paid_without_waiting_for_the_matchmaker(pool: PgPool) {
+    let claim = Job::DestinationClaim {
+        lock_id: note(1),
+        secret: B256::repeat_byte(7),
+        merchant: SHOP,
+        min_amount: Amount::from(AMOUNT),
+        deadline: NOW + 1_200,
+    };
+    let job = add_order_and_job(&pool, 1, AMOUNT, "destination_locked", &claim).await;
+    let chain = FakeChain::new();
+    let hash = sent(&pool, &chain, NOW).await;
+    chain.mine(hash, false);
+    assert_eq!(outcome(&pool, &chain, NOW + RECEIPT_POLL_SECONDS).await, Some(Outcome::Confirmed(hash)));
+    assert_eq!(statuses(&pool, job).await, ("confirmed".into(), "paid".into()));
+    let paid_at: Option<i64> = sqlx::query_scalar("SELECT paid_at FROM orders").fetch_one(&pool).await.unwrap();
+    assert_eq!(paid_at, Some(i64::try_from(NOW + RECEIPT_POLL_SECONDS).unwrap()));
+}
+
 #[sqlx::test(migrations = "../order-desk/migrations")]
 async fn a_claim_is_sent_even_when_the_shop_has_spent_its_gas_budget(pool: PgPool) {
     let claim = Job::DestinationClaim {
@@ -647,5 +731,5 @@ async fn a_claim_is_sent_even_when_the_shop_has_spent_its_gas_budget(pool: PgPoo
     let hash = sent(&pool, &chain, NOW).await;
     chain.mine(hash, false);
     assert_eq!(outcome(&pool, &chain, NOW + RECEIPT_POLL_SECONDS).await, Some(Outcome::Confirmed(hash)));
-    assert_eq!(statuses(&pool, job).await.0, "confirmed");
+    assert_eq!(statuses(&pool, job).await, ("confirmed".into(), "paid".into()));
 }

@@ -158,6 +158,10 @@ pub async fn settled(tx: &mut PgConnection, order_id: B256, amount: Amount) -> R
             .await?;
     let Some((status, order_amount, destination_lock)) = order else { return skip("no such order") };
     let status: OrderStatus = status.parse().map_err(ApiError::internal)?;
+    // The Relayer marks the order paid when its own claim is mined; this is the same payment.
+    if status == OrderStatus::Paid && destination_lock.is_some() {
+        return Ok(Applied::LegOnly("already paid by our claim"));
+    }
     if status != OrderStatus::DestinationLocked || destination_lock.is_none() {
         return skip(format!("order is {status}; only a verified fill can be settled"));
     }
@@ -323,6 +327,20 @@ mod tests {
         let paid_at: Option<i64> =
             sqlx::query_scalar("SELECT paid_at FROM orders WHERE id = $1").bind(&order).fetch_one(&test.pool).await.unwrap();
         assert!(paid_at.is_some());
+    }
+
+    #[sqlx::test]
+    async fn a_settled_after_our_own_claim_marked_the_order_paid_is_accepted_and_changes_nothing(pool: PgPool) {
+        let test = test_app(pool).await;
+        let (order, lock_id) = paying(&test).await;
+        report(&test, 1874, filled(&order, bobs_lock(&lock_id), "12000000")).await;
+        // As the Relayer does when its claim is mined.
+        sqlx::query("UPDATE orders SET status = 'paid', paid_at = 5 WHERE id = $1").bind(&order).execute(&test.pool).await.unwrap();
+        let receipt = report(&test, 1874, json!({ "type": "Settled", "orderId": order, "amount": "12000000" })).await;
+        assert_eq!((receipt["applied"].clone(), receipt["orderStatus"].clone()), (json!(true), Value::Null), "{receipt}");
+        let paid_at: Option<i64> =
+            sqlx::query_scalar("SELECT paid_at FROM orders WHERE id = $1").bind(&order).fetch_one(&test.pool).await.unwrap();
+        assert_eq!(paid_at, Some(5));
     }
 
     #[sqlx::test]
