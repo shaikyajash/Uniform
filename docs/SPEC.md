@@ -43,7 +43,7 @@ orderId  = bytes32 made by the Order Desk
 Customer secret (Pay Button, Paths B and C):
 - The Privy wallet signs EIP-712 typed data: domain `{ name: "Uniform", version: "1", chainId }`, message binding `orderId` and `amount`. `secret = keccak256(signature)`.
 - The same order gives the same signature, so a closed tab is recovered by signing again. Nothing is stored: no localStorage, no server copy, no logs. The signature never leaves the browser.
-- Before revealing the secret, the browser reads the Shop Lock on Whitechain itself and checks the merchant, amount (at least the order amount), hashlock and time left. It does not rely on the Order Desk status.
+- Before revealing the secret, the browser reads the Destination Lock on Whitechain itself and checks the merchant, amount (at least the order amount), hashlock and time left. It does not rely on the Order Desk status.
 - Privy allowed domains: only our domain plus localhost. No third-party scripts on the pay page.
 - Fallback: a random 32-byte secret held only in memory. If the tab closes, the HTLC timeouts refund both sides.
 
@@ -51,20 +51,20 @@ Customer secret (Pay Button, Paths B and C):
 
 ```
 1. Source lock         customer → Source Lock (Base or Ethereum Sepolia)   USDC held for Bob
-2. Destination lock    Bob      → Shop Lock (Whitechain)                      USDT held for the shop
+2. Destination lock    Bob      → Destination Lock (Whitechain)                      USDT held for the shop
 3. Destination redeem  customer's browser reveals the secret (via Gas Payer)  shop gets USDT  (Settled)
 4. Source redeem       Matchmaker reuses the now-public secret                Bob gets USDC   (Claimed)
 Refund (timeout): each lock returns to whoever locked it; the destination lock expires first.
 ```
 
-The customer only reveals the secret. The Shop Lock pays only the merchant set when it was opened, so the sender of the secret never receives the USDT.
+The customer only reveals the secret. The Destination Lock pays only the merchant set when it was opened, so the sender of the secret never receives the USDT.
 
 ## Timeouts (demo values)
 
 | Lock | Demo | Real product | Rule |
 |---|---|---|---|
 | Source Lock | 20 min | 2 h | Always the longest |
-| Shop Lock | 10 min | 1 h | Always shorter than the customer side |
+| Destination Lock | 10 min | 1 h | Always shorter than the customer side |
 | Matchmaker fill cutoff | 15 min left | 90 min left | Never fill a source lock close to expiry |
 | Quote | 2 min | 2 min | Price and minimum USDC out |
 
@@ -74,8 +74,8 @@ Defined in `shared/types.ts` (`ORDER_STATUSES`, `ORDER_TRANSITIONS`, `canMove`) 
 
 ```
 created → quoted → paying → paid                                   (Path A)
-created → quoted → paying → customer_locked → shop_locked → paid   (Paths B and C)
-customer_locked or shop_locked → returned     (timed out, customer's money went back)
+created → quoted → paying → source_locked → destination_locked → paid   (Paths B and C)
+source_locked or destination_locked → returned     (timed out, customer's money went back)
 created or quoted → expired                   (quote ran out, no money moved)
 paying → quoted                               (transaction failed, customer can sign again)
 paid → partially_refunded → refunded
@@ -86,8 +86,8 @@ paid → partially_refunded → refunded
 | `created` | Shop made the order | `POST /v1/orders` |
 | `quoted` | Customer got a price and the data to sign | `POST /v1/orders/:id/quote` |
 | `paying` | Signature received, transaction sent | Gas Payer sent it |
-| `customer_locked` | Every customer leg is locked | `Locked` events |
-| `shop_locked` | Bob's USDT is locked for the shop | `Filled` event |
+| `source_locked` | Every customer leg is locked | `Locked` events |
+| `destination_locked` | Bob's USDT is locked for the shop | `Filled` event |
 | `paid` | The shop has the USDT | `Paid` or `Settled` event |
 | `partially_refunded` | Part of the amount given back | refund events |
 | `refunded` | Full amount given back | refund events |
@@ -186,13 +186,13 @@ Rules for the Matchmaker and Gas Payer (from the security review):
 struct Strategy { address maker; address token; uint16 feeBps; uint128 maxPerOrder;
                   address filler; bytes32 salt; }
 function fill(Strategy s, bytes32 orderId, address merchant, uint256 amount, bytes32 hashlock,
-              uint64 expiry, uint256 srcChainId, bytes32 srcLockId) external returns (bytes32 shopLockId);
+              uint64 expiry, uint256 srcChainId, bytes32 srcLockId) external returns (bytes32 destinationLockId);
 // only s.filler, amount <= s.maxPerOrder,
-// AQUA.pull(s.maker, keccak256(abi.encode(s)), USDT, amount, shopLock), then shopLock.openFromPool(...)
-event Filled(bytes32 indexed orderId, address indexed maker, uint256 amount, bytes32 shopLockId);
+// AQUA.pull(s.maker, keccak256(abi.encode(s)), USDT, amount, destinationLock), then destinationLock.openFromPool(...)
+event Filled(bytes32 indexed orderId, address indexed maker, uint256 amount, bytes32 destinationLockId);
 ```
 
-### ShopLock (Whitechain)
+### DestinationLock (Whitechain)
 
 ```solidity
 function openFromPool(...) external;           // only PayoutPool
@@ -207,7 +207,7 @@ event Settled(bytes32 indexed orderId, address merchant, uint256 amount, uint256
 event RefundLocked(bytes32 indexed orderId, bytes32 lockId, uint256 amount);
 ```
 
-If the provider has docked the strategy, `aqua.push` reverts and ShopLock falls back to a plain transfer.
+If the provider has docked the strategy, `aqua.push` reverts and DestinationLock falls back to a plain transfer.
 
 ## Order Desk API (owner B)
 
@@ -219,7 +219,7 @@ If the provider has docked the strategy, `aqua.push` reverts and ShopLock falls 
 | `POST /v1/orders/:id/quote` | Pay Button | `{payer, balances}` → path, legs, EIP-712 data, expiry |
 | `POST /v1/orders/:id/direct` | Pay Button | Signature → Gas Payer calls `DirectPay.pay` |
 | `POST /v1/orders/:id/legs` | Pay Button | `{hashlock, legs:[{chainId, signature}]}` → `lockWithAuthorization` |
-| `POST /v1/orders/:id/secret` | Pay Button | Only when `shop_locked`: Gas Payer calls `ShopLock.claim` |
+| `POST /v1/orders/:id/secret` | Pay Button | Only when `destination_locked`: Gas Payer calls `DestinationLock.claim` |
 | `POST /v1/orders/:id/refunds` | Shop Dashboard | `{amount, hashlock, signature}` → refund flow |
 | `POST /v1/refunds/:id/secret` | Shop Dashboard | Releases the refund to the customer |
 | `GET /v1/payments.csv` | Shop Dashboard | Accountant export |

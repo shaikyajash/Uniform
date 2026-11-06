@@ -5,8 +5,8 @@ export const ORDER_STATUSES = [
   "created", // order made by the shop, nobody has paid
   "quoted", // customer opened the page and got a price and the data to sign
   "paying", // signature received, transaction sent, waiting for the chain event
-  "customer_locked", // cross-chain: every customer leg is locked (Locked events)
-  "shop_locked", // cross-chain: Bob's USDT is locked for the shop (Filled)
+  "source_locked", // cross-chain: every customer leg is locked (Locked events)
+  "destination_locked", // cross-chain: Bob's USDT is locked for the shop (Filled)
   "paid", // the shop has the USDT (Paid or Settled)
   "partially_refunded", // the shop gave back part of the amount
   "refunded", // the shop gave back the full amount
@@ -19,9 +19,9 @@ export type OrderStatus = (typeof ORDER_STATUSES)[number];
 export const ORDER_TRANSITIONS: Record<OrderStatus, readonly OrderStatus[]> = {
   created: ["quoted", "expired"],
   quoted: ["quoted", "paying", "expired"], // a new quote can replace an old one
-  paying: ["paid", "customer_locked", "quoted"], // back to quoted if the transaction fails
-  customer_locked: ["shop_locked", "returned"],
-  shop_locked: ["paid", "returned"],
+  paying: ["paid", "source_locked", "quoted"], // back to quoted if the transaction fails
+  source_locked: ["destination_locked", "returned"],
+  destination_locked: ["paid", "returned"],
   paid: ["partially_refunded", "refunded"],
   partially_refunded: ["partially_refunded", "refunded"],
   refunded: [],
@@ -80,7 +80,7 @@ export type ChainEvent =
   | { type: "Paid"; paymentId: Hex; orderId: Hex; payer: Hex; amount: string; txHash: Hex }
   | { type: "DirectRefunded"; paymentId: Hex; orderId: Hex; amount: string; totalRefunded: string; txHash: Hex }
   | { type: "Locked"; chainId: number; lockId: Hex; orderId: Hex; usdcAmount: string; txHash: Hex }
-  | { type: "Filled"; orderId: Hex; shopLockId: Hex; amount: string; txHash: Hex }
+  | { type: "Filled"; orderId: Hex; destinationLockId: Hex; amount: string; txHash: Hex }
   | { type: "Settled"; orderId: Hex; amount: string; txHash: Hex }
   | { type: "Claimed"; chainId: number; lockId: Hex; txHash: Hex }
   | { type: "Refunded"; chainId: number; lockId: Hex; txHash: Hex };

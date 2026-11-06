@@ -18,7 +18,7 @@ contract AquaTest is Test {
     TestUSDT usdt;
     address bob = makeAddr("bob");
     address app = makeAddr("payoutPool");
-    address shopLock = makeAddr("shopLock");
+    address destinationLock = makeAddr("destinationLock");
     bytes strategy = abi.encode(bob, "uniform-strategy");
     bytes32 strategyHash;
 
@@ -43,10 +43,10 @@ contract AquaTest is Test {
         assertEq(balance, 50e6);
     }
 
-    function test_appPullsFromMakerWalletToShopLock() public {
+    function test_appPullsFromMakerWalletToDestinationLock() public {
         vm.prank(app);
-        aqua.pull(bob, strategyHash, address(usdt), 12e6, shopLock);
-        assertEq(usdt.balanceOf(shopLock), 12e6);
+        aqua.pull(bob, strategyHash, address(usdt), 12e6, destinationLock);
+        assertEq(usdt.balanceOf(destinationLock), 12e6);
         assertEq(usdt.balanceOf(bob), 88e6);
         (uint248 balance,) = aqua.rawBalances(bob, app, strategyHash, address(usdt));
         assertEq(balance, 38e6);
@@ -55,19 +55,19 @@ contract AquaTest is Test {
     function test_pullBeyondAllowanceReverts() public {
         vm.prank(app);
         vm.expectRevert();
-        aqua.pull(bob, strategyHash, address(usdt), 51e6, shopLock);
+        aqua.pull(bob, strategyHash, address(usdt), 51e6, destinationLock);
     }
 
     function test_onlyTheShippedAppCanPull() public {
         vm.prank(makeAddr("stranger"));
         vm.expectRevert();
-        aqua.pull(bob, strategyHash, address(usdt), 1e6, shopLock);
+        aqua.pull(bob, strategyHash, address(usdt), 1e6, destinationLock);
     }
 
     function test_pushRestoresAllowanceAndPaysMaker() public {
         vm.prank(app);
-        aqua.pull(bob, strategyHash, address(usdt), 12e6, shopLock);
-        vm.startPrank(shopLock);
+        aqua.pull(bob, strategyHash, address(usdt), 12e6, destinationLock);
+        vm.startPrank(destinationLock);
         usdt.approve(address(aqua), 12e6);
         aqua.push(bob, app, strategyHash, address(usdt), 12e6);
         vm.stopPrank();
@@ -81,8 +81,8 @@ contract AquaTest is Test {
         tokens[0] = address(usdt);
         vm.prank(bob);
         aqua.dock(app, strategyHash, tokens);
-        usdt.mint(shopLock, 1e6);
-        vm.startPrank(shopLock);
+        usdt.mint(destinationLock, 1e6);
+        vm.startPrank(destinationLock);
         usdt.approve(address(aqua), 1e6);
         vm.expectRevert();
         aqua.push(bob, app, strategyHash, address(usdt), 1e6);

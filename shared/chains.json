@@ -15,7 +15,7 @@
       "aqua": "0x02dF2659B5B4956EAFEe3293584C2aaefC114871",
       "directPay": "0x9DF1C7C32Ce3f1322e1c7bAEc30664b1c472DaE9",
       "payoutPool": "",
-      "shopLock": ""
+      "destinationLock": ""
     },
     "confirmations": 1
   },
@@ -75,7 +75,7 @@
   },
   "timeoutsSeconds": {
     "sourceLock": 1200,
-    "shopLock": 600,
+    "destinationLock": 600,
     "fillCutoff": 900,
     "quote": 120
   },
