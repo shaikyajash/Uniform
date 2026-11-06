@@ -94,13 +94,33 @@ const post = (body: unknown, token?: string): RequestInit & { token?: string } =
   token,
 });
 
-/** Step 1 of signing in: the message the payout wallet signs. */
-export const challenge = (address: string) =>
-  call<{ nonce: string; message: string; expiresAt: number }>("/auth/challenge", post({ address }));
+/**
+ * Step 1 of signing in: the message the payout wallet signs. `merchant` says whether the wallet
+ * already is one; if not, ask for a name and call again with `createName` to sign up.
+ */
+export const challenge = (address: string, createName?: string) =>
+  call<{ nonce: string; message: string; expiresAt: number; merchant: boolean }>(
+    "/auth/challenge",
+    post(createName ? { address, createName } : { address }),
+  );
+
+/** A new merchant's secrets, returned once at sign-up. */
+export type Created = { apiKey: string; webhookSecret: string };
+
+// Held in memory only (never in storage), for the dashboard to show once after sign-up.
+let welcome: Created | null = null;
+
+/** The secrets from a sign-up that just happened, once; null afterwards. */
+export function takeWelcome(): Created | null {
+  const value = welcome;
+  welcome = null;
+  return value;
+}
 
 /** Step 2: the signature for a session. Saves it, which signs the dashboard in. */
 export async function verify(nonce: string, signature: string): Promise<Session> {
-  const session = await call<Session>("/auth/verify", post({ nonce, signature }));
+  const { created, ...session } = await call<Session & { created?: Created }>("/auth/verify", post({ nonce, signature }));
+  welcome = created ?? null;
   write(session);
   return session;
 }
@@ -195,6 +215,8 @@ export const submitRefund = (token: string, orderId: string, note: RefundNote, s
 export function explainDashboard(error: unknown): string {
   if (error instanceof DeskError) {
     switch (error.code) {
+      case "bad_name":
+        return "Give your business a name, up to 60 characters.";
       case "not_a_merchant":
         return "No merchant is paid to this wallet. Sign in with the wallet your payouts go to.";
       case "challenge_expired":

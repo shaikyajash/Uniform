@@ -7,12 +7,13 @@ import { LogOut } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { shortAddress } from "@/lib/chain";
-import { getShop, signOut, useSession, type Session, type Settings as ShopSettings } from "@/lib/dashboard";
+import { getShop, signOut, takeWelcome, useSession, type Session, type Settings as ShopSettings } from "@/lib/dashboard";
 import { Eyebrow } from "./bits";
 import { Payments } from "./payments";
 import { Settings } from "./settings";
 import { SignIn } from "./sign-in";
 import { Webhooks } from "./webhooks";
+import { Welcome } from "./welcome";
 
 export function Dashboard() {
   const session = useSession();
@@ -24,7 +25,9 @@ export function Dashboard() {
 type Tab = "payments" | "webhooks" | "settings";
 
 function SignedIn({ session }: { session: Session }) {
-  const [tab, setTab] = useState<Tab>("payments");
+  // Just signed up: open on Settings, where the setup code is, with the new secrets on top.
+  const [created] = useState(takeWelcome);
+  const [tab, setTab] = useState<Tab>(created ? "settings" : "payments");
   const [settings, setSettings] = useState<ShopSettings | null>(null);
 
   // Fresh on every tab change: a secret replaced in another tab shows here too.
@@ -41,6 +44,7 @@ function SignedIn({ session }: { session: Session }) {
 
   return (
     <div className="mx-auto grid w-full max-w-[1080px] gap-8">
+      {created && <Welcome created={created} name={session.merchant.name} />}
       <header className="flex flex-wrap items-end justify-between gap-4">
         <div className="grid gap-2">
           <Eyebrow>Merchant dashboard</Eyebrow>

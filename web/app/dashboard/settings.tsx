@@ -24,6 +24,7 @@ import {
   type Settings as ShopSettings,
 } from "@/lib/dashboard";
 import { Eyebrow, Panel } from "./bits";
+import { Integrate } from "./integrate";
 
 export function Settings({
   session,
@@ -43,6 +44,7 @@ export function Settings({
   }
   return (
     <div className="grid gap-6">
+      <Integrate />
       <Panel title="Merchant">
         <Row label="Name">{settings.name}</Row>
         <Row label="Paid to">
@@ -207,7 +209,7 @@ function ApiKey({ session }: { session: Session }) {
   );
 }
 
-function CopyButton({ text, label }: { text: string; label: string }) {
+export function CopyButton({ text, label }: { text: string; label: string }) {
   const [copied, setCopied] = useState(false);
   return (
     <Button

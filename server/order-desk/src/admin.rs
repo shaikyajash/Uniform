@@ -13,7 +13,7 @@ pub struct NewShop {
     pub webhook_secret: String,
 }
 
-pub async fn add_shop(pool: &PgPool, name: &str, payout: Address) -> Result<NewShop, sqlx::Error> {
+pub async fn add_shop<'e>(db: impl sqlx::PgExecutor<'e>, name: &str, payout: Address) -> Result<NewShop, sqlx::Error> {
     let (api_key, api_key_hash) = new_api_key();
     let webhook_secret = format!("whsec_{}", hex::encode(random::bytes32()));
     let id = sqlx::query_scalar(
@@ -26,7 +26,7 @@ pub async fn add_shop(pool: &PgPool, name: &str, payout: Address) -> Result<NewS
     .bind(api_key_hash)
     .bind(&webhook_secret)
     .bind(now())
-    .fetch_one(pool)
+    .fetch_one(db)
     .await?;
     Ok(NewShop { id, api_key, webhook_secret })
 }

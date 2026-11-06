@@ -8,6 +8,11 @@
 //!
 //! The message names this site and a random nonce, so a signature cannot be reused elsewhere or
 //! twice. Only ordinary wallets (65-byte signatures) can sign in; smart-contract wallets cannot.
+//!
+//! Signing up is the same two calls: a challenge with `createName` asks the wallet to sign "create
+//! a merchant named …", and `verify` then makes that merchant in the same transaction as the
+//! session and returns its API key and webhook secret once (`created`). The name is read back from
+//! the stored, signed message, so it is exactly what the wallet agreed to.
 
 use alloy::{
     hex,
@@ -33,7 +38,15 @@ const SESSION_SECONDS: i64 = 12 * 3600;
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ChallengeRequest {
     address: String,
+    /// Sign up: the new merchant's name. The message then asks to create it.
+    #[serde(default)]
+    create_name: Option<String>,
 }
+
+/// The longest merchant name sign-up accepts.
+const MAX_NAME: usize = 60;
+const CREATE_PREFIX: &str = "Create a Uniform merchant account at ";
+const NAME_LINE: &str = "Merchant: ";
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -41,6 +54,9 @@ pub struct Challenge {
     nonce: String,
     message: String,
     expires_at: i64,
+    /// Whether this wallet is already a merchant's payout wallet, so the page knows to ask for a
+    /// name (sign up) before the one signature.
+    merchant: bool,
 }
 
 pub async fn challenge(
@@ -50,9 +66,23 @@ pub async fn challenge(
     let Json(body) = body.map_err(|rejection| ApiError::bad_request("bad_json", rejection.body_text()))?;
     let address: Address =
         body.address.trim().parse().map_err(|_| ApiError::bad_request("bad_address", "address must be a 0x address"))?;
+    let name = match body.create_name.as_deref().map(str::trim) {
+        None => None,
+        Some(name) if name.is_empty() || name.chars().count() > MAX_NAME || name.chars().any(char::is_control) => {
+            return Err(ApiError::bad_request("bad_name", format!("the name must be 1 to {MAX_NAME} characters on one line")));
+        }
+        Some(name) => Some(name.to_owned()),
+    };
+    let merchant: bool = sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM merchants WHERE payout_address = $1)")
+        .bind(format!("{address:#x}"))
+        .fetch_one(&state.pool)
+        .await?;
     let nonce = hex::encode(&crate::random::bytes32()[..16]);
     let expires_at = now() + CHALLENGE_SECONDS;
-    let message = challenge_message(&state.pay_base_url, address, &nonce);
+    let message = match &name {
+        Some(name) => sign_up_message(&state.pay_base_url, address, name, &nonce),
+        None => challenge_message(&state.pay_base_url, address, &nonce),
+    };
     sqlx::query("INSERT INTO login_challenges (nonce, address, message, expires_at) VALUES ($1, $2, $3, $4)")
         .bind(&nonce)
         .bind(format!("{address:#x}"))
@@ -60,16 +90,37 @@ pub async fn challenge(
         .bind(expires_at)
         .execute(&state.pool)
         .await?;
-    Ok(Json(Challenge { nonce, message, expires_at }))
+    Ok(Json(Challenge { nonce, message, expires_at, merchant }))
+}
+
+/// What the wallet shows when signing up: the name it creates, then the same plain words.
+fn sign_up_message(site: &str, address: Address, name: &str, nonce: &str) -> String {
+    let site = site.trim_end_matches('/');
+    format!(
+        "{CREATE_PREFIX}{site}\n\n\
+         {NAME_LINE}{name}\n\
+         Payout wallet: {}\n\n\
+         Payments to this merchant are paid in USDT to this wallet. Signing is free and moves no money.\n\n\
+         Nonce: {nonce}",
+        address.to_checksum(None)
+    )
+}
+
+/// The merchant name a sign-up message asked for, or `None` for a plain sign-in message.
+fn signed_up_name(message: &str) -> Option<&str> {
+    if !message.starts_with(CREATE_PREFIX) {
+        return None;
+    }
+    message.lines().find_map(|line| line.strip_prefix(NAME_LINE))
 }
 
 /// What the wallet shows. Plain words first: the owner should know it is free and moves nothing.
 fn challenge_message(site: &str, address: Address, nonce: &str) -> String {
     let site = site.trim_end_matches('/');
     format!(
-        "Sign in to the Uniform shop dashboard at {site}\n\n\
+        "Sign in to the Uniform merchant dashboard at {site}\n\n\
          Wallet: {}\n\n\
-         This only proves you hold the shop's payout wallet. It is free and moves no money.\n\n\
+         This only proves you hold the merchant's payout wallet. It is free and moves no money.\n\n\
          Nonce: {nonce}",
         address.to_checksum(None)
     )
@@ -89,6 +140,16 @@ pub struct SignedIn {
     token: String,
     expires_at: i64,
     merchant: ShopName,
+    /// Only right after sign-up: the new merchant's secrets, shown this once.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    created: Option<Created>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Created {
+    api_key: String,
+    webhook_secret: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -134,8 +195,17 @@ pub async fn verify(
             .bind(&address)
             .fetch_optional(&mut *tx)
             .await?;
-    let Some((merchant_id, name, payout_address)) = shop else {
-        return Err(ApiError::new(StatusCode::FORBIDDEN, "not_a_merchant", "no merchant is paid to this wallet"));
+    let (merchant_id, name, payout_address, created) = match (shop, signed_up_name(&message)) {
+        (Some((id, name, payout)), _) => (id, name, payout, None),
+        (None, Some(new_name)) => {
+            let signer_address: Address = address.parse().map_err(ApiError::internal)?;
+            let new = crate::admin::add_shop(&mut *tx, new_name, signer_address).await?;
+            let created = Created { api_key: new.api_key, webhook_secret: new.webhook_secret };
+            (new.id, new_name.to_owned(), address.clone(), Some(created))
+        }
+        (None, None) => {
+            return Err(ApiError::new(StatusCode::FORBIDDEN, "not_a_merchant", "no merchant is paid to this wallet"));
+        }
     };
     let (token, token_hash) = new_session_token();
     let created_at = now();
@@ -148,7 +218,7 @@ pub async fn verify(
         .execute(&mut *tx)
         .await?;
     tx.commit().await?;
-    Ok(Json(SignedIn { token, expires_at, merchant: ShopName { name, payout_address } }))
+    Ok(Json(SignedIn { token, expires_at, merchant: ShopName { name, payout_address }, created }))
 }
 
 pub async fn logout(State(state): State<AppState>, owner: Owner) -> Result<StatusCode, ApiError> {
@@ -214,6 +284,41 @@ mod tests {
         let app = test_app(pool).await;
         let (status, reply, _) = sign_in(&app, &PrivateKeySigner::random()).await;
         assert_eq!((status, reply["error"]["code"].as_str()), (StatusCode::FORBIDDEN, Some("not_a_merchant")));
+    }
+
+    #[sqlx::test]
+    async fn a_new_wallet_signs_up_once_and_then_signs_in(pool: PgPool) {
+        let app = test_app(pool).await;
+        let wallet = PrivateKeySigner::random();
+        let ask = json!({ "address": wallet.address(), "createName": "  Chai Point " });
+        let (status, challenge) = post(&app, "/v1/auth/challenge", ask, None).await;
+        assert_eq!(status, StatusCode::OK, "{challenge}");
+        assert_eq!(challenge["merchant"], false);
+        let message = challenge["message"].as_str().unwrap();
+        assert!(message.contains("Merchant: Chai Point\n"), "{message}");
+        let signature = wallet.sign_message_sync(message.as_bytes()).unwrap();
+        let body = json!({ "nonce": challenge["nonce"], "signature": signature.to_string() });
+        let (status, reply) = post(&app, "/v1/auth/verify", body, None).await;
+        assert_eq!(status, StatusCode::OK, "{reply}");
+        assert_eq!(reply["merchant"]["name"], "Chai Point");
+        assert!(reply["created"]["apiKey"].as_str().is_some_and(|key| !key.is_empty()));
+        assert!(reply["created"]["webhookSecret"].as_str().is_some_and(|secret| secret.starts_with("whsec_")));
+
+        let (status, reply, _) = sign_in(&app, &wallet).await;
+        assert_eq!(status, StatusCode::OK, "{reply}");
+        assert!(reply.get("created").is_none(), "secrets are shown only at sign-up");
+        let (_, again) = post(&app, "/v1/auth/challenge", json!({ "address": wallet.address() }), None).await;
+        assert_eq!(again["merchant"], true);
+    }
+
+    #[sqlx::test]
+    async fn a_bad_merchant_name_is_refused(pool: PgPool) {
+        let app = test_app(pool).await;
+        for name in ["", "   ", "two\nlines", &"x".repeat(61)] {
+            let ask = json!({ "address": PrivateKeySigner::random().address(), "createName": name });
+            let (status, reply) = post(&app, "/v1/auth/challenge", ask, None).await;
+            assert_eq!((status, reply["error"]["code"].as_str()), (StatusCode::BAD_REQUEST, Some("bad_name")), "{name:?}");
+        }
     }
 
     #[sqlx::test]
