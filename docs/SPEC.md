@@ -15,10 +15,29 @@ All addresses live in `shared/chains.json`.
 ## Secret and lock
 
 ```
-secret   = 32 random bytes, made in the browser (Pay Button or Shop Dashboard)
+secret   = keccak256(signature)   // customer payments, see below
 hashlock = keccak256(abi.encodePacked(secret))
 orderId  = bytes32 made by the Order Desk
 ```
+
+Customer secret (Pay Button, Paths B and C):
+- The Privy wallet signs EIP-712 typed data: domain `{ name: "Uniform", version: "1", chainId }`, message binding `orderId` and `amount`. `secret = keccak256(signature)`.
+- The same order gives the same signature, so a closed tab is recovered by signing again. Nothing is stored: no localStorage, no server copy, no logs. The signature never leaves the browser.
+- Before revealing the secret, the browser reads the Shop Lock on Whitechain itself and checks the merchant, amount (at least the order amount), hashlock and time left. It does not rely on the Order Desk status.
+- Privy allowed domains: only our domain plus localhost. No third-party scripts on the pay page.
+- Fallback: a random 32-byte secret held only in memory. If the tab closes, the HTLC timeouts refund both sides.
+
+## Cross-chain terms
+
+```
+1. Source lock         customer → Customer Lock (Base or Ethereum Sepolia)   USDC held for Bob
+2. Destination lock    Bob      → Shop Lock (Whitechain)                      USDT held for the shop
+3. Destination redeem  customer's browser reveals the secret (via Gas Payer)  shop gets USDT  (Settled)
+4. Source redeem       Matchmaker reuses the now-public secret                Bob gets USDC   (Claimed)
+Refund (timeout): each lock returns to whoever locked it; the destination lock expires first.
+```
+
+The customer only reveals the secret. The Shop Lock pays only the merchant set when it was opened, so the sender of the secret never receives the USDT.
 
 ## Timeouts (demo values)
 
@@ -31,12 +50,31 @@ orderId  = bytes32 made by the Order Desk
 
 ## Order statuses
 
+Defined once in `shared/types.ts` (`ORDER_STATUSES`, `ORDER_TRANSITIONS`, `canMove`). The Order Desk rejects any move not in the table.
+
 ```
-created → quoted → customer_locked → shop_locked → paid
-                                             ↘ expired (customer refunded)
+created → quoted → paying → paid                                   (Path A)
+created → quoted → paying → customer_locked → shop_locked → paid   (Paths B and C)
+customer_locked or shop_locked → returned     (timed out, customer's money went back)
+created or quoted → expired                   (quote ran out, no money moved)
+paying → quoted                               (transaction failed, customer can sign again)
 paid → partially_refunded → refunded
-Direct path: created → paid
 ```
+
+| Status | Means | Set by |
+|---|---|---|
+| `created` | Shop made the order | `POST /v1/orders` |
+| `quoted` | Customer got a price and the data to sign | `POST /v1/orders/:id/quote` |
+| `paying` | Signature received, transaction sent | Gas Payer sent it |
+| `customer_locked` | Every customer leg is locked | `Locked` events |
+| `shop_locked` | Bob's USDT is locked for the shop | `Filled` event |
+| `paid` | The shop has the USDT | `Paid` or `Settled` event |
+| `partially_refunded` | Part of the amount given back | refund events |
+| `refunded` | Full amount given back | refund events |
+| `expired` | Quote ran out, no money moved | Order Desk timer |
+| `returned` | Cross-chain timed out, customer refunded | Customer Lock `Refunded` event |
+
+Legs: `pending → locked → claimed`, or `locked → returned`. Refunds: `pending → sent`, or `pending → failed`.
 
 ## Fees
 
@@ -92,7 +130,7 @@ function lockWithAuthorization(LockParams p, address payer, address tokenIn, uin
 // require(out >= minUsdcOut).
 function lockWithETH(LockParams p, bytes swapData) external payable returns (bytes32 lockId);
 function lockFromProvider(LockParams p, uint256 usdcAmount) external returns (bytes32 lockId);
-function claim(bytes32 lockId, bytes32 secret) external;  // to receiver, swapped to outToken if set
+function claim(bytes32 lockId, bytes32 secret) external;  // source redeem: to receiver, swapped to outToken if set
 function refund(bytes32 lockId) external;                 // after expiry, back to payer
 event Locked(bytes32 indexed lockId, bytes32 indexed orderId, address payer, address receiver,
              uint256 usdcAmount, bytes32 hashlock, uint64 expiry);
@@ -117,7 +155,7 @@ event Filled(bytes32 indexed orderId, address indexed maker, uint256 amount, byt
 ```solidity
 function openFromPool(...) external;           // only PayoutPool
 function claim(bytes32 lockId, bytes32 secret) external;
-// payout lock: USDT to merchant, emits Settled (onchain receipt)
+// destination redeem: payout lock pays USDT to merchant, emits Settled (onchain receipt)
 // refund lock: aqua.push(maker, payoutPool, strategyHash, USDT, amount) back to the provider
 function refund(bytes32 lockId) external;       // after expiry
 function openRefund(bytes32 orderId, address merchant, uint256 amount, bytes32 hashlock, uint64 expiry,
