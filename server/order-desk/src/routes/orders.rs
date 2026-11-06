@@ -12,7 +12,7 @@ use common::{
 };
 use serde::{Deserialize, Serialize};
 
-use super::{AppState, now};
+use super::{AppState, normalize_order_id, now};
 use crate::{auth::Shop, error::ApiError, random};
 
 /// USDT on Whitechain has 6 decimals: "12.000000" is 12 USDT.
@@ -130,10 +130,7 @@ struct OrderRow {
 
 /// Public: the pay page has no login. The random 32-byte id is what keeps orders private.
 pub async fn read(State(state): State<AppState>, Path(id): Path<String>) -> Result<Json<OrderView>, ApiError> {
-    let id = id.to_ascii_lowercase();
-    if !is_bytes32_hex(&id) {
-        return Err(ApiError::not_found("order"));
-    }
+    let id = normalize_order_id(&id).ok_or_else(|| ApiError::not_found("order"))?;
     let row: Option<OrderRow> = sqlx::query_as(
         "SELECT o.id, m.name AS shop_name, m.payout_address AS shop_address, o.reference,
                 o.amount::text AS amount, o.status, o.path, o.payer, o.created_at, o.expires_at, o.paid_at
@@ -162,54 +159,20 @@ pub async fn read(State(state): State<AppState>, Path(id): Path<String>) -> Resu
     }))
 }
 
-fn is_bytes32_hex(text: &str) -> bool {
-    text.len() == 66
-        && text.starts_with("0x")
-        && text[2..].bytes().all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
-}
 
 #[cfg(test)]
 mod tests {
     use axum::{
-        Router,
-        body::{Body, to_bytes},
+        body::Body,
         http::{Request, StatusCode, header},
     };
     use serde_json::{Value, json};
     use sqlx::PgPool;
-    use tower::ServiceExt;
 
     use crate::{
         auth::new_api_key,
-        routes::{AppState, router},
+        routes::test_support::{call, test_app},
     };
-
-    struct TestApp {
-        app: Router,
-        pool: PgPool,
-        key: String,
-    }
-
-    async fn test_app(pool: PgPool) -> TestApp {
-        let (key, hash) = new_api_key();
-        sqlx::query(
-            "INSERT INTO merchants (name, payout_address, api_key_hash, webhook_secret, created_at)
-             VALUES ('Kettle & Co', '0x5a30000000000000000000000000000000000001', $1, 'whsec_test', 1)",
-        )
-        .bind(hash)
-        .execute(&pool)
-        .await
-        .unwrap();
-        let app = router(AppState { pool: pool.clone(), pay_base_url: "https://pay.example/".into() });
-        TestApp { app, pool, key }
-    }
-
-    async fn call(app: &Router, request: Request<Body>) -> (StatusCode, Value) {
-        let response = app.clone().oneshot(request).await.unwrap();
-        let status = response.status();
-        let bytes = to_bytes(response.into_body(), 1 << 20).await.unwrap();
-        (status, serde_json::from_slice(&bytes).unwrap_or(Value::Null))
-    }
 
     fn create(key: Option<&str>, body: Value) -> Request<Body> {
         let mut request = Request::post("/v1/orders").header(header::CONTENT_TYPE, "application/json");

@@ -49,6 +49,16 @@ pub enum Role {
 pub struct Token {
     pub address: Address,
     pub decimals: u8,
+    /// The token's EIP-712 domain, for notes customers sign (EIP-3009). Hard-coded because
+    /// Whitechain USDT has no `version()`; each value was checked against `DOMAIN_SEPARATOR()`.
+    pub eip712: Eip712Domain,
+}
+
+/// The `name` and `version` of a token's EIP-712 domain. Chain id and contract come from the token.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct Eip712Domain {
+    pub name: String,
+    pub version: String,
 }
 
 /// Our contracts on one chain. Each is `None` until deployed there.
@@ -212,6 +222,19 @@ mod tests {
         assert_eq!(chains.timeouts_seconds.source_lock, 1200);
         assert_eq!(chains.timeouts_seconds.destination_lock, 600);
         assert_eq!(chains.provider_fee_bps, 30);
+    }
+
+    /// Checked on chain on Fri Nov 6: each pair recomputes the token's `DOMAIN_SEPARATOR()`.
+    #[test]
+    fn tokens_carry_their_checked_eip712_domain() {
+        let chains = Chains::from_json(REPO_FILE).unwrap();
+        let domain = |chain_id: u64, symbol: &str| chains.by_id(chain_id).unwrap().tokens[symbol].eip712.clone();
+        let expect = |name: &str, version: &str| Eip712Domain { name: name.into(), version: version.into() };
+        assert_eq!(domain(1874, "USDT"), expect("Tether USD", "1"));
+        assert_eq!(domain(84532, "USDC"), expect("USDC", "2"));
+        assert_eq!(domain(84532, "EURC"), expect("EURC", "2"));
+        assert_eq!(domain(11_155_111, "USDC"), expect("USDC", "2"));
+        assert_eq!(domain(11_155_111, "EURC"), expect("EURC", "2"));
     }
 
     #[test]

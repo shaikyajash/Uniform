@@ -6,16 +6,20 @@
 mod admin;
 mod auth;
 mod db;
+mod direct_pay;
 mod error;
 mod random;
 mod routes;
 
-use std::env;
+use std::{env, sync::Arc};
 
+use common::chains::Chains;
 use sqlx::PgPool;
 
 const DEFAULT_PORT: u16 = 4000;
 const DEFAULT_PAY_BASE_URL: &str = "http://localhost:3000";
+/// Relative to `server/`, where `cargo run` starts.
+const DEFAULT_CHAINS_JSON: &str = "../shared/chains.json";
 
 #[tokio::main]
 async fn main() {
@@ -43,7 +47,9 @@ async fn serve(pool: PgPool) -> Result<(), String> {
         Err(_) => DEFAULT_PORT,
     };
     let pay_base_url = env::var("PAY_BASE_URL").unwrap_or_else(|_| DEFAULT_PAY_BASE_URL.to_owned());
-    let app = routes::router(routes::AppState { pool, pay_base_url });
+    let chains_path = env::var("CHAINS_JSON").unwrap_or_else(|_| DEFAULT_CHAINS_JSON.to_owned());
+    let chains = Chains::load(&chains_path).map_err(|error| error.to_string())?;
+    let app = routes::router(routes::AppState { pool, chains: Arc::new(chains), pay_base_url });
     // 0.0.0.0, not 127.0.0.1: a host like Railway reaches the server from outside the container.
     let listener = tokio::net::TcpListener::bind(("0.0.0.0", port))
         .await
