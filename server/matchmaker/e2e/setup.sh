@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Starts two local forks (Base Sepolia :8601, Whitechain :8602) and the mock Order Desk (:8603),
+# Starts three local forks (Base Sepolia :8601, Whitechain :8602, Ethereum Sepolia :8604) and the
+# mock Order Desk (:8603),
 # then funds the test roles with impersonated transfers and ships Bob's strategy on the fork.
 # Needs anvil, cast and python3. The deployer address only needs real balances to copy from.
 # Uses anvil's well-known test keys only. Nothing is sent to a real network.
@@ -12,6 +13,7 @@ mkdir -p .state
 
 BASE=http://127.0.0.1:8601
 WC=http://127.0.0.1:8602
+ETH=http://127.0.0.1:8604
 DEPLOYER=0x7801aE8881A59F231fA31D7a5b56cb20766fd2eB
 USDC=0x036CbD53842c5426634e7929541eC2318f3dCF7e
 EURC=0x808456652fdb597867f38412077A9182bf77359F
@@ -33,11 +35,12 @@ sleep 1
 
 nohup anvil --port 8601 --fork-url https://sepolia.base.org --block-time 1 >.state/anvil-base.log 2>&1 &
 nohup anvil --port 8602 --fork-url https://rpc.testnet.whitechain.io --block-time 1 >.state/anvil-wc.log 2>&1 &
+nohup anvil --port 8604 --fork-url https://ethereum-sepolia-rpc.publicnode.com --block-time 2 >.state/anvil-eth.log 2>&1 &
 nohup python3 mock_order_desk.py 8603 >.state/mock.log 2>&1 &
-for url in $BASE $WC; do
+for url in $BASE $WC $ETH; do
   for _ in $(seq 1 60); do cast chain-id --rpc-url $url >/dev/null 2>&1 && break; sleep 1; done
 done
-echo "forks up: base=$(cast chain-id --rpc-url $BASE) whitechain=$(cast chain-id --rpc-url $WC)"
+echo "forks up: base=$(cast chain-id --rpc-url $BASE) whitechain=$(cast chain-id --rpc-url $WC) ethereum=$(cast chain-id --rpc-url $ETH)"
 
 # Whitechain: give Bob 5 USDT, then Bob approves Aqua and ships a 2 USDT strategy with the filler.
 cast rpc anvil_impersonateAccount $DEPLOYER --rpc-url $WC >/dev/null
@@ -53,3 +56,18 @@ for token in $USDC $EURC; do
   cast send $token "transfer(address,uint256)" $CUSTOMER 3000000 --from $DEPLOYER --unlocked --rpc-url $BASE >/dev/null
 done
 echo "customer USDC=$(cast call $USDC 'balanceOf(address)(uint256)' $CUSTOMER --rpc-url $BASE) EURC=$(cast call $EURC 'balanceOf(address)(uint256)' $CUSTOMER --rpc-url $BASE)"
+
+# Ethereum Sepolia: deploy SourceLock from the deployer if it is not live yet (same address as the
+# real deploy, which is the chains.json address), then give the customer 3 USDC and 3 EURC.
+ETH_LOCK=$(python3 -c "import json; print(json.load(open('../../../shared/chains.json'))['ethereumSepolia']['contracts']['sourceLock'])")
+ETH_USDC=0x1c7D4B196Cb0C7B01d743Fbc6116a902379C7238
+ETH_EURC=0x08210F9170F89Ab7658F0B5E3fF39b0E03C594D4
+cast rpc anvil_impersonateAccount $DEPLOYER --rpc-url $ETH >/dev/null
+if [ "$(cast code $ETH_LOCK --rpc-url $ETH)" = "0x" ]; then
+  (cd ../../../contracts && forge script script/DeploySourceLock.s.sol --rpc-url $ETH --sender $DEPLOYER --unlocked --broadcast >/dev/null 2>&1 && rm -rf broadcast/DeploySourceLock.s.sol/11155111)
+fi
+[ "$(cast code $ETH_LOCK --rpc-url $ETH)" != "0x" ] || { echo "SourceLock missing at $ETH_LOCK on the Ethereum fork"; exit 1; }
+for token in $ETH_USDC $ETH_EURC; do
+  cast send $token "transfer(address,uint256)" $CUSTOMER 3000000 --from $DEPLOYER --unlocked --rpc-url $ETH >/dev/null
+done
+echo "ethereum SourceLock=$ETH_LOCK customer USDC=$(cast call $ETH_USDC 'balanceOf(address)(uint256)' $CUSTOMER --rpc-url $ETH)"

@@ -33,8 +33,8 @@ use crate::{
     store::{Fill, PendingLog, Store},
 };
 
-/// How far back the first run starts (about 3 hours of Base blocks), so locks made before
-/// start-up are still seen.
+/// How far back the first run starts, so locks made before start-up are still seen (on Base
+/// Sepolia under an hour; on Ethereum Sepolia about 20 hours).
 const FIRST_RUN_LOOKBACK: u64 = 6_000;
 /// A parked log whose handling fails permanently this many times is dropped and logged loudly.
 /// Network and Order Desk outages are not counted: those logs are retried until they clear.
@@ -46,6 +46,9 @@ const PERMANENT: &str = "permanent: ";
 const SECRET_SEARCH_BLOCKS: u64 = 200_000;
 /// Refunds sent per chain per pass, so a flood of expired locks cannot hold up other duties.
 const REFUNDS_PER_PASS: usize = 5;
+/// Log ranges read per chain per pass while catching up, so one chain's backlog cannot hold up
+/// the others for long.
+const MAX_RANGES_PER_PASS: usize = 20;
 /// A node whose latest block is older than this is treated as behind, and its time not trusted.
 const MAX_CLOCK_LAG: u64 = 120;
 const RPC_TIMEOUT: Duration = Duration::from_secs(20);
@@ -146,7 +149,7 @@ struct Watched {
     chain_id: u64,
     provider: DynProvider,
     confirmations: u64,
-    /// Customer chains are rollups: read up to the "safe" block instead of a few confirmations.
+    /// Read up to the "safe" block instead of `confirmations` (rollup customer chains only).
     use_safe_tag: bool,
     contracts: Vec<(Address, Source)>,
     /// Block range used for `eth_getLogs`: halved when a provider refuses a range, grown back after.
@@ -247,8 +250,13 @@ impl Worker {
                 Watched {
                     chain_id,
                     provider,
-                    confirmations,
-                    use_safe_tag: role == Role::Customer,
+                    confirmations: config
+                        .confirmations
+                        .get(&chain_id)
+                        .copied()
+                        .unwrap_or(confirmations),
+                    use_safe_tag: role == Role::Customer
+                        && config.safe_tag_chains.contains(&chain_id),
                     contracts,
                     range: AtomicU64::new(config.max_block_range),
                     ceiling: AtomicU64::new(config.max_block_range),
@@ -386,6 +394,26 @@ impl Worker {
             shipped.balance
         );
         for (&chain_id, &lock_address) in &self.source_locks {
+            let code = self
+                .provider(chain_id)?
+                .get_code_at(lock_address)
+                .await
+                .map_err(err)?;
+            if code.is_empty() {
+                return Err(format!(
+                    "chains.json sourceLock {lock_address} on chain {chain_id} has no code: deploy it or set it to \"\""
+                ));
+            }
+            let watched = self.watched(chain_id)?;
+            eprintln!(
+                "matchmaker: chain {chain_id} reads up to {}; filler gas floor {} wei",
+                if watched.use_safe_tag {
+                    "the safe block".to_string()
+                } else {
+                    format!("{} confirmations", watched.confirmations)
+                },
+                self.config.min_filler_gas_wei.get(&chain_id).copied().unwrap_or(0)
+            );
             let lock = SourceLock::new(lock_address, self.provider(chain_id)?);
             let usdc = lock.usdc().call().await.map_err(err)?;
             let alt = lock.altToken().call().await.map_err(err)?;
@@ -468,13 +496,17 @@ impl Worker {
     /// The last block to read on a chain: the "safe" block on rollups, otherwise head minus the
     /// confirmations in chains.json.
     async fn readable_head(&self, watched: &Watched) -> Result<Option<u64>> {
-        if watched.use_safe_tag
-            && let Ok(Some(block)) = watched
+        if watched.use_safe_tag {
+            // Never fall back to a few confirmations on a rollup: skip this pass instead.
+            return match watched
                 .provider
                 .get_block_by_number(BlockNumberOrTag::Safe)
                 .await
-        {
-            return Ok(Some(block.header.number));
+            {
+                Ok(Some(block)) => Ok(Some(block.header.number)),
+                Ok(None) => Err(format!("chain {}: no safe block", watched.chain_id)),
+                Err(e) => Err(format!("chain {}: safe block: {}", watched.chain_id, err(e))),
+            };
         }
         let head = watched.provider.get_block_number().await.map_err(err)?;
         Ok(head.checked_sub(watched.confirmations))
@@ -516,8 +548,17 @@ impl Worker {
     /// The main pass. A failure on one chain or one item never stops the others.
     pub async fn tick(&self) {
         for i in 0..self.chains.len() {
-            if let Err(e) = self.scan(i).await {
-                eprintln!("matchmaker: chain {}: {e}", self.chains[i].chain_id);
+            // Read range after range until caught up, so a backlog (first start, an outage)
+            // clears in one pass instead of one range per poll.
+            for _ in 0..MAX_RANGES_PER_PASS {
+                match self.scan(i).await {
+                    Ok(true) => continue,
+                    Ok(false) => break,
+                    Err(e) => {
+                        eprintln!("matchmaker: chain {}: {e}", self.chains[i].chain_id);
+                        break;
+                    }
+                }
             }
         }
         self.retry_parked_logs().await;
@@ -529,17 +570,18 @@ impl Worker {
     /// Reads the next confirmed block range on one chain. A log whose handling fails is parked for
     /// retry, so it never holds up the cursor. The cursor only moves once the node is known to have
     /// the range's last block.
-    async fn scan(&self, index: usize) -> Result<()> {
+    /// Reads and handles one range of logs on a chain. Returns whether more blocks are ready.
+    async fn scan(&self, index: usize) -> Result<bool> {
         let watched = &self.chains[index];
         let Some(safe) = self.readable_head(watched).await? else {
-            return Ok(());
+            return Ok(false);
         };
         let from = match self.store.cursor(watched.chain_id).await.map_err(err)? {
             Some(next) => next,
             None => safe.saturating_sub(FIRST_RUN_LOOKBACK),
         };
         if from > safe {
-            return Ok(());
+            return Ok(false);
         }
         let range = watched.range.load(Ordering::Relaxed).max(1);
         let to = safe.min(from.saturating_add(range - 1));
@@ -550,7 +592,7 @@ impl Worker {
             .map_err(err)?
             .is_none()
         {
-            return Ok(());
+            return Ok(false);
         }
         let addresses: Vec<Address> = watched.contracts.iter().map(|(a, _)| *a).collect();
         let filter = Filter::new()
@@ -606,7 +648,8 @@ impl Worker {
         self.store
             .set_cursor(watched.chain_id, to + 1)
             .await
-            .map_err(err)
+            .map_err(err)?;
+        Ok(to < safe)
     }
 
     /// Retries every parked log. Outages are retried until they clear; a log that fails for a
@@ -807,7 +850,13 @@ impl Worker {
             .get_balance(self.filler)
             .await
             .map_err(err)?;
-        if gas < U256::from(self.config.min_filler_gas_wei) {
+        let min_gas = self
+            .config
+            .min_filler_gas_wei
+            .get(&chain_id)
+            .copied()
+            .unwrap_or(u128::MAX);
+        if gas < U256::from(min_gas) {
             return Err(format!(
                 "filler has too little gas on chain {chain_id} to redeem later ({gas} wei); top it up"
             ));

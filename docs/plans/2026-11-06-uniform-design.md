@@ -139,7 +139,7 @@ paid → partially_refunded → refunded
 | A4 | PayoutPool and DestinationLock | A1 | to do |
 | A5 | Matchmaker v1 | A3, A4 | to do (M2) |
 | A6 | Multi-token Source Lock, Uniswap swap at redeem, pools | A3 | to do |
-| A7 | Ethereum Sepolia | A6 | to do (M3) |
+| A7 | Ethereum Sepolia | A6 | done (M3) |
 | A8 | Split payments | A5, A7 | to do |
 | A9 | Refunds, chain side | A5, A6 | to do |
 | A10 | Earn Page | A4 | to do |
