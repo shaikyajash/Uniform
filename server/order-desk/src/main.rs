@@ -1,6 +1,7 @@
 //! Order Desk: the API and database. Built in B1.
 
 mod db;
+mod error;
 
 #[tokio::main]
 async fn main() {
