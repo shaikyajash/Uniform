@@ -46,3 +46,13 @@ function DoubleChevron() {
     </svg>
   );
 }
+
+/** A plain white pill: the main action beside a StarButton. */
+export function SolidButton({ href, children }: { href: string; children: ReactNode }) {
+  return (
+    <a href={href} className={styles.solidButton}>
+      <span className={styles.solidShine} aria-hidden="true" />
+      {children}
+    </a>
+  );
+}
