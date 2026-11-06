@@ -17,7 +17,8 @@ pub struct Timing {
     pub min_destination_lock: u64,
 }
 
-/// Bob's strategy limits, as shipped on Aqua.
+/// The terms of the provider a lock was made for, across their open strategies: the largest
+/// order any of them takes and the lowest fee any of them asks.
 #[derive(Debug, Clone, Copy)]
 pub struct Provider {
     pub address: Address,
@@ -240,16 +241,24 @@ pub fn liquidity(strategy_balance: U256, wallet: U256, approved: U256) -> U256 {
     strategy_balance.min(wallet).min(approved)
 }
 
-/// The strategy to fill `amount` from: among those whose per-order limit and remaining balance
-/// both cover it, the one with the most left, so small strategies are not drained first and
-/// spread thin. `limits` gives (max per order, balance) for each.
-pub fn choose_strategy<T>(open: &[T], amount: U256, limits: impl Fn(&T) -> (U256, U256)) -> Option<&T> {
+/// The strategy to fill `amount` from, among the provider's own: one whose per-order limit and
+/// remaining balance both cover it and whose fee the locked value covers (`locked` in USDC units).
+/// Of those, the one with the most left, so small strategies are not drained first and spread
+/// thin. `terms` gives (max per order, balance, fee in bps) for each.
+pub fn choose_strategy<T>(
+    open: &[T],
+    amount: U256,
+    locked: U256,
+    terms: impl Fn(&T) -> (U256, U256, u16),
+) -> Option<&T> {
     open.iter()
         .filter(|s| {
-            let (max, balance) = limits(s);
-            max >= amount && balance >= amount
+            let (max, balance, fee) = terms(s);
+            max >= amount
+                && balance >= amount
+                && required_usdc(amount, fee).is_some_and(|needed| locked >= needed)
         })
-        .max_by_key(|s| limits(s).1)
+        .max_by_key(|s| terms(s).1)
 }
 
 #[cfg(test)]
@@ -260,15 +269,32 @@ mod tests {
     #[test]
     fn a_fill_uses_the_covering_strategy_with_the_most_left() {
         let u = U256::from;
-        // (max per order, balance)
-        let open = [(u(2_000_000), u(5_000_000)), (u(100_000_000), u(3_000_000)), (u(100_000_000), u(9_000_000))];
-        let pick = |amount: u64| choose_strategy(&open, u(amount), |s| *s).copied();
+        // (max per order, balance, fee)
+        let open = [
+            (u(2_000_000), u(5_000_000), 30),
+            (u(100_000_000), u(3_000_000), 30),
+            (u(100_000_000), u(9_000_000), 30),
+        ];
+        let pick = |amount: u64| choose_strategy(&open, u(amount), U256::MAX, |s| *s).copied();
         assert_eq!(pick(1_000_000), Some(open[2]));
         // Above the first one's per-order limit, still the fullest that allows it.
         assert_eq!(pick(4_000_000), Some(open[2]));
         // More than any one strategy holds.
         assert_eq!(pick(9_500_000), None);
-        assert_eq!(choose_strategy::<(U256, U256)>(&[], u(1), |s| *s), None);
+        assert_eq!(choose_strategy::<(U256, U256, u16)>(&[], u(1), U256::MAX, |s| *s), None);
+    }
+
+    #[test]
+    fn a_fill_only_uses_a_strategy_whose_fee_the_lock_covers() {
+        let u = U256::from;
+        // The fuller strategy asks 1%, the other 0.1%.
+        let open = [(u(100_000_000), u(9_000_000), 100), (u(100_000_000), u(5_000_000), 10)];
+        let pick = |locked: u64| choose_strategy(&open, u(1_000_000), u(locked), |s| *s).copied();
+        // Locked for 0.1%: only the cheap strategy's terms are met.
+        assert_eq!(pick(1_001_000), Some(open[1]));
+        // Locked for 1%: both are, so the fuller one.
+        assert_eq!(pick(1_010_000), Some(open[0]));
+        assert_eq!(pick(1_000_999), None);
     }
 
     #[test]

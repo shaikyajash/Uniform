@@ -108,6 +108,23 @@ impl OrderDesk {
         }))
     }
 
+    /// Replaces the Order Desk's offers with these (`POST /internal/offers`).
+    pub async fn send_offers(&self, offers: &common::offers::Offers) -> Result<(), String> {
+        let response = self
+            .http
+            .post(format!("{}/internal/offers", self.base_url))
+            .bearer_auth(&self.token)
+            .json(offers)
+            .send()
+            .await
+            .map_err(|e| e.without_url().to_string())?;
+        let status = response.status();
+        if status.is_success() {
+            return Ok(());
+        }
+        Err(format!("{status}: {}", response.text().await.unwrap_or_default()))
+    }
+
     /// Sends one event (the JSON of `common::events::ChainEvent`). `Ok` means the Order Desk has
     /// it, including when it was already reported. `Rejected` means it refused this event for good
     /// (a 4xx other than auth or rate limiting), so retrying will not help.
