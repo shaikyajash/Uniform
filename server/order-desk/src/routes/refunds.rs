@@ -74,8 +74,10 @@ async fn refundable(state: &AppState, merchant_id: i64, id: &str) -> Result<Refu
     .await?
     .ok_or_else(|| ApiError::not_found("order"))?;
 
-    if basis.path.as_deref() == Some("crosschain") {
-        return Err(ApiError::conflict("refund_unavailable", "cross-chain payments cannot be refunded from here yet"));
+    // Only a Path A payment went through DirectPay, which is what refunds it. Cross-chain and split
+    // payments need A9.
+    if basis.path.as_deref() != Some("direct") {
+        return Err(ApiError::conflict("refund_unavailable", "only USDT payments can be refunded from here yet"));
     }
     if !matches!(basis.status.as_str(), "paid" | "partially_refunded") {
         return Err(ApiError::conflict("not_refundable", format!("the order is {}", basis.status)));
@@ -300,6 +302,17 @@ mod tests {
         });
         let (status, reply) = post(&app, &format!("/v1/orders/{id}/refunds"), &token, body).await;
         assert_eq!((status, reply["error"]["code"].as_str()), (StatusCode::BAD_REQUEST, Some("bad_signature")));
+    }
+
+    #[sqlx::test]
+    async fn only_a_usdt_payment_can_be_refunded(pool: PgPool) {
+        let app = test_app(pool).await;
+        let (id, _, token) = paid_order(&app).await;
+        for path in ["crosschain", "split"] {
+            sqlx::query("UPDATE orders SET path = $1").bind(path).execute(&app.pool).await.unwrap();
+            let (status, reply) = post(&app, &format!("/v1/orders/{id}/refund-note"), &token, json!({ "amount": "1" })).await;
+            assert_eq!((status, reply["error"]["code"].as_str()), (StatusCode::CONFLICT, Some("refund_unavailable")), "{path}");
+        }
     }
 
     #[sqlx::test]
