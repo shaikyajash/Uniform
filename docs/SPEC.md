@@ -242,9 +242,9 @@ Rules from the security review:
 | `POST /v1/orders` | Shop server (API key) | `{amount, reference, successUrl}` → `{orderId, payUrl}` |
 | `POST /v1/links` | Shop Dashboard | Payment link with amount, memo, due date |
 | `GET /v1/orders/:id` | Pay Button, receipt page | Status, legs, transaction links |
-| `POST /v1/orders/:id/quote` | Pay Button | `{payer, balances}` → path, legs, EIP-712 data, expiry |
+| `POST /v1/orders/:id/quote` | Pay Button | `{payer}` (same chain), `{payer, hashlock, chainId}` (cross-chain) or `{payer, hashlock, legs:[{chainId, amount?}]}` (split) → `{quoteId, path, total, fee, expiresAt, toSign:[{chainId, token, amount, lockId, typedData}]}` |
 | `POST /v1/orders/:id/direct` | Pay Button | Signature → Gas Payer calls `DirectPay.pay` |
-| `POST /v1/orders/:id/legs` | Pay Button | `{hashlock, legs:[{chainId, signature}]}` → `lockWithAuthorization` |
+| `POST /v1/orders/:id/legs` | Pay Button | `{quoteId, signature}` or `{quoteId, signatures:[…]}` (one per `toSign`, in order) → a `lockWithAuthorization` job per leg; see `docs/plans/2026-11-06-a8-split-payments.md` |
 | `POST /v1/orders/:id/secret` | Pay Button | Only when `destination_locked`: Gas Payer calls `DestinationLock.claim` |
 | `POST /v1/orders/:id/refunds` | Shop Dashboard | `{amount, hashlock, signature}` → refund flow |
 | `POST /v1/refunds/:id/secret` | Shop Dashboard | Releases the refund to the customer |
