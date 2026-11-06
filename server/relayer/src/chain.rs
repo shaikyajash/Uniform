@@ -248,7 +248,7 @@ impl Call {
                     s,
                 })
             }
-            Job::SourceLock { params, payer, token, amount, valid_after, valid_before, lock_id, signature } => {
+            Job::SourceLock { params, payer, token, amount, valid_after, valid_before, lock_id, signature, batch: _ } => {
                 let (v, r, s) = split_signature(signature)?;
                 Call::SourceLock(LockCall {
                     params: *params,

@@ -45,13 +45,23 @@ pub enum Role {
     Customer,
 }
 
+/// A token on one chain. Customers pay with it in one of two ways:
+/// - it has an `eip712` domain: EIP-3009, a signed note the Gas Payer submits (USDC, EURC, USDT);
+/// - it has a `priceId`: any ERC-20, locked in a Calibur batch (see `calibur`) and valued at its
+///   market price (WETH, WBTC, ...).
 #[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct Token {
     pub address: Address,
     pub decimals: u8,
     /// The token's EIP-712 domain, for notes customers sign (EIP-3009). Hard-coded because
     /// Whitechain USDT has no `version()`; each value was checked against `DOMAIN_SEPARATOR()`.
-    pub eip712: Eip712Domain,
+    #[serde(default)]
+    pub eip712: Option<Eip712Domain>,
+    /// CoinGecko's id for the token's price in USD (`bitcoin`, `ethereum`). Only for tokens paid
+    /// through a Calibur batch.
+    #[serde(default)]
+    pub price_id: Option<String>,
 }
 
 /// The `name` and `version` of a token's EIP-712 domain. Chain id and contract come from the token.
@@ -76,6 +86,9 @@ pub struct Contracts {
     pub destination_lock: Option<Address>,
     #[serde(deserialize_with = "optional_address")]
     pub source_lock: Option<Address>,
+    /// Uniswap's Calibur (EIP-7702 delegate), for gas-free locks of any ERC-20.
+    #[serde(deserialize_with = "optional_address")]
+    pub calibur: Option<Address>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -229,7 +242,7 @@ mod tests {
     fn tokens_carry_their_checked_eip712_domain() {
         let chains = Chains::from_json(REPO_FILE).unwrap();
         let domain = |chain_id: u64, symbol: &str| chains.by_id(chain_id).unwrap().tokens[symbol].eip712.clone();
-        let expect = |name: &str, version: &str| Eip712Domain { name: name.into(), version: version.into() };
+        let expect = |name: &str, version: &str| Some(Eip712Domain { name: name.into(), version: version.into() });
         assert_eq!(domain(1874, "USDT"), expect("Tether USD", "1"));
         assert_eq!(domain(84532, "USDC"), expect("USDC", "2"));
         assert_eq!(domain(84532, "EURC"), expect("EURC", "2"));
