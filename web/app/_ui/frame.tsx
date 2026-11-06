@@ -88,7 +88,9 @@ function NavHowItWorks() {
 export function Logo() {
   return (
     <Link href="/" className={styles.logo} aria-label="Uniform home">
-      <Wordmark className={styles.wordmark} />
+      {/* eslint-disable-next-line @next/next/no-img-element */}
+      <img src="/logos/uniform-mark.png" alt="" className={styles.logoMark} />
+      <Wordmark className={styles.wordmark} skipFirst />
     </Link>
   );
 }
