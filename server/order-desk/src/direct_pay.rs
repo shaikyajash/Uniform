@@ -160,7 +160,8 @@ mod tests {
         let token = Token {
             address: USDT,
             decimals: 6,
-            eip712: Eip712Domain { name: "Tether USD".into(), version: "1".into() },
+            eip712: Some(Eip712Domain { name: "Tether USD".into(), version: "1".into() }),
+            price_id: None,
         };
         let note = Note {
             from: address!("a917000000000000000000000000000000000001"),

@@ -8,6 +8,7 @@ mod auth;
 mod db;
 mod direct_pay;
 mod error;
+mod prices;
 mod random;
 mod refunds;
 mod routes;
@@ -85,6 +86,7 @@ async fn serve(pool: PgPool) -> Result<(), String> {
         internal_token,
         max_order,
         provider,
+        prices: Arc::new(prices::Prices::coingecko()),
     });
     // 0.0.0.0, not 127.0.0.1: a host like Railway reaches the server from outside the container.
     let listener = tokio::net::TcpListener::bind(("0.0.0.0", port))
