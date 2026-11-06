@@ -1,23 +1,35 @@
+/* The pay page: one dark panel inside the same frame and nav as the home page. */
+
 .page {
+  position: relative;
   min-height: 100vh;
   display: grid;
   place-items: center;
-  padding: 24px 16px;
-  background:
-    radial-gradient(70% 60% at 18% 12%, rgba(255, 255, 255, 0.8), transparent 70%),
-    linear-gradient(165deg, var(--metal-1) 0%, var(--metal-2) 55%, var(--metal-3) 100%);
+  padding: 96px 16px 48px;
+  overflow-x: hidden;
+}
+
+/* A soft light above the card, so the black isn't flat. */
+.page::before {
+  content: "";
+  position: absolute;
+  inset: 0 var(--gutter);
+  pointer-events: none;
+  background: radial-gradient(50% 40% at 50% 30%, rgba(255, 255, 255, 0.06), transparent 70%);
 }
 
 .card {
+  position: relative;
   width: 100%;
   max-width: 420px;
   min-height: 200px;
-  padding: 32px 28px 28px;
-  border-radius: 28px;
-  background: rgba(255, 255, 255, 0.92);
+  padding: 28px 24px 24px;
+  border: 1px solid var(--hair-strong);
+  border-radius: 16px;
+  background: linear-gradient(180deg, var(--panel-2), var(--panel));
   box-shadow:
-    0 0 0 1px rgba(255, 255, 255, 0.9),
-    0 30px 60px -30px rgba(30, 40, 70, 0.4);
+    0 -1px 0 rgba(255, 255, 255, 0.12) inset,
+    0 40px 80px -40px #000;
   display: flex;
   flex-direction: column;
   gap: 16px;
@@ -25,90 +37,120 @@
 
 .header {
   display: grid;
-  gap: 4px;
+  gap: 18px;
 }
 
-.label {
-  font-size: 12px;
-  font-weight: 600;
+/* The panel bar from the home page's feature blocks. */
+.bar {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  padding-bottom: 12px;
+  border-bottom: 1px solid var(--hair);
+  font-family: var(--font-geist-mono), monospace;
+  font-size: 10.5px;
   letter-spacing: 0.08em;
-  text-transform: uppercase;
-  color: var(--ink-soft);
+  color: #c9c9cf;
 }
 
+/* Same as a feature block's title. */
 .shop {
-  font-family: var(--font-outfit), sans-serif;
-  font-weight: 500;
-  font-size: 26px;
+  font-weight: 400;
+  font-size: 24px;
   letter-spacing: -0.02em;
 }
 
 .amount {
   display: flex;
   align-items: baseline;
-  gap: 8px;
-  margin-top: 8px;
+  gap: 10px;
+  margin-top: 6px;
 }
 
 .value {
-  font-family: var(--font-outfit), sans-serif;
-  font-weight: 600;
-  font-size: 52px;
-  letter-spacing: -0.03em;
+  font-family: var(--font-display), sans-serif;
+  font-weight: 400;
+  font-size: 56px;
+  letter-spacing: -0.035em;
   line-height: 1;
+  background: linear-gradient(180deg, #ffffff, #d4d4d8 60%, #a1a1aa);
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
 }
 
 .unit {
-  font-size: 18px;
-  font-weight: 600;
-  color: var(--ink-soft);
+  font-family: var(--font-geist-mono), monospace;
+  font-size: 14px;
+  color: var(--muted);
 }
 
 .network {
   display: flex;
   align-items: center;
   gap: 8px;
-  font-size: 13px;
-  color: var(--ink-soft);
   margin-top: -6px;
+  font-size: 14.5px;
+  line-height: 1.7;
+  color: var(--muted);
 }
 
 .dot {
-  width: 8px;
-  height: 8px;
+  width: 6px;
+  height: 6px;
   border-radius: 50%;
-  background: var(--blue);
-  box-shadow: 0 0 0 4px var(--blue-glow);
+  background: var(--ok);
+  box-shadow: 0 0 8px var(--ok);
 }
 
+/* Like the stats row under the home page's cross-chain example. */
 .wallet {
   display: flex;
   flex-wrap: wrap;
-  align-items: center;
-  gap: 6px 14px;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 10px 20px;
   padding: 12px 14px;
-  border-radius: 14px;
-  background: #f4f5f7;
-  font-size: 13px;
-  color: var(--ink-soft);
+  border: 1px solid var(--hair);
+  border-radius: 10px;
+  background: #0a0a0c;
 }
 
-.wallet code {
-  font-family: ui-monospace, monospace;
-  color: var(--ink);
+.wallet div {
+  display: grid;
+  gap: 4px;
 }
 
-.primary {
-  width: 100%;
-  padding: 16px 20px;
-  border: 0;
-  border-radius: 999px;
-  background: var(--navy);
-  color: var(--white);
-  font-weight: 600;
+.wallet small {
+  font-family: var(--font-geist-mono), monospace;
+  font-size: 9px;
+  letter-spacing: 0.1em;
+  color: var(--faint);
+}
+
+.wallet b {
+  font-family: var(--font-geist-mono), monospace;
+  font-weight: 400;
   font-size: 15px;
+  color: #d9d9de;
+}
+
+/* The white pill from the home page. */
+/* The white pill from the home page, with the same uppercase button text. */
+.primary {
+  position: relative;
+  width: 100%;
+  height: 44px;
+  padding: 0 20px;
+  border: 1px solid rgba(255, 255, 255, 0.3);
+  border-radius: 999px;
+  background: #fff;
+  color: #000;
+  font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+  font-size: 14px;
+  font-weight: 500;
+  text-transform: uppercase;
   cursor: pointer;
-  box-shadow: 0 12px 22px -10px rgba(13, 21, 48, 0.8);
   transition: transform 0.15s ease, opacity 0.15s ease;
 }
 
@@ -117,7 +159,7 @@
 }
 
 .primary:disabled {
-  opacity: 0.45;
+  opacity: 0.35;
   cursor: default;
 }
 
@@ -125,53 +167,67 @@
   border: 0;
   background: none;
   padding: 0;
-  font-size: 13px;
-  color: var(--blue);
+  font-family: var(--font-geist-mono), monospace;
+  font-size: 10.5px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: #c9c9cf;
+  text-decoration: underline;
+  text-decoration-color: var(--faint);
+  text-underline-offset: 3px;
   cursor: pointer;
-  text-decoration: none;
 }
 
 .link:hover {
-  text-decoration: underline;
+  text-decoration-color: var(--text);
 }
 
 .copy {
-  border: 0;
-  padding: 2px 8px;
-  border-radius: 8px;
-  background: rgba(255, 255, 255, 0.8);
-  font-family: ui-monospace, monospace;
+  border: 1px solid var(--hair-strong);
+  padding: 1px 8px;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text);
+  font-family: var(--font-geist-mono), monospace;
   font-size: 12px;
   cursor: pointer;
 }
 
 .muted {
-  font-size: 14px;
-  color: var(--ink-soft);
+  font-size: 14.5px;
+  line-height: 1.7;
+  color: var(--muted);
 }
 
+/* Small print, as in the home page's footer. */
 .fine {
-  font-size: 12px;
-  color: var(--ink-soft);
+  font-family: var(--font-geist-mono), monospace;
+  font-size: 10.5px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--faint);
   text-align: center;
 }
 
+/* Quiet dark boxes; a thin coloured edge says which kind. */
 .notice,
 .error {
-  font-size: 13px;
-  line-height: 1.5;
+  font-size: 13.5px;
+  line-height: 1.6;
   padding: 12px 14px;
-  border-radius: 14px;
+  border: 1px solid var(--hair);
+  border-left-width: 2px;
+  border-radius: 10px;
+  background: #0a0a0c;
+  color: #c9c9cf;
 }
 
 .notice {
-  background: #fff7e6;
-  color: #7a5200;
+  border-left-color: var(--warn);
 }
 
 .error {
-  background: #fdeeee;
-  color: var(--red);
+  border-left-color: var(--bad);
 }
 
 .progress,
@@ -185,30 +241,30 @@
 }
 
 .spinner {
-  width: 28px;
-  height: 28px;
+  width: 26px;
+  height: 26px;
   border-radius: 50%;
-  border: 3px solid #dfe3ec;
-  border-top-color: var(--blue);
+  border: 2px solid var(--hair-strong);
+  border-top-color: #fff;
   animation: spin 0.9s linear infinite;
 }
 
 .check {
-  width: 52px;
-  height: 52px;
+  width: 48px;
+  height: 48px;
   border-radius: 50%;
   display: grid;
   place-items: center;
-  font-size: 26px;
-  color: var(--white);
-  background: var(--green);
-  box-shadow: 0 0 0 8px rgba(31, 157, 107, 0.15);
+  font-size: 22px;
+  color: #000;
+  background: #fff;
+  box-shadow: 0 0 0 8px rgba(255, 255, 255, 0.06);
 }
 
 .doneTitle {
-  font-family: var(--font-outfit), sans-serif;
-  font-size: 22px;
-  font-weight: 600;
+  font-weight: 400;
+  font-size: 24px;
+  letter-spacing: -0.02em;
 }
 
 @keyframes spin {

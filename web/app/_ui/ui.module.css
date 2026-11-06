@@ -1,0 +1,278 @@
+/* The frame every page sits in: side lines, the floating nav, and the two button styles. */
+
+/* ---------- Frame ---------- */
+
+/* Two faint lines down each side, 8px apart; the inner one is the content edge. */
+.guides {
+  pointer-events: none;
+  position: fixed;
+  inset: 0;
+  z-index: 51;
+}
+
+.guides span {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 1px;
+  background: rgba(255, 255, 255, 0.15);
+  mix-blend-mode: difference;
+}
+
+.guideOuterLeft {
+  left: calc(var(--gutter) - 8px);
+}
+
+.guideInnerLeft {
+  left: var(--gutter);
+}
+
+.guideInnerRight {
+  right: var(--gutter);
+}
+
+.guideOuterRight {
+  right: calc(var(--gutter) - 8px);
+}
+
+/* ---------- Header ---------- */
+
+/* A see-through box floating 12px below the top, with a hairline above and below and a
+   small + on each corner. */
+.header {
+  position: fixed;
+  top: 12px;
+  left: 0;
+  right: 0;
+  z-index: 50;
+}
+
+.headerBox {
+  position: relative;
+  height: 48px;
+  margin: 0 var(--gutter);
+  padding: 0 20px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.headerBox::before,
+.headerBox::after {
+  content: "";
+  position: absolute;
+  left: 0;
+  right: 0;
+  height: 1px;
+  background: rgba(236, 236, 236, 0.1);
+  z-index: 10;
+}
+
+.headerBox::before {
+  top: 0;
+}
+
+.headerBox::after {
+  bottom: 0;
+}
+
+.corner {
+  pointer-events: none;
+  position: absolute;
+  z-index: 20;
+  width: 12px;
+  height: 12px;
+}
+
+.corner::before,
+.corner::after {
+  content: "";
+  position: absolute;
+}
+
+.corner::before {
+  left: 50%;
+  top: 0;
+  width: 1px;
+  height: 100%;
+  transform: translateX(-50%);
+  background: linear-gradient(180deg, transparent, rgba(226, 232, 240, 0.65) 50%, transparent);
+}
+
+.corner::after {
+  left: 0;
+  top: 50%;
+  width: 100%;
+  height: 1px;
+  transform: translateY(-50%);
+  background: linear-gradient(90deg, transparent, rgba(226, 232, 240, 0.65) 50%, transparent);
+}
+
+.cornerTopLeft {
+  left: 0;
+  top: 0;
+  transform: translate(-50%, -50%);
+}
+
+.cornerTopRight {
+  right: 0;
+  top: 0;
+  transform: translate(50%, -50%);
+}
+
+.cornerBottomLeft {
+  left: 0;
+  bottom: 0;
+  transform: translate(-50%, 50%);
+}
+
+.cornerBottomRight {
+  right: 0;
+  bottom: 0;
+  transform: translate(50%, 50%);
+}
+
+.logo {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  height: 28px;
+  font-weight: 600;
+  font-size: 17px;
+  letter-spacing: 0.04em;
+  color: #fff;
+}
+
+.logo svg {
+  width: 24px;
+  height: 24px;
+}
+
+/* ---------- Buttons ---------- */
+
+/* A dark pill whose edge has a light running round it (see star-button.tsx). */
+.starButton {
+  position: relative;
+  isolation: isolate;
+  z-index: 3;
+  overflow: hidden;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0 16px;
+  border: 1px solid rgba(226, 232, 240, 0.5);
+  border-radius: 999px;
+  font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+  font-weight: 500;
+  white-space: nowrap;
+}
+
+.starSmall {
+  height: 32px;
+  font-size: 12px;
+}
+
+.starLarge {
+  height: 40px;
+  font-size: 14px;
+}
+
+.starLight {
+  position: absolute;
+  inset: 0;
+  width: 110px;
+  aspect-ratio: 1;
+  background: radial-gradient(ellipse at center, #fafafa, transparent, transparent);
+  offset-path: var(--path);
+  offset-distance: 0%;
+  animation: star 3s linear infinite;
+}
+
+@keyframes star {
+  to {
+    offset-distance: 100%;
+  }
+}
+
+.starFace {
+  position: absolute;
+  inset: 2px;
+  z-index: 4;
+  border: 2px solid rgba(255, 255, 255, 0.15);
+  border-radius: inherit;
+  background: #000;
+}
+
+.starLabel {
+  position: relative;
+  z-index: 10;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  color: #fff;
+}
+
+.solidButton {
+  position: relative;
+  isolation: isolate;
+  overflow: hidden;
+  display: inline-flex;
+  align-items: center;
+  height: 40px;
+  padding: 0 20px;
+  border: 1px solid rgba(255, 255, 255, 0.3);
+  border-radius: 999px;
+  background: #fff;
+  color: #000;
+  font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+  font-size: 14px;
+  font-weight: 500;
+  white-space: nowrap;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.05);
+}
+
+/* A faint highlight along the top edge. */
+.solidShine {
+  pointer-events: none;
+  position: absolute;
+  top: 0;
+  left: 1.125rem;
+  width: calc(100% - 2.25rem);
+  height: 1px;
+  background: linear-gradient(90deg, rgba(10, 10, 10, 0), #737373, rgba(10, 10, 10, 0));
+}
+
+/* While a Privy window is open the page behind is blurred; the nav steps away. */
+.headerHidden {
+  opacity: 0;
+  visibility: hidden;
+}
+
+.header {
+  transition: opacity 0.2s, visibility 0.2s;
+}
+
+/* Narrower screens: the side lines sit at the window's edge. */
+@media (max-width: 1023px) {
+  .guideOuterLeft {
+    left: 0;
+  }
+
+  .guideInnerLeft {
+    left: 1px;
+  }
+
+  .guideInnerRight {
+    right: 1px;
+  }
+
+  .guideOuterRight {
+    right: 0;
+  }
+}
+
+@media (max-width: 760px) {
+  .headerBox {
+    padding: 0 14px;
+  }
+}

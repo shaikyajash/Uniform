@@ -1,4 +1,5 @@
 import { Suspense } from "react";
+import { Frame } from "@/app/_ui/frame";
 import { PayCard } from "./pay-card";
 import styles from "./pay.module.css";
 
@@ -6,6 +7,7 @@ import styles from "./pay.module.css";
 export default function PayPage({ params }: PageProps<"/pay/[orderId]">) {
   return (
     <main className={styles.page}>
+      <Frame />
       <Suspense fallback={<section className={styles.card} aria-busy="true" />}>
         {params.then(({ orderId }) => (
           <PayCard orderId={orderId} />

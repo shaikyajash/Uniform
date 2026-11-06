@@ -4,7 +4,7 @@
 // The light follows a path the size of the button, so the button measures itself.
 
 import { useEffect, useRef, useState, type ReactNode } from "react";
-import styles from "./home.module.css";
+import styles from "./ui.module.css";
 
 export function StarButton({ href, size, children }: { href: string; size: "small" | "large"; children: ReactNode }) {
   const ref = useRef<HTMLAnchorElement>(null);
