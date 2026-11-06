@@ -41,11 +41,12 @@ pub enum EventKind {
         amount: Amount,
         total_refunded: Amount,
     },
-    /// SourceLock: a customer leg is locked for Bob.
+    /// SourceLock: a customer leg is locked for Bob, as `amount` of `token` (USDC or EURC).
     Locked {
         lock_id: B256,
         order_id: B256,
-        usdc_amount: Amount,
+        token: Address,
+        amount: Amount,
     },
     /// PayoutPool: Bob's USDT is locked for the shop in the DestinationLock.
     Filled {
@@ -94,7 +95,8 @@ mod tests {
             kind: EventKind::Locked {
                 lock_id: B256::repeat_byte(0x11),
                 order_id: B256::repeat_byte(0x22),
-                usdc_amount: Amount::from(12_036_000u64),
+                token: address!("036CbD53842c5426634e7929541eC2318f3dCF7e"),
+                amount: Amount::from(12_036_000u64),
             },
         }
     }
@@ -112,7 +114,8 @@ mod tests {
                 "type": "Locked",
                 "lockId": format!("0x{}", "11".repeat(32)),
                 "orderId": format!("0x{}", "22".repeat(32)),
-                "usdcAmount": "12036000",
+                "token": "0x036cbd53842c5426634e7929541ec2318f3dcf7e",
+                "amount": "12036000",
             })
         );
     }
@@ -124,7 +127,7 @@ mod tests {
         let kinds = [
             EventKind::Paid { payment_id: id, order_id: id, payer: address!("A917000000000000000000000000000000000001"), amount },
             EventKind::DirectRefunded { payment_id: id, order_id: id, amount, total_refunded: amount },
-            EventKind::Locked { lock_id: id, order_id: id, usdc_amount: amount },
+            EventKind::Locked { lock_id: id, order_id: id, token: Address::ZERO, amount },
             EventKind::Filled { order_id: id, destination_lock_id: id, amount },
             EventKind::Settled { order_id: id, amount },
             EventKind::Claimed { lock_id: id },

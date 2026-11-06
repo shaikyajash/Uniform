@@ -298,7 +298,7 @@ mod tests {
         let locked = json!({
             "chainId": 84532, "blockNumber": 1, "txHash": format!("0x{}", "11".repeat(32)), "logIndex": 0,
             "type": "Locked", "lockId": format!("0x{}", "22".repeat(32)),
-            "orderId": format!("0x{}", "33".repeat(32)), "usdcAmount": "12036000",
+            "orderId": format!("0x{}", "33".repeat(32)), "token": format!("0x{}", "44".repeat(20)), "amount": "12036000",
         });
         let (status, receipt) = call(&test.app, report(Some(INTERNAL_TOKEN), &locked)).await;
         assert_eq!(status, StatusCode::OK);
