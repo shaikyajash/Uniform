@@ -137,12 +137,12 @@ fn note_json(state: &AppState, order: &Refundable, amount: Amount, valid_after: 
     let Some(payment_id) = order.payment_id else {
         let nonce = transfer_refund_nonce(chain.chain_id, token.address, order.order_id, order.customer, amount, order.refunded);
         let note = Note { from: order.merchant, to: order.customer, value: amount, valid_after, valid_before, nonce };
-        return Ok((transfer_typed_data(token, chain.chain_id, &note), nonce));
+        return Ok((transfer_typed_data(token, chain.chain_id, &note)?, nonce));
     };
     let direct_pay = chain.contracts.direct_pay.ok_or_else(|| ApiError::internal("chains.json has no DirectPay"))?;
     let nonce = refund_nonce_for(chain.chain_id, direct_pay, payment_id, amount, order.refunded);
     let note = Note { from: order.merchant, to: direct_pay, value: amount, valid_after, valid_before, nonce };
-    Ok((direct_pay::typed_data(token, chain.chain_id, &note), nonce))
+    Ok((direct_pay::typed_data(token, chain.chain_id, &note)?, nonce))
 }
 
 #[derive(Debug, Deserialize)]

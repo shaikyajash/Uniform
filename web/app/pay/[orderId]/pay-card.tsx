@@ -366,13 +366,23 @@ export function PayCard({ orderId }: { orderId: string }) {
     // Read the balance afresh: the one shown may be a few seconds old.
     const balance = await tokenBalance(chainId, token.address, address).catch(() => held);
     const batch = quote.toSign[0];
-    if (quote.toSign.length !== 1 || !batch || !batchFits(batch, chain, token, address, balance)) throw new Error(DIDNT_CHECK_OUT);
+    // The most this page will sign for: its own estimate at the price it shows, plus 5% for the
+    // price moving in between. Without a price it signs nothing.
+    const price = prices[token.priceId];
+    const ceiling = price ? (estimateTokenUnits(withProviderFee(parseUnits(order.amount, 6)), price, token.decimals) * BigInt(105)) / BigInt(100) : BigInt(0);
+    const expected = { orderId: order.orderId, hashlock: made.hashlock, ceiling };
+    if (quote.toSign.length !== 1 || !batch || !batchFits(batch, chain, token, address, balance, expected)) throw new Error(DIDNT_CHECK_OUT);
 
     // Delegated already? Then the wallet's code is `0xef0100 ‖ calibur` and no authorization is needed.
-    const code = await walletCode(chainId, address);
+    // A wallet set up with another smart account is left alone: signing would replace it.
+    const code = (await walletCode(chainId, address)).toLowerCase();
+    const caliburCode = `0xef0100${calibur.slice(2).toLowerCase()}`;
+    if (code !== "0x" && code !== caliburCode) {
+      throw new Error(`This wallet already runs another smart account on ${chainName(chainId)}. Pay with USDC instead.`);
+    }
     let authorization: Authorization | undefined;
     setStep("signing");
-    if (code.toLowerCase() !== `0xef0100${calibur.slice(2).toLowerCase()}`) {
+    if (code !== caliburCode) {
       const nonce = await walletNonce(chainId, address);
       const signed = await signAuthorization({ contractAddress: calibur, chainId, nonce }, { address });
       if (signed.address.toLowerCase() !== calibur.toLowerCase() || Number(signed.chainId) !== chainId) {
@@ -859,6 +869,7 @@ function batchFits(
   token: PricedToken,
   address: Address,
   balance: bigint | null,
+  expected: { orderId: string; hashlock: string; ceiling: bigint },
 ): boolean {
   if (!chain.calibur) return false;
   const same = (a: string | undefined, b: string) => typeof a === "string" && a.toLowerCase() === b.toLowerCase();
@@ -884,7 +895,10 @@ function batchFits(
     !same(calls[1].to, chain.sourceLock) ||
     calls.some((call) => BigInt(call.value || "0") !== BigInt(0)) ||
     !same(message.executor, zeroAddress) ||
+    message.batchedCall?.revertOnFailure !== true ||
+    BigInt(message.keyHash ?? "1") !== BigInt(0) ||
     amount <= BigInt(0) ||
+    amount > expected.ceiling ||
     balance === null ||
     amount > balance
   ) {
@@ -892,11 +906,48 @@ function batchFits(
   }
   try {
     const approve = decodeFunctionData({ abi: erc20Abi, data: calls[0].data as Hex });
-    return approve.functionName === "approve" && same(approve.args[0], chain.sourceLock) && approve.args[1] === amount;
+    const lock = decodeFunctionData({ abi: SOURCE_LOCK_LOCK_ABI, data: calls[1].data as Hex });
+    const [params, lockToken, lockAmount] = lock.args;
+    return (
+      approve.functionName === "approve" &&
+      same(approve.args[0], chain.sourceLock) &&
+      approve.args[1] === amount &&
+      same(params.orderId, expected.orderId) &&
+      same(params.hashlock, expected.hashlock) &&
+      same(params.outToken, zeroAddress) &&
+      same(lockToken, token.address) &&
+      lockAmount === amount
+    );
   } catch {
     return false;
   }
 }
+
+/** `SourceLock.lock(params, token, amount)`, to read what a batch locks before signing it. */
+const SOURCE_LOCK_LOCK_ABI = [
+  {
+    type: "function",
+    name: "lock",
+    stateMutability: "nonpayable",
+    inputs: [
+      {
+        name: "p",
+        type: "tuple",
+        components: [
+          { name: "orderId", type: "bytes32" },
+          { name: "receiver", type: "address" },
+          { name: "minUsdcOut", type: "uint256" },
+          { name: "hashlock", type: "bytes32" },
+          { name: "expiry", type: "uint64" },
+          { name: "outToken", type: "address" },
+        ],
+      },
+      { name: "token", type: "address" },
+      { name: "amount", type: "uint256" },
+    ],
+    outputs: [{ name: "lockId", type: "bytes32" }],
+  },
+] as const;
 
 /** Every way to pay this order, with what it costs and what the wallet holds there. */
 function paymentOptions(

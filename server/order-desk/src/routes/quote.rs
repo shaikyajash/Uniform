@@ -41,9 +41,10 @@ const USDT: &str = "USDT";
 const USDC: &str = "USDC";
 /// SourceLock takes only USDC and EURC, both with 6 decimals (checked against chains.json).
 const USDC_DECIMALS: u8 = 6;
-/// A token paid through a Calibur batch is quoted this much above its value at the market price,
-/// above the Matchmaker's own buffer (1%), so a small price move before the fill still fills.
-const QUOTE_BUFFER_BPS: u64 = 150;
+/// A token paid through a Calibur batch is quoted this much above its value at the market price:
+/// 2% above the Matchmaker's own buffer (1%), so a price move while the customer signs and the
+/// lock waits still fills.
+const QUOTE_BUFFER_BPS: u64 = 300;
 /// The least a split leg may lock (0.1 USDC), so a split cannot make the Relayer pay gas for dust.
 const MIN_SPLIT_LEG: u64 = 100_000;
 /// `validAfter` = now - 60, so a customer whose clock runs a little behind can still sign (SPEC).
@@ -283,7 +284,7 @@ fn direct(state: &AppState, quoting: &Quoting) -> Result<Priced, ApiError> {
             quoting.payer,
         ),
     };
-    let typed_data = direct_pay::typed_data(usdt, chain.chain_id, &note);
+    let typed_data = direct_pay::typed_data(usdt, chain.chain_id, &note)?;
     let total = quoting.amount.to_decimal(usdt.decimals);
     Ok(Priced {
         path: PayPath::Direct,
@@ -514,7 +515,7 @@ fn plan_lock(
         valid_before: quoting.now + LOCK_NOTE_LIFETIME_SECONDS,
         nonce: lock_id,
     };
-    let typed_data = direct_pay::typed_data(usdc, chain.chain_id, &note);
+    let typed_data = direct_pay::typed_data(usdc, chain.chain_id, &note)?;
     Ok(Planned {
         to_sign: ToSign {
             chain_id: chain.chain_id,
@@ -821,16 +822,16 @@ mod tests {
 
     #[test]
     fn a_token_amount_covers_the_order_at_the_price_plus_the_buffer() {
-        // 12.036 USD of WBTC at 100,000 USD: 0.00012036 WBTC, /0.985 and rounded up.
+        // 12.036 USD of WBTC at 100,000 USD: 0.00012036 WBTC, /0.97 and rounded up.
         let amount = super::token_amount(Amount::from(12_036_000u64), 8, 100_000_000_000).unwrap();
-        assert_eq!(amount, Amount::from(12_220u64));
+        assert_eq!(amount, Amount::from(12_409u64));
         // Worth at least 12.036 USD at the Matchmaker's 1% discount.
         let value = amount.0 * alloy::primitives::U256::from(100_000_000_000u64) * alloy::primitives::U256::from(9_900u64)
             / (alloy::primitives::U256::from(100_000_000u64) * alloy::primitives::U256::from(10_000u64));
         assert!(value >= alloy::primitives::U256::from(12_036_000u64), "{value}");
         // WETH at 4,000 USD, 18 decimals.
         let weth = super::token_amount(Amount::from(12_036_000u64), 18, 4_000_000_000).unwrap();
-        assert_eq!(weth, Amount::from(3_054_822_335_025_381u64));
+        assert_eq!(weth, Amount::from(3_102_061_855_670_104u64));
         assert_eq!(super::token_amount(Amount::from(1u64), 8, 0), None);
     }
 
@@ -844,13 +845,13 @@ mod tests {
         let body = json!({ "payer": PAYER, "hashlock": HASHLOCK, "chainId": 11155111, "token": "WBTC" });
         let (status, reply) = call(&test.app, quote(&id, body)).await;
         assert_eq!(status, StatusCode::OK, "{reply}");
-        assert_eq!((reply["path"].as_str(), reply["total"].as_str(), reply["fee"].as_str()), (Some("crosschain"), Some("0.00012220"), Some("0.036000")));
+        assert_eq!((reply["path"].as_str(), reply["total"].as_str(), reply["fee"].as_str()), (Some("crosschain"), Some("0.00012409"), Some("0.036000")));
 
         let chains = common::chains::Chains::from_json(include_str!("../../../../shared/chains.json")).unwrap();
         let eth = chains.by_id(11155111).unwrap();
         let (source_lock, wbtc, calibur_address) = (eth.contracts.source_lock.unwrap(), eth.tokens["WBTC"].address, eth.contracts.calibur.unwrap());
         let note = &reply["toSign"][0];
-        assert_eq!((note["signing"].as_str(), note["token"].as_str(), note["amount"].as_str()), (Some("batch"), Some("WBTC"), Some("0.00012220")));
+        assert_eq!((note["signing"].as_str(), note["token"].as_str(), note["amount"].as_str()), (Some("batch"), Some("WBTC"), Some("0.00012409")));
         assert_eq!(note["calibur"], format!("{calibur_address:#x}"));
 
         // Exactly what the Gas Payer will rebuild: approve then lock, for Bob, under the lock id.
@@ -865,10 +866,10 @@ mod tests {
             out_token: Address::ZERO,
         };
         let payer: Address = PAYER.parse().unwrap();
-        let lock_id = source_lock_id(11155111, source_lock, &params, payer, wbtc, Amount::from(12_220u64));
+        let lock_id = source_lock_id(11155111, source_lock, &params, payer, wbtc, Amount::from(12_409u64));
         assert_eq!(note["lockId"], lock_id.to_string());
         let batch = calibur::signed_batch(
-            calibur::lock_calls(source_lock, &params, wbtc, Amount::from(12_220u64)),
+            calibur::lock_calls(source_lock, &params, wbtc, Amount::from(12_409u64)),
             calibur::nonce_for(lock_id),
             expiry - 1200 + 300,
         );

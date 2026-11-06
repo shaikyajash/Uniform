@@ -425,7 +425,7 @@ mod tests {
 
     #[test]
     fn the_order_desk_quote_for_a_priced_token_always_fills() {
-        // Order Desk: ask = ceil(usd6 × 10^dec × 10000 / (price × (10000 − 150))). Bob's own
+        // Order Desk: ask = ceil(usd6 × 10^dec × 10000 / (price × (10000 − 300))). Bob's own
         // buffer is smaller, so the ask covers the order even after the price falls a little.
         for (token, decimals, price) in [
             (WBTC, 8u32, 97_123_456_789u64),
@@ -436,7 +436,7 @@ mod tests {
                 let needed = required_usdc(U256::from(order), 30).unwrap();
                 let ask = (needed * U256::from(10u64).pow(U256::from(decimals))
                     * U256::from(10_000u64))
-                .div_ceil(U256::from(price) * U256::from(10_000u64 - 150));
+                .div_ceil(U256::from(price) * U256::from(10_000u64 - 300));
                 let value = usdc_value(token, ask, price, 100).unwrap();
                 assert!(value >= needed, "{token:?} price {price} order {order}");
                 // Even at the quote's own buffer it is enough.
