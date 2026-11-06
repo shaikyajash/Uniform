@@ -13,8 +13,12 @@ use serde::{Deserialize, Deserializer};
 #[serde(rename_all = "camelCase")]
 pub struct Chains {
     pub timeouts_seconds: Timeouts,
-    /// Bob's fee in basis points, added to the customer's quote (30 = 0.3%).
+    /// The fee a new strategy starts with on the Earn page, in basis points (30 = 0.3%). Each
+    /// provider sets their own fee per strategy, within `providerFeeBpsRange`.
     pub provider_fee_bps: u16,
+    /// The lowest and highest fee a provider may ask. The floor covers the Matchmaker's gas for the
+    /// fill and the redeem; the cap stops a mistaken strategy from overcharging customers.
+    pub provider_fee_bps_range: FeeRange,
     /// Every other top-level key is a chain, keyed by its name (`whitechainSepolia`, ...).
     #[serde(flatten)]
     pub by_name: BTreeMap<String, Chain>,
@@ -35,6 +39,19 @@ pub struct Chain {
     pub uniswap: Option<Uniswap>,
     /// Blocks to wait before trusting an event on this chain.
     pub confirmations: u64,
+}
+
+/// Inclusive bounds on a provider's fee, in basis points.
+#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
+pub struct FeeRange {
+    pub min: u16,
+    pub max: u16,
+}
+
+impl FeeRange {
+    pub fn allows(self, fee_bps: u16) -> bool {
+        (self.min..=self.max).contains(&fee_bps)
+    }
 }
 
 /// Whether the shop is paid on this chain, or customers pay from it.
@@ -199,6 +216,13 @@ impl Chains {
                 return Err(LoadError::Invalid(format!("{name}: confirmations must be at least 1")));
             }
         }
+        let fees = self.provider_fee_bps_range;
+        if fees.min > fees.max || fees.max >= 10_000 || !fees.allows(self.provider_fee_bps) {
+            return Err(LoadError::Invalid(format!(
+                "providerFeeBpsRange {}..={} must be ordered, below 10000 and include providerFeeBps {}",
+                fees.min, fees.max, self.provider_fee_bps
+            )));
+        }
         let timeouts = self.timeouts_seconds;
         if timeouts.destination_lock >= timeouts.source_lock {
             return Err(LoadError::Invalid(
@@ -235,6 +259,8 @@ mod tests {
         assert_eq!(chains.timeouts_seconds.source_lock, 1200);
         assert_eq!(chains.timeouts_seconds.destination_lock, 600);
         assert_eq!(chains.provider_fee_bps, 30);
+        assert_eq!(chains.provider_fee_bps_range, FeeRange { min: 10, max: 100 });
+        assert!(chains.provider_fee_bps_range.allows(100) && !chains.provider_fee_bps_range.allows(9));
     }
 
     /// Checked on chain on Fri Nov 6: each pair recomputes the token's `DOMAIN_SEPARATOR()`.
