@@ -216,7 +216,7 @@ mod tests {
 
         let base = chains.by_id(84532).unwrap();
         assert_eq!(base.role, Role::Customer);
-        assert_eq!(base.contracts.source_lock, Some(address!("61Ec0B49C65f83b9CFd8996A56AE0929091E7858")));
+        assert_eq!(base.contracts.source_lock, Some(address!("02dF2659B5B4956EAFEe3293584C2aaefC114871")));
 
         assert_eq!(chains.customer_chains().count(), 2);
         assert_eq!(chains.timeouts_seconds.source_lock, 1200);

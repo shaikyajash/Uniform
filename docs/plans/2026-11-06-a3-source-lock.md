@@ -1,5 +1,7 @@
 # A3 SourceLock Implementation Plan
 
+> **Superseded:** A6 replaced this USDC-only SourceLock with the multi-token version (USDC and EURC, a generic `lock`, `LOCK_TAG` v2, token in `Locked`). See `docs/SPEC.md`. This plan is kept as the record of A3.
+
 > **For Claude:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task.
 
 **Goal:** A source-lock contract on Base Sepolia that holds a customer's USDC for Bob under a hashlock and an expiry, locked gaslessly with one EIP-3009 signature. It is done when a script locks 1 USDC and redeems it with the secret on Base Sepolia.

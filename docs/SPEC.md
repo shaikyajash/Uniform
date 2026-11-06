@@ -136,49 +136,60 @@ Rules for the Order Desk and Gas Payer (from the security review):
 - Refund signatures depend on the amount refunded so far, so sign one partial refund at a time.
 - Known limitation: only 65-byte EOA signatures (no ERC-1271 smart wallets).
 
-### SourceLock (Base Sepolia, Ethereum Sepolia) — built, USDC only
+### SourceLock (Base Sepolia, Ethereum Sepolia) — USDC and EURC
+
+The lock holds the token the customer paid with and never swaps. Bob converts what he collects to USDC separately, later (one Uniswap batch, many tokens to one).
 
 ```solidity
+constructor(IERC20 usdc, IERC20 altToken);    // altToken = EURC; both fixed at deploy
+function isAllowed(address token) view returns (bool);   // USDC or EURC
 struct LockParams { bytes32 orderId; address receiver; uint256 minUsdcOut;
                     bytes32 hashlock; uint64 expiry; address outToken; }
+// minUsdcOut: the quote's USDC value; enforced on chain for USDC locks only. For EURC the
+// Matchmaker checks the value before filling.
 
 function lockIdFor(LockParams p, address payer, address tokenIn, uint256 amountIn) view returns (bytes32);
 // = keccak256(abi.encode(LOCK_TAG, chainid, this, p, payer, tokenIn, amountIn)); also the EIP-3009 nonce
+// LOCK_TAG = keccak256("uniform.sourcelock.lock.v2")
 function lockWithAuthorization(LockParams p, address payer, address tokenIn, uint256 amountIn,
         uint256 validAfter, uint256 validBefore, uint8 v, bytes32 r, bytes32 s,
         bytes swapData) external returns (bytes32 lockId);
-// USDC only for now: swapData must be empty, outToken 0 or USDC (multi-token comes in A6)
-function lockFromProvider(LockParams p, uint256 usdcAmount) external returns (bytes32 lockId);
-// caller's own approved USDC, used by the provider for the refund direction
-function claim(bytes32 lockId, bytes32 secret) external;  // source redeem: before expiry, to receiver
-function refund(bytes32 lockId) external;                 // at or after expiry, back to payer; anyone may call
+// gasless, USDC or EURC; swapData must be empty
+function lock(LockParams p, address token, uint256 amount) external returns (bytes32 lockId);
+// the caller is the payer and locks its own approved tokens (provider refund locks; customer
+// accounts paying directly, later through EIP-7702)
+function claim(bytes32 lockId, bytes32 secret) external;  // source redeem: before expiry, receiver gets the locked token
+function refund(bytes32 lockId) external;                 // at or after expiry, the exact token and amount back to the payer
+function locks(bytes32) view returns (address payer, uint64 expiry, uint8 state, address receiver,
+        uint96 amount, bytes32 hashlock, bytes32 orderId, address token);
 event Locked(bytes32 indexed lockId, bytes32 indexed orderId, address payer, address receiver,
-             uint256 usdcAmount, bytes32 hashlock, uint64 expiry);
+             address token, uint256 amount, bytes32 hashlock, uint64 expiry);
 event Claimed(bytes32 indexed lockId, bytes32 secret);
 event Refunded(bytes32 indexed lockId);
 ```
 
-Contract limits: lock time 5 min to 3 h · `validBefore - validAfter <= 1 h` · `validBefore + 15 min <= expiry` · amount fits in uint96 · receiver is not zero, the contract or USDC · each lock id once.
+Contract limits: lock time 5 min to 3 h · `validBefore - validAfter <= 1 h` · `validBefore + 15 min <= expiry` · amount above zero and fits in uint96 · token is USDC or EURC · receiver is not zero, the contract, USDC or EURC · hashlock not zero · `outToken` 0 or USDC · `swapData` empty · each lock id once · `amount >= minUsdcOut` for USDC locks.
 
 What the customer signs (Base Sepolia shown):
 
 ```
-domain  = { name: "USDC", version: "2", chainId: 84532,
-            verifyingContract: 0x036CbD53842c5426634e7929541eC2318f3dCF7e }
+USDC domain = { name: "USDC", version: "2", chainId: 84532,
+                verifyingContract: 0x036CbD53842c5426634e7929541eC2318f3dCF7e }
+EURC domain = { name: "EURC", version: "2", chainId: 84532,
+                verifyingContract: 0x808456652fdb597867f38412077A9182bf77359F }
 types   = ReceiveWithAuthorization(address from,address to,uint256 value,uint256 validAfter,uint256 validBefore,bytes32 nonce)
 message = { from: customer, to: SourceLock, value: amountIn, validAfter: now - 60,
-            validBefore: now + 300, nonce: lockIdFor(params, customer, USDC, amountIn) }
+            validBefore: now + 300, nonce: lockIdFor(params, customer, token, amountIn) }
 params.expiry = now + 1200 (demo), so validBefore + 15 min <= expiry holds
 ```
 
-Rules for the Matchmaker and Gas Payer (from the security review):
-- **Trust only the exact lock you expect.** Anyone can open a lock with any orderId, receiver or hashlock, using their own USDC. Recompute `lockIdFor` from the Order Desk's quote and the customer, and accept only that lock id, emitted by our SourceLock address. Never match on orderId or hashlock alone. Then read `locks(lockId)` and check amount, receiver, hashlock and expiry.
+Rules for the Matchmaker and Gas Payer (from the security reviews):
+- **Trust only the exact lock you expect.** Anyone can open a lock with any orderId, receiver or hashlock, using their own USDC or EURC. Recompute `lockIdFor` from the Order Desk's quote and the customer, and accept only that lock id, emitted by our SourceLock address. Never match on orderId or hashlock alone. Then read `locks(lockId)` and check token, amount, receiver, hashlock and expiry.
+- **Value an EURC lock before filling:** the locked EURC must be worth at least the order plus Bob's fee at the current EUR/USD price (with a small safety buffer). If the price is unavailable or too low, do not fill; the customer gets the same EURC back at expiry. The Matchmaker reads the price from CoinGecko (`euro-coin` in USD, cached 60 s, refused if older than 10 min or outside $0.90–$1.40) and values EURC at the price less `EURC_PRICE_BUFFER_BPS` (default 100 = 1%), rounded down. A quote for EURC must ask for at least `ceil(required USDC × 10^10 / (price in micro-dollars × (10000 − buffer)))` EURC units, with the same price source and buffer, or Bob will not fill it.
 - Fill only with at least 15 minutes left on the source lock, and set the destination lock to expire before it.
-- Before filling, check that Circle has not blacklisted Bob (`isBlacklisted`); a blacklisted receiver cannot claim, and the customer would be refunded after Bob has paid.
+- Before filling, check that Circle has not blacklisted Bob for that token (`isBlacklisted`); a blacklisted receiver cannot claim, and the customer would be refunded after Bob has paid.
 - Claim as soon as the secret appears on Whitechain; do not wait near expiry.
-- Known limit: if Circle blacklists the customer after locking, refund reverts and the USDC stays in the contract.
-- For A6 (multi-token): the lock holds the token the customer paid with and never swaps. Each lock stores `{token, amount}`; allowed tokens are USDC and EURC (EIP-3009) and ETH (`lockWithETH`, payable). `claim` gives the receiver the raw token; `claimAndSwap(lockId, secret, swapData, minOut)` is callable only by the receiver and swaps to USDC on Uniswap with the receiver's own route and minimum; `refund` returns the exact token and amount. The relayer never chooses a swap route.
-- Before filling an EURC or ETH lock, the Matchmaker checks that the live Uniswap price still covers the order (the quote includes a small buffer); if not, it does not fill and the customer is refunded in the same token.
+- Known limit: if Circle blacklists the customer after locking, refund reverts and the locked token stays in the contract.
 
 ### PayoutPool (Whitechain, AquaApp) — built
 

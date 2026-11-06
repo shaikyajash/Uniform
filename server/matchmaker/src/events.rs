@@ -106,7 +106,8 @@ pub fn decode(chain_id: u64, source: Source, log: &Log) -> (Option<ChainEvent>, 
                     wrap(EventKind::Locked {
                         lock_id: e.lockId,
                         order_id: e.orderId,
-                        usdc_amount: Amount::from(e.usdcAmount),
+                        token: e.token,
+                        amount: Amount::from(e.amount),
                     }),
                     Action::Locked(e.data),
                 ),
@@ -169,7 +170,7 @@ pub fn decode(chain_id: u64, source: Source, log: &Log) -> (Option<ChainEvent>, 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use alloy::primitives::{address, Address, Bytes, LogData, B256, U256};
+    use alloy::primitives::{Address, B256, Bytes, LogData, U256, address};
 
     fn rpc_log(address: Address, data: LogData) -> Log {
         Log {
@@ -181,7 +182,7 @@ mod tests {
         }
     }
 
-    const LOCK: Address = address!("61Ec0B49C65f83b9CFd8996A56AE0929091E7858");
+    const LOCK: Address = address!("02dF2659B5B4956EAFEe3293584C2aaefC114871");
 
     #[test]
     fn locked_is_reported_and_acted_on() {
@@ -190,7 +191,8 @@ mod tests {
             orderId: B256::repeat_byte(2),
             payer: Address::repeat_byte(3),
             receiver: Address::repeat_byte(4),
-            usdcAmount: U256::from(12_036_000u64),
+            token: Address::repeat_byte(6),
+            amount: U256::from(12_036_000u64),
             hashlock: B256::repeat_byte(5),
             expiry: 1_800_001_200,
         };
@@ -205,7 +207,8 @@ mod tests {
             EventKind::Locked {
                 lock_id: B256::repeat_byte(1),
                 order_id: B256::repeat_byte(2),
-                usdc_amount: Amount::from(U256::from(12_036_000u64)),
+                token: Address::repeat_byte(6),
+                amount: Amount::from(U256::from(12_036_000u64)),
             }
         );
         assert!(matches!(action, Action::Locked(e) if e.receiver == Address::repeat_byte(4)));

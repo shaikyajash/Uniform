@@ -6,6 +6,11 @@
         "name": "usdc_",
         "type": "address",
         "internalType": "contract IERC20"
+      },
+      {
+        "name": "altToken_",
+        "type": "address",
+        "internalType": "contract IERC20"
       }
     ],
     "stateMutability": "nonpayable"
@@ -77,6 +82,19 @@
   },
   {
     "type": "function",
+    "name": "altToken",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "address",
+        "internalType": "contract IERC20"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
     "name": "claim",
     "inputs": [
       {
@@ -95,7 +113,26 @@
   },
   {
     "type": "function",
-    "name": "lockFromProvider",
+    "name": "isAllowed",
+    "inputs": [
+      {
+        "name": "token",
+        "type": "address",
+        "internalType": "address"
+      }
+    ],
+    "outputs": [
+      {
+        "name": "",
+        "type": "bool",
+        "internalType": "bool"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "lock",
     "inputs": [
       {
         "name": "p",
@@ -135,7 +172,12 @@
         ]
       },
       {
-        "name": "usdcAmount",
+        "name": "token",
+        "type": "address",
+        "internalType": "address"
+      },
+      {
+        "name": "amount",
         "type": "uint256",
         "internalType": "uint256"
       }
@@ -356,6 +398,11 @@
         "name": "orderId",
         "type": "bytes32",
         "internalType": "bytes32"
+      },
+      {
+        "name": "token",
+        "type": "address",
+        "internalType": "address"
       }
     ],
     "stateMutability": "view"
@@ -434,7 +481,13 @@
         "internalType": "address"
       },
       {
-        "name": "usdcAmount",
+        "name": "token",
+        "type": "address",
+        "indexed": false,
+        "internalType": "address"
+      },
+      {
+        "name": "amount",
         "type": "uint256",
         "indexed": false,
         "internalType": "uint256"
@@ -591,6 +644,11 @@
         "internalType": "bytes32"
       }
     ]
+  },
+  {
+    "type": "error",
+    "name": "ReentrancyGuardReentrantCall",
+    "inputs": []
   },
   {
     "type": "error",
