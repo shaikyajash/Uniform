@@ -77,7 +77,7 @@ const REFUNDED: u8 = 3;
 /// Any maker, to check our destination lock id matches the contract's.
 const PROBE_MAKER: Address = Address::repeat_byte(0x11);
 /// How often the Order Desk gets fresh offers; it stops quoting from offers much older than this.
-const OFFERS_EVERY: Duration = Duration::from_secs(15);
+pub const OFFERS_EVERY: Duration = Duration::from_secs(15);
 
 pub type Result<T> = std::result::Result<T, String>;
 
@@ -226,8 +226,6 @@ pub struct Worker {
     aqua: Address,
     /// Providers' strategies, as they ship and dock them on the Earn page.
     strategies: Strategies,
-    /// When offers were last sent to the Order Desk.
-    offers_sent: std::sync::Mutex<Option<std::time::Instant>>,
     /// Our SourceLock and the tokens it accepts on each customer chain.
     source_locks: HashMap<u64, Address>,
     tokens: HashMap<u64, LockTokens>,
@@ -457,7 +455,6 @@ impl Worker {
             destination_lock,
             aqua,
             strategies,
-            offers_sent: std::sync::Mutex::new(None),
             source_locks,
             tokens,
             eurc_price,
@@ -632,21 +629,15 @@ impl Worker {
 
 
     /// Sends the Order Desk every open strategy's offer (fee, per-order limit, what it can pay
-    /// now), at most every `OFFERS_EVERY`. The Order Desk quotes cross-chain payments from these.
-    async fn send_offers(&self) {
-        let due = self
-            .offers_sent
-            .lock()
-            .expect("offers clock")
-            .is_none_or(|at| at.elapsed() >= OFFERS_EVERY);
-        if !due {
-            return;
-        }
+    /// now). The Order Desk quotes cross-chain payments from these; main runs this on its own loop,
+    /// every `OFFERS_EVERY`, so a long scan never leaves the Order Desk without offers.
+    pub async fn send_offers(&self) {
         match self.offers().await {
-            Ok(offers) => match self.desk.send_offers(&offers).await {
-                Ok(()) => *self.offers_sent.lock().expect("offers clock") = Some(std::time::Instant::now()),
-                Err(e) => eprintln!("matchmaker: sending offers: {e}"),
-            },
+            Ok(offers) => {
+                if let Err(e) = self.desk.send_offers(&offers).await {
+                    eprintln!("matchmaker: sending offers: {e}");
+                }
+            }
             Err(e) => eprintln!("matchmaker: reading offers: {e}"),
         }
     }
@@ -777,7 +768,6 @@ impl Worker {
                 }
             }
         }
-        self.send_offers().await;
         self.retry_parked_logs().await;
         self.flush_outbox().await;
         self.refund_expired_destinations().await;

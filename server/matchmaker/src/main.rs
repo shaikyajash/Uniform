@@ -1,8 +1,8 @@
-//! Matchmaker: watches the chains and acts for Bob, the liquidity provider. Owned by A.
+//! Matchmaker: watches the chains and acts for the liquidity providers. Owned by A.
 //!
-//! When a customer locks on a source chain for Bob, it opens the destination lock for the shop on
-//! Whitechain with Bob's USDT. When the shop is paid and the secret becomes public, it redeems the
-//! customer's source lock for Bob. It refunds locks that time out and reports every chain event to
+//! When a customer locks on a source chain for a provider, it opens the destination lock for the
+//! shop on Whitechain with that provider's USDT. When the shop is paid and the secret becomes
+//! public, it redeems the customer's source lock for the provider. It refunds locks that time out and reports every chain event to
 //! the Order Desk. See docs/plans/2026-11-06-a5-matchmaker.md.
 
 mod config;
@@ -41,6 +41,16 @@ async fn main() {
         loop {
             redeemer.redeem_duty().await;
             tokio::time::sleep(poll).await;
+        }
+    });
+
+    // Offers on their own loop too: the Order Desk quotes from them, so they must stay fresh
+    // while a scan catches up.
+    let offers = Arc::clone(&worker);
+    tokio::spawn(async move {
+        loop {
+            offers.send_offers().await;
+            tokio::time::sleep(worker::OFFERS_EVERY).await;
         }
     });
 
