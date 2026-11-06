@@ -239,8 +239,9 @@ mod tests {
 
     #[test]
     fn not_deployed_is_none() {
-        let chains = Chains::from_json(REPO_FILE).unwrap();
-        // Ethereum Sepolia's SourceLock is "" in the file.
+        // A contract not deployed yet is "" in the file.
+        let file = REPO_FILE.replace("0x3aCDE874Eeb36dD28507B5b1FF29219Ba262F5d9", "");
+        let chains = Chains::from_json(&file).unwrap();
         assert_eq!(chains.by_id(11_155_111).unwrap().contracts.source_lock, None);
     }
 
