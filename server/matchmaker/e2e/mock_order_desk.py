@@ -1,6 +1,6 @@
 """Stand-in for the Order Desk during the local end-to-end test.
 
-GET /v1/orders/<id>    -> the order from orders.json (shop address, amount, status)
+GET /v1/orders/<id>    -> the order from orders.json (shop address, amount, status, legs)
 POST /internal/events  -> appended to events.log, 200
 """
 import json
