@@ -20,7 +20,7 @@ use alloy::{
     sol_types::{SolEvent, SolValue},
     transports::http::reqwest,
 };
-use bindings::{DestinationLock, IAqua, IFiatToken, PayoutPool, SourceLock};
+use bindings::{DestinationLock, IAqua, IERC20, IFiatToken, PayoutPool, SourceLock};
 use common::chains::Role;
 use tokio::sync::Mutex;
 
@@ -203,6 +203,9 @@ pub struct Worker {
     usdt: Address,
     payout_pool: Address,
     destination_lock: Address,
+    aqua: Address,
+    /// Bob's strategy on Aqua, checked at start-up.
+    strategy_hash: B256,
     /// Our SourceLock and the tokens it accepts on each customer chain.
     source_locks: HashMap<u64, Address>,
     tokens: HashMap<u64, LockTokens>,
@@ -357,7 +360,7 @@ impl Worker {
         }
 
         let eurc_price = EurcPrice::new(config.eurc_price_url.clone())?;
-        let worker = Worker {
+        let mut worker = Worker {
             shop_chain_id: shop.chain_id,
             config,
             store,
@@ -367,16 +370,20 @@ impl Worker {
             usdt,
             payout_pool,
             destination_lock,
+            aqua,
+            strategy_hash: B256::ZERO,
             source_locks,
             tokens,
             eurc_price,
         };
-        worker.check_setup(aqua).await?;
+        worker.strategy_hash = worker.check_setup().await?;
         Ok(worker)
     }
 
-    /// Refuses to start against the wrong contracts or a strategy Bob never shipped.
-    async fn check_setup(&self, aqua: Address) -> Result<()> {
+    /// Refuses to start against the wrong contracts or a strategy Bob never shipped. Returns the
+    /// strategy's hash.
+    async fn check_setup(&self) -> Result<B256> {
+        let aqua = self.aqua;
         let shop = self.provider(self.shop_chain_id)?;
         let pool = PayoutPool::new(self.payout_pool, shop);
         let wired = pool.destinationLock().call().await.map_err(err)?;
@@ -419,7 +426,7 @@ impl Worker {
             .map_err(err)?;
         if shipped.tokensCount == 0 || shipped.tokensCount == u8::MAX {
             return Err(format!(
-                "Bob's strategy {hash} is not active on Aqua: check BOB_ADDRESS, STRATEGY_SALT, STRATEGY_MAX_PER_ORDER and STRATEGY_FEE_BPS"
+                "The provider's strategy {hash} is not active on Aqua: check BOB_ADDRESS, STRATEGY_SALT, STRATEGY_MAX_PER_ORDER and STRATEGY_FEE_BPS"
             ));
         }
         eprintln!(
@@ -462,7 +469,29 @@ impl Worker {
         }
         self.require_six_decimals(self.shop_chain_id, self.usdt)
             .await?;
-        Ok(())
+        Ok(hash)
+    }
+
+    /// The parts of what Bob can pay out now: his strategy's balance on Aqua, the USDT in his
+    /// wallet and his approval to Aqua.
+    async fn liquidity(&self) -> Result<(U256, U256, U256)> {
+        let shop = self.provider(self.shop_chain_id)?;
+        let bob = self.config.provider.address;
+        let shipped = IAqua::new(self.aqua, shop)
+            .rawBalances(bob, self.payout_pool, self.strategy_hash, self.usdt)
+            .call()
+            .await
+            .map_err(err)?;
+        // A docked strategy keeps no balance.
+        let strategy_balance = if shipped.tokensCount == u8::MAX {
+            U256::ZERO
+        } else {
+            U256::from(shipped.balance)
+        };
+        let usdt = IERC20::new(self.usdt, shop);
+        let wallet = usdt.balanceOf(bob).call().await.map_err(err)?;
+        let approved = usdt.allowance(bob, self.aqua).call().await.map_err(err)?;
+        Ok((strategy_balance, wallet, approved))
     }
 
     /// Valuing a lock assumes USDC, EURC and USDT all have 6 decimals; refuse a token that doesn't.
@@ -792,7 +821,7 @@ impl Worker {
             .find(|l| !self.source_locks.contains_key(&l.chain_id))
         {
             eprintln!(
-                "matchmaker: skip order {}: it has a lock on chain {}, which Bob does not watch",
+                "matchmaker: skip order {}: it has a lock on chain {}, which the provider does not watch",
                 locked.orderId, leg.chain_id
             );
             return Ok(());
@@ -857,7 +886,7 @@ impl Worker {
             }
             let Some(kind) = self.tokens[&leg.chain_id].kind(on_chain.token) else {
                 eprintln!(
-                    "matchmaker: skip lock {}: token {} is not one Bob accepts here",
+                    "matchmaker: skip lock {}: token {} is not one the provider accepts here",
                     leg.lock_id, on_chain.token
                 );
                 return Ok(());
@@ -937,7 +966,7 @@ impl Worker {
                 .map_err(err)?
             {
                 eprintln!(
-                    "matchmaker: skip lock {}: Circle has blacklisted Bob, he could not redeem",
+                    "matchmaker: skip lock {}: Circle has blacklisted the provider, it could not redeem",
                     r.leg.lock_id
                 );
                 return Ok(());
@@ -961,6 +990,16 @@ impl Worker {
             }
         }
 
+        // Checked last, after every reason to skip. A short pool is an error, so the lock stays
+        // parked and is tried again: a top-up before the fill cutoff still fills the order.
+        let (strategy_balance, wallet, approved) = self.liquidity().await?;
+        let available = rules::liquidity(strategy_balance, wallet, approved);
+        if available < plan.amount {
+            return Err(format!(
+                "not enough liquidity for order {}: needs {} USDT units, the provider can pay {available} (strategy {strategy_balance}, wallet {wallet}, approved to Aqua {approved}); top up the provider's pool",
+                locked.orderId, plan.amount
+            ));
+        }
         let fill = PayoutPool::Fill {
             orderId: locked.orderId,
             merchant: plan.merchant,

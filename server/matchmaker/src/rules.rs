@@ -216,10 +216,25 @@ pub fn fill_decision(
     })
 }
 
+/// The USDT Bob can pay out now. Aqua keeps no tokens: a fill pulls the amount from Bob's wallet,
+/// so it is capped by his strategy's balance on Aqua, the USDT in his wallet and his approval to
+/// Aqua, whichever is lowest.
+pub fn liquidity(strategy_balance: U256, wallet: U256, approved: U256) -> U256 {
+    strategy_balance.min(wallet).min(approved)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use alloy::primitives::address;
+
+    #[test]
+    fn liquidity_is_the_lowest_of_strategy_wallet_and_approval() {
+        let u = U256::from;
+        assert_eq!(liquidity(u(4_000_000), u(5_000_000), u(9_000_000)), u(4_000_000));
+        assert_eq!(liquidity(u(4_000_000), u(1_000_000), u(9_000_000)), u(1_000_000));
+        assert_eq!(liquidity(u(4_000_000), u(5_000_000), u(0)), u(0));
+    }
 
     const NOW: u64 = 1_800_000_000;
     const BOB: Address = address!("C2bF8030f00CAB26c4611f93c5F71b9d01Ec120A");
