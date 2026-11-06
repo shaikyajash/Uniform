@@ -50,7 +50,7 @@ Customer secret (Pay Button, Paths B and C):
 ## Cross-chain terms
 
 ```
-1. Source lock         customer → Customer Lock (Base or Ethereum Sepolia)   USDC held for Bob
+1. Source lock         customer → Source Lock (Base or Ethereum Sepolia)   USDC held for Bob
 2. Destination lock    Bob      → Shop Lock (Whitechain)                      USDT held for the shop
 3. Destination redeem  customer's browser reveals the secret (via Gas Payer)  shop gets USDT  (Settled)
 4. Source redeem       Matchmaker reuses the now-public secret                Bob gets USDC   (Claimed)
@@ -63,9 +63,9 @@ The customer only reveals the secret. The Shop Lock pays only the merchant set w
 
 | Lock | Demo | Real product | Rule |
 |---|---|---|---|
-| Customer Lock | 20 min | 2 h | Always the longest |
+| Source Lock | 20 min | 2 h | Always the longest |
 | Shop Lock | 10 min | 1 h | Always shorter than the customer side |
-| Matchmaker fill cutoff | 15 min left | 90 min left | Never fill a customer lock close to expiry |
+| Matchmaker fill cutoff | 15 min left | 90 min left | Never fill a source lock close to expiry |
 | Quote | 2 min | 2 min | Price and minimum USDC out |
 
 ## Order statuses
@@ -92,7 +92,7 @@ paid → partially_refunded → refunded
 | `partially_refunded` | Part of the amount given back | refund events |
 | `refunded` | Full amount given back | refund events |
 | `expired` | Quote ran out, no money moved | Order Desk timer |
-| `returned` | Cross-chain timed out, customer refunded | Customer Lock `Refunded` event |
+| `returned` | Cross-chain timed out, customer refunded | Source Lock `Refunded` event |
 
 Legs: `pending → locked → claimed`, or `locked → returned`. Refunds: `pending → sent`, or `pending → failed`.
 
@@ -136,7 +136,7 @@ Rules for the Order Desk and Gas Payer (from the security review):
 - Refund signatures depend on the amount refunded so far, so sign one partial refund at a time.
 - Known limitation: only 65-byte EOA signatures (no ERC-1271 smart wallets).
 
-### CustomerLock (Base Sepolia, Ethereum Sepolia)
+### SourceLock (Base Sepolia, Ethereum Sepolia)
 
 ```solidity
 struct LockParams { bytes32 orderId; address receiver; uint256 minUsdcOut;

@@ -42,7 +42,7 @@
     },
     "permit2": "0x000000000022D473030F116dDEE9F6B43aC78BA3",
     "contracts": {
-      "customerLock": ""
+      "sourceLock": ""
     },
     "confirmations": 2
   },
@@ -69,12 +69,12 @@
     },
     "permit2": "0x000000000022D473030F116dDEE9F6B43aC78BA3",
     "contracts": {
-      "customerLock": ""
+      "sourceLock": ""
     },
     "confirmations": 3
   },
   "timeoutsSeconds": {
-    "customerLock": 1200,
+    "sourceLock": 1200,
     "shopLock": 600,
     "fillCutoff": 900,
     "quote": 120

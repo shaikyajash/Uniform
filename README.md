@@ -16,7 +16,7 @@ Contracts are Solidity (Foundry), the server is Rust (one Cargo workspace in `se
 
 | Folder | Contents | Owner |
 |---|---|---|
-| `contracts/` | Foundry: DirectPay, CustomerLock, PayoutPool, ShopLock | A |
+| `contracts/` | Foundry: DirectPay, SourceLock, PayoutPool, ShopLock | A |
 | `server/matchmaker/` | Watches chains, fills orders from liquidity, collects for the provider | A |
 | `server/order-desk/`, `server/gas-payer/`, `server/notifier/` | API and database, transaction relayer, webhooks | B |
 | `web/` | Pay Button, Shop Dashboard, Receipt page, Earn Page | B (Earn Page: A) |
