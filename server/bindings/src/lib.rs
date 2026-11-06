@@ -32,3 +32,20 @@ alloy::sol!(
     DestinationLock,
     "../../shared/abis/DestinationLock.json"
 );
+
+alloy::sol!(
+    /// The parts of Circle's FiatToken (USDC, EURC) the server reads.
+    #[sol(rpc)]
+    interface IFiatToken {
+        function isBlacklisted(address account) external view returns (bool);
+    }
+);
+
+alloy::sol!(
+    /// The parts of 1inch Aqua the server reads.
+    #[sol(rpc)]
+    interface IAqua {
+        function rawBalances(address maker, address app, bytes32 strategyHash, address token)
+            external view returns (uint248 balance, uint8 tokensCount);
+    }
+);

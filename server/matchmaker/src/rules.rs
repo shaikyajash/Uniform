@@ -65,28 +65,32 @@ pub enum Skip {
 }
 
 /// The USDC the customer must lock for an order: the amount plus Bob's fee, rounded up.
-/// USDC and USDT both have 6 decimals.
-pub fn required_usdc(order_amount: U256, fee_bps: u16) -> U256 {
-    let scaled = order_amount * U256::from(10_000u64 + u64::from(fee_bps));
-    scaled.div_ceil(U256::from(10_000u64))
+/// USDC and USDT both have 6 decimals. `None` if the amount is too large to compute.
+pub fn required_usdc(order_amount: U256, fee_bps: u16) -> Option<U256> {
+    let scaled = order_amount.checked_mul(U256::from(10_000u64 + u64::from(fee_bps)))?;
+    Some(scaled.div_ceil(U256::from(10_000u64)))
 }
 
-/// The destination lock's expiry: `destination_lock` from now, and never later than the source
-/// lock's expiry minus `min_gap`. `None` if that leaves less than the contract's minimum.
-pub fn destination_expiry(now: u64, source_expiry: u64, timing: Timing) -> Option<u64> {
-    let wanted = now.checked_add(timing.destination_lock)?;
-    let latest = source_expiry.checked_sub(timing.min_gap)?;
+/// The destination lock's expiry, on the destination chain's clock: `destination_lock` from now,
+/// and ending at least `min_gap` before the source lock. The source lock's time left is measured
+/// on its own chain and carried over, so a clock difference between the chains cannot shrink the
+/// gap. `None` if that leaves less than the contract's minimum.
+pub fn destination_expiry(dest_now: u64, source_left: u64, timing: Timing) -> Option<u64> {
+    let wanted = dest_now.checked_add(timing.destination_lock)?;
+    let latest = dest_now.checked_add(source_left.checked_sub(timing.min_gap)?)?;
     let expiry = wanted.min(latest);
-    (expiry >= now.checked_add(timing.min_destination_lock)?).then_some(expiry)
+    (expiry >= dest_now.checked_add(timing.min_destination_lock)?).then_some(expiry)
 }
 
-/// Whether to fill this source lock, and how.
+/// Whether to fill this source lock, and how. `src_now` is the source chain's time and
+/// `dest_now` the destination chain's.
 pub fn fill_decision(
     lock: &SourceLockView,
     order: &OrderView,
     provider: &Provider,
     already_filled: bool,
-    now: u64,
+    src_now: u64,
+    dest_now: u64,
     timing: Timing,
 ) -> Result<FillPlan, Skip> {
     if already_filled {
@@ -110,20 +114,23 @@ pub fn fill_decision(
     if order.amount.is_zero() {
         return Err(Skip::ZeroOrderAmount);
     }
-    let needed = required_usdc(order.amount, provider.fee_bps);
-    if lock.amount < needed {
-        return Err(Skip::NotEnoughLocked {
-            locked: lock.amount,
-            needed,
-        });
-    }
     if order.amount > provider.max_per_order {
         return Err(Skip::AboveMaxPerOrder {
             amount: order.amount,
             max: provider.max_per_order,
         });
     }
-    let left = lock.expiry.saturating_sub(now);
+    let needed = required_usdc(order.amount, provider.fee_bps).ok_or(Skip::AboveMaxPerOrder {
+        amount: order.amount,
+        max: provider.max_per_order,
+    })?;
+    if lock.amount < needed {
+        return Err(Skip::NotEnoughLocked {
+            locked: lock.amount,
+            needed,
+        });
+    }
+    let left = lock.expiry.saturating_sub(src_now);
     if left < timing.fill_cutoff {
         return Err(Skip::TooLittleTime {
             left,
@@ -131,7 +138,7 @@ pub fn fill_decision(
         });
     }
     let destination_expiry =
-        destination_expiry(now, lock.expiry, timing).ok_or(Skip::TooLittleTime {
+        destination_expiry(dest_now, left, timing).ok_or(Skip::TooLittleTime {
             left,
             needed: timing.min_gap + timing.min_destination_lock,
         })?;
@@ -187,20 +194,21 @@ mod tests {
     }
 
     fn decide(lock: SourceLockView, order: OrderView) -> Result<FillPlan, Skip> {
-        fill_decision(&lock, &order, &provider(), false, NOW, timing())
+        fill_decision(&lock, &order, &provider(), false, NOW, NOW, timing())
     }
 
     #[test]
     fn fee_is_added_and_rounded_up() {
         assert_eq!(
             required_usdc(U256::from(12_000_000u64), 30),
-            U256::from(12_036_000u64)
+            Some(U256::from(12_036_000u64))
         );
-        assert_eq!(required_usdc(U256::from(1u64), 30), U256::from(2u64));
+        assert_eq!(required_usdc(U256::from(1u64), 30), Some(U256::from(2u64)));
         assert_eq!(
             required_usdc(U256::from(1_000_000u64), 0),
-            U256::from(1_000_000u64)
+            Some(U256::from(1_000_000u64))
         );
+        assert_eq!(required_usdc(U256::MAX, 30), None);
     }
 
     #[test]
@@ -228,7 +236,7 @@ mod tests {
     #[test]
     fn each_skip_reason() {
         assert_eq!(
-            fill_decision(&lock(), &order(), &provider(), true, NOW, timing()),
+            fill_decision(&lock(), &order(), &provider(), true, NOW, NOW, timing()),
             Err(Skip::AlreadyFilled)
         );
 
@@ -320,9 +328,37 @@ mod tests {
             fill_cutoff: 0,
             ..timing()
         };
-        assert_eq!(destination_expiry(NOW, NOW + 599, t), None);
-        assert_eq!(destination_expiry(NOW, NOW + 600, t), Some(NOW + 300));
-        assert_eq!(destination_expiry(NOW, NOW + 100, t), None);
+        assert_eq!(destination_expiry(NOW, 599, t), None);
+        assert_eq!(destination_expiry(NOW, 600, t), Some(NOW + 300));
+        assert_eq!(destination_expiry(NOW, 100, t), None);
         assert_eq!(destination_expiry(NOW, 0, t), None);
+    }
+
+    #[test]
+    fn a_slow_destination_clock_cannot_shrink_the_gap() {
+        // Whitechain's clock is 200 s behind Base: the gap is measured in time left, not timestamps.
+        let mut l = lock();
+        l.expiry = NOW + 900;
+        let plan =
+            fill_decision(&l, &order(), &provider(), false, NOW, NOW - 200, timing()).unwrap();
+        assert_eq!(plan.destination_expiry, NOW - 200 + 600);
+        let source_left = l.expiry - NOW;
+        let dest_left = plan.destination_expiry - (NOW - 200);
+        assert!(source_left - dest_left >= timing().min_gap);
+    }
+
+    #[test]
+    fn a_huge_order_is_capped_before_the_fee_math() {
+        let mut o = order();
+        o.amount = U256::MAX;
+        let mut l = lock();
+        l.amount = U256::MAX;
+        assert_eq!(
+            decide(l, o),
+            Err(Skip::AboveMaxPerOrder {
+                amount: U256::MAX,
+                max: U256::from(20_000_000u64)
+            })
+        );
     }
 }
