@@ -44,7 +44,8 @@
   top: 12px;
   left: 0;
   right: 0;
-  z-index: 50;
+  /* Above everything on the page, guide lines included; Privy's own windows still sit above it. */
+  z-index: 9999;
 }
 
 .headerBox {
@@ -55,6 +56,8 @@
   display: flex;
   align-items: center;
   justify-content: space-between;
+  /* A matte strip: a soft dark tint over the page scrolling under it. */
+  background: rgba(16, 16, 18, 0.5);
 }
 
 /* The nav's right side. "How it works" comes first: while it waits for the hero's button to
@@ -184,16 +187,19 @@
   height: 28px;
   border-radius: 4px;
   color: #f2f2f3;
-  transition: opacity 0.2s ease;
-}
-
-.logo:hover {
-  opacity: 0.75;
 }
 
 .logo:focus-visible {
   outline: 1px solid rgba(255, 255, 255, 0.5);
   outline-offset: 6px;
+}
+
+/* The Uniform mark, in front of the wordmark in the nav. */
+.logoMark {
+  display: block;
+  height: 15px;
+  width: auto;
+  margin-right: 6px;
 }
 
 /* The drawn wordmark (wordmark.tsx). 15px tall: its strokes land just under 2px. */
@@ -344,5 +350,24 @@
   /* No room beside the links on a phone; the hero and the footer still have it. */
   .navCta {
     display: none;
+  }
+}
+
+/* A phone: three links and the wordmark only fit a little smaller. */
+@media (max-width: 480px) {
+  .headerBox {
+    padding: 0 10px;
+  }
+
+  .navRight {
+    gap: 12px;
+  }
+
+  .navLink {
+    font-size: 12px;
+  }
+
+  .wordmark {
+    height: 13px;
   }
 }

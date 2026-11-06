@@ -42,6 +42,8 @@ export interface HalftoneWordmarkFooterProps {
   label?: string
   /** The muted line under it. */
   meta?: string
+  /** Small print at the left of the bottom bar, opposite "Back to top". */
+  footnote?: string
   /** Link columns along the top. */
   columns?: FooterColumn[]
   /** Show the back-to-top link. It scrolls the window to 0. Defaults to true. */
@@ -149,14 +151,15 @@ const HWF_CSS = `
 }
 .hwf-root canvas { position: absolute; inset: 0; width: 100%; height: 100%; display: block; max-width: none; }
 .hwf-top {
-  position: relative; z-index: 1; display: grid; grid-template-columns: minmax(0, 1.25fr) repeat(3, minmax(0, 1fr));
-  gap: 24px; padding: clamp(22px, 3.4vw, 40px) clamp(20px, 3.4vw, 44px) 0;
+  position: relative; z-index: 1; display: grid; grid-template-columns: minmax(0, 1.4fr) repeat(var(--hwf-cols, 3), minmax(0, 1fr));
+  gap: 32px; padding: clamp(28px, 3.8vw, 48px) clamp(20px, 3.4vw, 44px) 0;
   font-family: var(--hwf-mono); font-size: 10.5px; letter-spacing: .18em; text-transform: uppercase; line-height: 1.75;
 }
-.hwf-brand strong { display: block; font-weight: 500; }
-.hwf-brand span { opacity: .45; }
-.hwf-col h3 { margin: 0; font: inherit; opacity: .4; font-weight: 500; }
+.hwf-brand strong { display: block; font-weight: 500; font-size: 12px; letter-spacing: .24em; }
+.hwf-brand span { display: block; margin-top: 6px; opacity: .5; text-transform: none; letter-spacing: .02em; font-size: 12px; max-width: 30ch; }
+.hwf-col h3 { margin: 0 0 14px; font: inherit; opacity: .55; font-weight: 500; }
 .hwf-col ul { list-style: none; margin: 0; padding: 0; }
+.hwf-col li + li { margin-top: 9px; }
 .hwf-col a, .hwf-up {
   color: inherit; text-decoration: none; opacity: .78; background: none; border: 0; padding: 0;
   font: inherit; letter-spacing: inherit; text-transform: inherit; cursor: pointer;
@@ -164,13 +167,15 @@ const HWF_CSS = `
   background-repeat: no-repeat; background-position: 0 100%; transition: opacity .25s ease, background-size .35s cubic-bezier(.2,.7,.1,1);
 }
 .hwf-col a:hover, .hwf-up:hover { opacity: 1; background-size: 100% 1px; }
+.hwf-up, .hwf-up:hover { background-image: none; text-decoration: none; }
 .hwf-col a:focus-visible, .hwf-up:focus-visible { outline: 1px solid currentColor; outline-offset: 3px; opacity: 1; }
 .hwf-rule {
-  position: relative; z-index: 1; display: flex; justify-content: flex-end; align-items: center; gap: 16px;
-  margin: clamp(18px, 2.6vw, 30px) clamp(20px, 3.4vw, 44px) 0; padding-top: 12px;
+  position: relative; z-index: 1; display: flex; justify-content: space-between; align-items: center; gap: 16px;
+  margin: clamp(28px, 3.6vw, 44px) clamp(20px, 3.4vw, 44px) 0; padding-top: 16px;
   border-top: 0.5px solid color-mix(in srgb, var(--hwf-ink) 16%, transparent);
   font-family: var(--hwf-mono); font-size: 10.5px; letter-spacing: .18em; text-transform: uppercase;
 }
+.hwf-foot { opacity: .5; }
 .hwf-sr { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
 @media (max-width: 720px) {
   .hwf-top { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); row-gap: 18px; }
@@ -185,6 +190,7 @@ export default function HalftoneWordmarkFooter({
   wordmark = "halden",
   label = "Halden Studio",
   meta = "©2026 · Oslo / Lisbon",
+  footnote = "",
   columns = DEFAULT_COLUMNS,
   backToTop = true,
   preset = "night",
@@ -468,6 +474,7 @@ export default function HalftoneWordmarkFooter({
           "--hwf-bg": colors.background,
           "--hwf-ink": colors.ink,
           "--hwf-mono": monoFamily,
+          "--hwf-cols": columns.length,
         } as React.CSSProperties
       }
     >
@@ -493,6 +500,7 @@ export default function HalftoneWordmarkFooter({
         ))}
       </div>
       <div className="hwf-rule">
+        {footnote ? <span className="hwf-foot">{footnote}</span> : <span />}
         {backToTop ? (
           <button type="button" className="hwf-up" onClick={toTop}>
             Back to top ↑

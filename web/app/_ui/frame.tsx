@@ -57,8 +57,9 @@ function SiteHeader({ howItWorks }: { howItWorks: boolean }) {
 }
 
 const NAV_LINKS = [
-  { label: "Demo store", href: "/demo" },
   { label: "Dashboard", href: "/dashboard" },
+  { label: "Earn", href: "/earn" },
+  { label: "Docs", href: "/docs" },
 ];
 
 /** The element the hero gives its big "How it works" button; the nav's copy shows once it is gone. */
@@ -87,7 +88,9 @@ function NavHowItWorks() {
 export function Logo() {
   return (
     <Link href="/" className={styles.logo} aria-label="Uniform home">
-      <Wordmark className={styles.wordmark} />
+      {/* eslint-disable-next-line @next/next/no-img-element */}
+      <img src="/logos/uniform-mark.png" alt="" className={styles.logoMark} />
+      <Wordmark className={styles.wordmark} skipFirst />
     </Link>
   );
 }

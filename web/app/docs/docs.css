@@ -1,0 +1,161 @@
+/* The docs page: readable prose, plain tables, and code blocks on near-black. Hairlines only. */
+
+.docs h2 {
+  margin: 0 0 18px;
+  font-size: 26px;
+  font-weight: 400;
+  letter-spacing: -0.025em;
+}
+
+.docs h3 {
+  margin: 34px 0 10px;
+  font-size: 17px;
+  font-weight: 500;
+  letter-spacing: -0.01em;
+}
+
+.docs p,
+.docs li {
+  font-size: 15px;
+  line-height: 1.75;
+  color: rgba(242, 242, 243, 0.68);
+}
+
+.docs p {
+  margin: 0 0 16px;
+}
+
+.docs b {
+  font-weight: 500;
+  color: #f2f2f3;
+}
+
+.docs a {
+  color: #f2f2f3;
+  text-decoration: underline;
+  text-decoration-color: rgba(242, 242, 243, 0.3);
+  text-underline-offset: 3px;
+}
+
+.docs a:hover {
+  text-decoration-color: #f2f2f3;
+}
+
+.docs-steps {
+  margin: 0 0 20px;
+  padding: 0;
+  list-style: none;
+  counter-reset: step;
+}
+
+.docs-steps li {
+  position: relative;
+  padding: 0 0 12px 36px;
+  counter-increment: step;
+}
+
+.docs-steps li::before {
+  content: counter(step, decimal-leading-zero);
+  position: absolute;
+  left: 0;
+  top: 3px;
+  font-family: var(--font-geist-mono), ui-monospace, monospace;
+  font-size: 11px;
+  color: var(--faint);
+}
+
+.docs-inline {
+  padding: 1px 5px;
+  border: 1px solid var(--hair);
+  border-radius: 4px;
+  background: rgba(255, 255, 255, 0.03);
+  font-family: var(--font-geist-mono), ui-monospace, monospace;
+  font-size: 0.86em;
+  color: #e6e6ea;
+  white-space: nowrap;
+}
+
+.docs table {
+  width: 100%;
+  margin: 8px 0 20px;
+  border-collapse: collapse;
+  font-size: 14px;
+}
+
+.docs th {
+  padding: 8px 12px 8px 0;
+  border-bottom: 1px solid var(--hair-strong);
+  font-family: var(--font-geist-mono), ui-monospace, monospace;
+  font-size: 10.5px;
+  font-weight: 400;
+  letter-spacing: 0.1em;
+  text-align: left;
+  text-transform: uppercase;
+  color: var(--faint);
+}
+
+.docs td {
+  padding: 10px 12px 10px 0;
+  border-bottom: 1px solid var(--hair);
+  vertical-align: top;
+  line-height: 1.6;
+  color: rgba(242, 242, 243, 0.68);
+}
+
+.docs td:first-child {
+  white-space: nowrap;
+}
+
+.docs-endpoint {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 14px;
+  border: 1px solid var(--hair-strong);
+  border-radius: 6px;
+  font-family: var(--font-geist-mono), ui-monospace, monospace;
+  font-size: 13px;
+}
+
+.docs-endpoint code {
+  color: #f2f2f3;
+}
+
+.docs-method {
+  padding: 2px 7px;
+  border-radius: 3px;
+  background: #f2f2f3;
+  color: #050506;
+  font-size: 11px;
+  letter-spacing: 0.04em;
+}
+
+.docs-auth {
+  margin-left: auto;
+  font-size: 11px;
+  color: var(--faint);
+}
+
+.docs-note {
+  padding: 2px 0 2px 14px;
+  border-left: 2px solid rgba(242, 242, 243, 0.5);
+}
+
+/* Shiki's output: its own colours, our background and spacing. */
+.docs-code pre {
+  margin: 0;
+  padding: 16px 18px;
+  overflow-x: auto;
+  background: transparent !important;
+  font-family: var(--font-geist-mono), ui-monospace, monospace;
+  font-size: 12.5px;
+  line-height: 1.7;
+  tab-size: 4;
+}
+
+.docs-code pre code {
+  display: block;
+  width: max-content;
+  min-width: 100%;
+}

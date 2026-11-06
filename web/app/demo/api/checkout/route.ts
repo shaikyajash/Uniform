@@ -1,8 +1,8 @@
-// The Demo Store's server: it makes the order on the Order Desk with its own API key, which never
+// The demo store's server: it makes the order on the Order Desk with its own API key, which never
 // reaches the browser. The widget calls this when the customer clicks Pay.
 
 import { randomBytes } from "node:crypto";
-import { totalUnits, type Cart } from "../../catalog";
+import { STORE, totalUnits, type Cart } from "../../catalog";
 
 export async function POST(request: Request) {
   const key = process.env.DEMO_SHOP_API_KEY;
@@ -13,7 +13,7 @@ export async function POST(request: Request) {
   if (units === BigInt(0)) return Response.json({ error: "Your cart is empty." }, { status: 400 });
 
   const amount = `${units / BigInt(1_000_000)}.${(units % BigInt(1_000_000)).toString().padStart(6, "0")}`;
-  const reference = `KC-${randomBytes(3).toString("hex").toUpperCase()}`;
+  const reference = `${STORE.referencePrefix}-${randomBytes(3).toString("hex").toUpperCase()}`;
   const response = await fetch(`${process.env.ORDER_DESK_URL}/v1/orders`, {
     method: "POST",
     headers: { "content-type": "application/json", authorization: `Bearer ${key}` },

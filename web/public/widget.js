@@ -7,9 +7,9 @@
  * On click, the widget POSTs to the merchant's own endpoint (which creates the order with the merchant's
  * API key, on the merchant's server) and expects `{ payUrl }` back. It opens Uniform's pay page in a
  * card over the merchant's page (an iframe in a dialog), the same in every browser: no new tab and no
- * separate window. On a phone the card fills the screen. When the order is paid the card closes by
- * itself, and the widget fires `uniform:paid` (detail: { orderId }) on the button; closing the
- * card first fires `uniform:closed`.
+ * separate window. On a phone the card fills the screen. When the order is paid the widget fires
+ * `uniform:paid` (detail: { orderId }) on the button and the card closes by itself a moment later,
+ * unless the customer opens the receipt in it. Closing the card before paying fires `uniform:closed`.
  *
  * The pay page runs on Uniform's own origin inside the iframe, so the merchant page's scripts cannot
  * reach the customer's login or signatures. "Paid" is only believed from that iframe and origin.
@@ -160,38 +160,54 @@
    */
   function checkout(target) {
     return new Promise(function (resolve, reject) {
-      var done = false;
-      var ui = card(function () {
-        finish(false);
-      });
+      var settled = false;
+      var removed = false;
+      var closeTimer = 0;
+      var stay = false;
+      var ui = card(close);
 
-      function finish(paid, orderId) {
-        if (done) return;
-        done = true;
+      // The card goes: on ×, Escape or the pay page's Close; or by itself a moment after paying,
+      // unless the customer opened the receipt in it.
+      function close() {
+        if (removed) return;
+        removed = true;
+        clearTimeout(closeTimer);
         window.removeEventListener("message", onMessage);
-        if (paid) {
-          ui.remove(PAID_CLOSE_MS);
-          resolve({ orderId: orderId });
-        } else {
-          ui.remove(0);
+        ui.remove(0);
+        if (!settled) {
+          settled = true;
           reject(new Error("closed"));
         }
+      }
+
+      function paid(orderId) {
+        if (settled) return;
+        settled = true;
+        resolve({ orderId: orderId });
+        if (!stay) closeTimer = setTimeout(close, PAID_CLOSE_MS);
       }
 
       function onMessage(event) {
         if (event.origin !== ORIGIN || event.source !== ui.frame.contentWindow) return;
         if (!event.data) return;
         if (event.data.type === "uniform:size") ui.size(event.data.height);
-        if (event.data.type === "uniform:paid") finish(true, event.data.orderId);
+        if (event.data.type === "uniform:paid") paid(event.data.orderId);
+        // Escape pressed, or Close clicked, inside the card.
+        if (event.data.type === "uniform:close") close();
+        // The customer opened the receipt: keep the card until they close it.
+        if (event.data.type === "uniform:stay") {
+          stay = true;
+          clearTimeout(closeTimer);
+        }
       }
       window.addEventListener("message", onMessage);
 
       Promise.resolve(typeof target === "function" ? target() : target).then(
         function (payUrl) {
-          if (!done) ui.load(payUrl);
+          if (!removed) ui.load(payUrl);
         },
         function (error) {
-          if (done) return;
+          if (removed) return;
           ui.fail((error && error.message) || "The merchant couldn't create the order.");
         },
       );

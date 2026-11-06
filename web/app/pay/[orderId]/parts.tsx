@@ -5,7 +5,7 @@
 
 import { AnimatePresence, MotionConfig, motion } from "motion/react";
 import { useEffect, useRef, useState, type ReactNode } from "react";
-import { ArrowUpRight, CircleAlert, TriangleAlert } from "lucide-react";
+import { ArrowUpRight, Check, CircleAlert, Copy, TriangleAlert } from "lucide-react";
 import { shortAddress } from "@/lib/chain";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
@@ -239,6 +239,27 @@ export function CopyText({ text }: { text: string }) {
     >
       {state === "copied" ? "copied ✓" : state === "failed" ? "copy failed, select it" : shortAddress(text)}
     </Button>
+  );
+}
+
+/** A small copy icon to sit beside a value shown in full elsewhere (the wallet address). */
+export function CopyIcon({ text, label }: { text: string; label: string }) {
+  const [state, setState] = useState<"idle" | "copied" | "failed">("idle");
+  const title = state === "copied" ? "Copied" : state === "failed" ? "Couldn't copy, select it instead" : label;
+  return (
+    <button
+      type="button"
+      aria-label={title}
+      title={title}
+      className="inline-grid size-6 place-items-center rounded-md text-faint transition-colors hover:bg-white/8 hover:text-foreground focus-visible:outline focus-visible:outline-1 focus-visible:outline-white/50"
+      onClick={async () => {
+        const ok = await copyText(text);
+        setState(ok ? "copied" : "failed");
+        setTimeout(() => setState("idle"), 2000);
+      }}
+    >
+      {state === "copied" ? <Check className="size-3.5 text-ok" /> : <Copy className="size-3.5" />}
+    </button>
   );
 }
 

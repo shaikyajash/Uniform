@@ -29,12 +29,15 @@ const LETTERS: { x: number; d: string }[] = [
   { x: 114.2, d: "M1.1 20V0L8 13.2L14.9 0V20" },
 ];
 
-export function Wordmark({ className }: { className?: string }) {
+/** `skipFirst`: leave out the U, for when an image stands in for it. */
+export function Wordmark({ className, skipFirst = false }: { className?: string; skipFirst?: boolean }) {
   const clip = `${useId().replace(/:/g, "")}-clip`;
+  const x = skipFirst ? LETTERS[1].x : 0;
+  const letters = skipFirst ? LETTERS.slice(1) : LETTERS;
   return (
-    <svg className={className} viewBox={`0 0 ${WIDTH} ${HEIGHT}`} role="img" aria-label="Uniform">
+    <svg className={className} viewBox={`${x} 0 ${WIDTH - x} ${HEIGHT}`} role="img" aria-label="Uniform">
       <clipPath id={clip}>
-        <rect width={WIDTH} height={HEIGHT} />
+        <rect x={x} width={WIDTH - x} height={HEIGHT} />
       </clipPath>
       <g
         clipPath={`url(#${clip})`}
@@ -44,7 +47,7 @@ export function Wordmark({ className }: { className?: string }) {
         strokeLinejoin="miter"
         strokeMiterlimit={10}
       >
-        {LETTERS.map((letter) => (
+        {letters.map((letter) => (
           <path key={letter.x} d={letter.d} transform={`translate(${letter.x} 0)`} />
         ))}
       </g>

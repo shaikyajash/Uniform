@@ -18,7 +18,8 @@ export function EmbedSize() {
     const main = document.querySelector("main");
     if (!main) return;
     const report = () => {
-      const content = Math.ceil(main.getBoundingClientRect().height);
+      // A few pixels spare: rounding must never leave the last line (or the first) clipped.
+      const content = Math.ceil(main.getBoundingClientRect().height) + 6;
       const height = isOpen ? Math.max(content, PRIVY_WINDOW_HEIGHT) : content;
       window.parent.postMessage({ type: "uniform:size", height }, "*");
     };
@@ -27,6 +28,17 @@ export function EmbedSize() {
     observer.observe(main);
     return () => observer.disconnect();
   }, [isOpen]);
+
+  // Escape pressed inside the card goes to this frame, not the merchant's page: pass it on, so
+  // the widget closes the card the same way wherever the focus is.
+  useEffect(() => {
+    if (window.parent === window) return;
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key === "Escape") window.parent.postMessage({ type: "uniform:close" }, "*");
+    };
+    document.addEventListener("keydown", onKey);
+    return () => document.removeEventListener("keydown", onKey);
+  }, []);
 
   return null;
 }
