@@ -1,5 +1,6 @@
-//! Bob's liquidity, as he manages it on the Earn page: every strategy he shipped to the PayoutPool
-//! for Uniform (his address, USDT, our filler, our fee). Aqua's events cannot be filtered by maker
+//! Providers' liquidity, as they manage it on the Earn page: every strategy anyone shipped to the
+//! PayoutPool for Uniform (USDT, our filler, a fee within the allowed range). Whoever ships one is a
+//! provider; their fee is their own. Aqua's events cannot be filtered by maker
 //! on a node, so the strategies are found through the Whitechain explorer, which returns Aqua's
 //! logs decoded. Nothing found there is trusted as is: a strategy's bytes must hash to the hash
 //! Aqua logged, and its balance and state are read from Aqua itself before every fill.
@@ -14,21 +15,22 @@ use alloy::{
     sol_types::SolValue,
 };
 use bindings::PayoutPool;
+use common::chains::FeeRange;
 use serde::Deserialize;
 
-/// How long a list of strategies is reused before the explorer is asked again: a strategy Bob
-/// ships on the Earn page is used within this long.
+/// How long a list of strategies is reused before the explorer is asked again: a strategy shipped
+/// on the Earn page is used within this long.
 const FRESH_FOR: Duration = Duration::from_secs(30);
-/// The explorer pages Aqua's logs; a testnet holds few, a little more than this is plenty.
-const MAX_PAGES: usize = 10;
+/// The explorer pages Aqua's logs (50 a page), newest first; every provider's strategies must be
+/// within this many pages to be filled from.
+const MAX_PAGES: usize = 50;
 
 /// What makes a strategy one the Matchmaker may fill from.
 #[derive(Debug, Clone, Copy)]
 pub struct Wanted {
-    pub maker: Address,
     pub token: Address,
     pub filler: Address,
-    pub fee_bps: u16,
+    pub fees: FeeRange,
 }
 
 pub struct Strategies {
@@ -74,7 +76,7 @@ impl Strategies {
         Ok(Strategies { http, logs_url, pool, wanted, cache: Mutex::new(None) })
     }
 
-    /// Every strategy Bob shipped for Uniform, oldest first. Docked or empty ones are included;
+    /// Every strategy shipped for Uniform, by any provider, oldest first. Docked or empty ones are included;
     /// the caller reads their state on chain.
     pub async fn shipped(&self) -> Result<Vec<PayoutPool::Strategy>, String> {
         if let Some((list, at)) = self.cache.lock().expect("strategy cache").as_ref()
@@ -123,14 +125,14 @@ impl Strategies {
         let app: Address = param("app")?.parse().ok()?;
         let hash: B256 = param("strategyHash")?.parse().ok()?;
         let bytes: Bytes = param("strategy")?.parse().ok()?;
-        if maker != self.wanted.maker || app != self.pool || keccak256(&bytes) != hash {
+        if app != self.pool || keccak256(&bytes) != hash {
             return None;
         }
         let strategy = PayoutPool::Strategy::abi_decode(&bytes).ok()?;
-        let ours = strategy.maker == self.wanted.maker
+        let ours = strategy.maker == maker
             && strategy.token == self.wanted.token
             && strategy.filler == self.wanted.filler
-            && strategy.feeBps == self.wanted.fee_bps;
+            && self.wanted.fees.allows(strategy.feeBps);
         ours.then_some(strategy)
     }
 }
