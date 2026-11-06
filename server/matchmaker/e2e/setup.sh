@@ -34,12 +34,20 @@ rm -f .state/events.log .state/matchmaker.db .state/anvil-*.log; echo '{}' > .st
 sleep 1
 
 nohup anvil --port 8601 --fork-url https://sepolia.base.org --block-time 1 >.state/anvil-base.log 2>&1 &
-nohup anvil --port 8602 --fork-url https://rpc.testnet.whitechain.io --block-time 1 >.state/anvil-wc.log 2>&1 &
-nohup anvil --port 8604 --fork-url https://ethereum-sepolia-rpc.publicnode.com --block-time 2 >.state/anvil-eth.log 2>&1 &
+nohup anvil --port 8602 --fork-url https://rpc.ankr.com/whitechain_testnet --block-time 1 >.state/anvil-wc.log 2>&1 &
+# A few blocks behind the head: publicnode's servers do not all have the newest block yet.
+ETH_RPC=https://ethereum-sepolia-rpc.publicnode.com
+ETH_HEAD=$(cast block-number --rpc-url $ETH_RPC) || { echo "cannot reach $ETH_RPC"; exit 1; }
+ETH_BLOCK=$(( ETH_HEAD - 5 ))
+nohup anvil --port 8604 --fork-url $ETH_RPC --fork-block-number $ETH_BLOCK --block-time 2 >.state/anvil-eth.log 2>&1 &
 nohup python3 mock_order_desk.py 8603 >.state/mock.log 2>&1 &
 for url in $BASE $WC $ETH; do
   for _ in $(seq 1 60); do cast chain-id --rpc-url $url >/dev/null 2>&1 && break; sleep 1; done
 done
+# The Ethereum fork starts at an older block's time; bring its clock to now, or customer notes
+# (valid from now - 60 s) are "not yet valid" there.
+cast rpc evm_setNextBlockTimestamp "$(date +%s)" --rpc-url $ETH >/dev/null 2>&1 || true   # already at or past now
+cast rpc evm_mine --rpc-url $ETH >/dev/null
 echo "forks up: base=$(cast chain-id --rpc-url $BASE) whitechain=$(cast chain-id --rpc-url $WC) ethereum=$(cast chain-id --rpc-url $ETH)"
 
 # Whitechain: give Bob 5 USDT, then Bob approves Aqua and ships a 2 USDT strategy with the filler.

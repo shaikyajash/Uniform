@@ -15,6 +15,6 @@ remappings = [
 ]
 
 [rpc_endpoints]
-whitechain = "https://rpc.testnet.whitechain.io"
+whitechain = "https://rpc.ankr.com/whitechain_testnet"
 base_sepolia = "https://sepolia.base.org"
 sepolia = "https://ethereum-sepolia-rpc.publicnode.com"

@@ -27,10 +27,10 @@ use tokio::sync::Mutex;
 use crate::{
     config::Config,
     events::{self, Action, Source},
-    order_desk::{OrderDesk, OrderLookup, ReportError},
+    order_desk::{Order, OrderDesk, OrderLeg, OrderLookup, ReportError},
     price::EurcPrice,
     rules::{self, LockedToken, SourceLockView},
-    store::{Fill, PendingLog, Store},
+    store::{Fill, FillLeg, PendingLog, SourceLeg, Store},
 };
 
 /// How far back the first run starts, so locks made before start-up are still seen (on Base
@@ -136,6 +136,39 @@ pub fn destination_lock_id(
         )
             .abi_encode(),
     )
+}
+
+/// The source locks that pay for an order, first one first (its destination lock names it), if
+/// `seen` is one of them. An order that lists no signed locks yet is paid by none: anyone can lock
+/// with an order's id, and a stranger's lock must not take the order's one fill.
+fn legs_for(order: &Order, seen: OrderLeg) -> Option<Vec<OrderLeg>> {
+    let same = |l: &OrderLeg| l.chain_id == seen.chain_id && l.lock_id == seen.lock_id;
+    if !order.legs.iter().any(same) {
+        return None;
+    }
+    let mut legs = order.legs.clone();
+    legs.sort();
+    legs.dedup_by_key(|l| (l.chain_id, l.lock_id));
+    Some(legs)
+}
+
+fn source_legs(legs: &[OrderLeg]) -> Vec<SourceLeg> {
+    legs.iter()
+        .map(|l| SourceLeg {
+            chain_id: l.chain_id,
+            lock_id: l.lock_id,
+            expiry: l.expiry,
+        })
+        .collect()
+}
+
+/// One source lock of an order as read from its chain, ready for the fill rules.
+struct LegRead {
+    leg: OrderLeg,
+    kind: LockedToken,
+    token: Address,
+    view: SourceLockView,
+    src_now: u64,
 }
 
 /// What happened to a transaction the Matchmaker tried to send.
@@ -718,38 +751,20 @@ impl Worker {
         }
     }
 
-    /// A customer locked on a source chain for Bob. If Bob already filled it (an earlier run
-    /// stopped before recording), record it from the chain. Otherwise, if it passes every rule,
-    /// open the destination lock for the shop with Bob's USDT.
+    /// A customer locked on a source chain for Bob. The order's legs say which source locks pay
+    /// for it: one, or one per chain for a split payment. Once every one of them has been seen,
+    /// and together they pass every rule, open one destination lock for the shop with Bob's USDT,
+    /// naming the first of them. If Bob already filled it (an earlier run stopped before
+    /// recording), record it from the chain.
     async fn on_locked(&self, chain_id: u64, locked: SourceLock::Locked) -> Result<()> {
         let bob = self.config.provider.address;
-        if locked.receiver != bob {
+        if locked.receiver != bob || !self.source_locks.contains_key(&chain_id) {
             return Ok(());
         }
-        let Some(&lock_address) = self.source_locks.get(&chain_id) else {
-            return Ok(());
-        };
-        let shop = self.provider(self.shop_chain_id)?;
-        let destination = DestinationLock::new(self.destination_lock, shop);
-        let destination_lock_id = destination_lock_id(
-            self.shop_chain_id,
-            self.destination_lock,
-            chain_id,
-            locked.lockId,
-            bob,
-        );
-        let existing = destination
-            .locks(destination_lock_id)
-            .call()
+        self.store
+            .mark_seen(chain_id, locked.lockId)
             .await
             .map_err(err)?;
-        if existing.state != NONE {
-            return self
-                .record_existing_fill(chain_id, &locked, destination_lock_id, existing)
-                .await;
-        }
-
-        // Cheapest check first: a lock for an order the Order Desk doesn't know costs one request.
         let order = match self.desk.order(locked.orderId).await? {
             OrderLookup::Found(order) => order,
             OrderLookup::NotFound => {
@@ -760,6 +775,48 @@ impl Worker {
                 return Ok(());
             }
         };
+        let this = OrderLeg {
+            chain_id,
+            lock_id: locked.lockId,
+            expiry: locked.expiry,
+        };
+        let Some(legs) = legs_for(&order, this) else {
+            eprintln!(
+                "matchmaker: skip lock {}: not one of the locks signed for order {}",
+                locked.lockId, locked.orderId
+            );
+            return Ok(());
+        };
+        if let Some(leg) = legs
+            .iter()
+            .find(|l| !self.source_locks.contains_key(&l.chain_id))
+        {
+            eprintln!(
+                "matchmaker: skip order {}: it has a lock on chain {}, which Bob does not watch",
+                locked.orderId, leg.chain_id
+            );
+            return Ok(());
+        }
+        let anchor = legs[0];
+        let shop = self.provider(self.shop_chain_id)?;
+        let destination = DestinationLock::new(self.destination_lock, shop);
+        let destination_lock_id = destination_lock_id(
+            self.shop_chain_id,
+            self.destination_lock,
+            anchor.chain_id,
+            anchor.lock_id,
+            bob,
+        );
+        let existing = destination
+            .locks(destination_lock_id)
+            .call()
+            .await
+            .map_err(err)?;
+        if existing.state != NONE {
+            return self
+                .record_existing_fill(&locked, &legs, destination_lock_id, existing)
+                .await;
+        }
         if self.store.has_fill(locked.orderId).await.map_err(err)? {
             eprintln!(
                 "matchmaker: skip lock {}: order {} was already filled",
@@ -767,109 +824,151 @@ impl Worker {
             );
             return Ok(());
         }
-        let on_chain = SourceLock::new(lock_address, self.provider(chain_id)?)
-            .locks(locked.lockId)
+        for leg in legs.iter().filter(|l| **l != this) {
+            if !self
+                .store
+                .seen(leg.chain_id, leg.lock_id)
+                .await
+                .map_err(err)?
+            {
+                eprintln!(
+                    "matchmaker: lock {} for order {} seen; waiting for its lock on chain {}",
+                    locked.lockId, locked.orderId, leg.chain_id
+                );
+                return Ok(());
+            }
+        }
+
+        let mut reads = Vec::with_capacity(legs.len());
+        for leg in &legs {
+            let on_chain = SourceLock::new(
+                self.source_locks[&leg.chain_id],
+                self.provider(leg.chain_id)?,
+            )
+            .locks(leg.lock_id)
             .call()
             .await
             .map_err(err)?;
-        if on_chain.state == NONE {
-            return Err(format!(
-                "source lock {} reads as empty; the node may be behind",
-                locked.lockId
-            ));
+            if on_chain.state == NONE {
+                return Err(format!(
+                    "source lock {} reads as empty; the node may be behind",
+                    leg.lock_id
+                ));
+            }
+            let Some(kind) = self.tokens[&leg.chain_id].kind(on_chain.token) else {
+                eprintln!(
+                    "matchmaker: skip lock {}: token {} is not one Bob accepts here",
+                    leg.lock_id, on_chain.token
+                );
+                return Ok(());
+            };
+            reads.push(LegRead {
+                leg: *leg,
+                kind,
+                token: on_chain.token,
+                view: SourceLockView {
+                    open: on_chain.state == OPEN,
+                    receiver: on_chain.receiver,
+                    usdc_value: U256::from(on_chain.amount),
+                    hashlock: on_chain.hashlock,
+                    expiry: on_chain.expiry,
+                },
+                src_now: self.chain_time(leg.chain_id).await?,
+            });
         }
-        let Some(token) = self.tokens[&chain_id].kind(on_chain.token) else {
-            eprintln!(
-                "matchmaker: skip lock {}: token {} is not one Bob accepts here",
-                locked.lockId, on_chain.token
-            );
-            return Ok(());
-        };
-        let mut view = SourceLockView {
-            open: on_chain.state == OPEN,
-            receiver: on_chain.receiver,
-            usdc_value: U256::from(on_chain.amount),
-            hashlock: on_chain.hashlock,
-            expiry: on_chain.expiry,
-        };
-        let src_now = self.chain_time(chain_id).await?;
         let dest_now = self.chain_time(self.shop_chain_id).await?;
-        let decide = |view: &SourceLockView| {
+        let decide = |views: Vec<(SourceLockView, u64)>| {
+            let combined = rules::combine(&views)?;
+            // `combine` measures time left on each lock's own chain, so its expiry is relative.
             rules::fill_decision(
-                view,
-                &order,
+                &combined,
+                &order.view,
                 &self.config.provider,
                 false,
-                src_now,
+                0,
                 dest_now,
                 self.config.timing,
             )
+            .map(|plan| (plan, combined))
         };
-        if token == LockedToken::Eurc {
-            // Every other rule first, so a lock that would be skipped anyway never waits on the
+        if reads.iter().any(|r| r.kind == LockedToken::Eurc) {
+            // Every other rule first, so locks that would be skipped anyway never wait on the
             // price. A price outage is retried like any other: the log stays parked until it
-            // clears or the lock no longer passes these rules.
-            if let Err(skip) = decide(&SourceLockView {
-                usdc_value: U256::MAX,
-                ..view
-            }) {
-                eprintln!("matchmaker: skip lock {}: {skip:?}", locked.lockId);
+            // clears or the locks no longer pass these rules.
+            let unpriced = reads
+                .iter()
+                .map(|r| {
+                    let mut view = r.view;
+                    if r.kind == LockedToken::Eurc {
+                        view.usdc_value = U256::MAX;
+                    }
+                    (view, r.src_now)
+                })
+                .collect();
+            if let Err(skip) = decide(unpriced) {
+                eprintln!("matchmaker: skip order {}: {skip:?}", locked.orderId);
                 return Ok(());
             }
             let price = self.eurc_price.micro_usd().await?;
-            view.usdc_value = rules::usdc_value(
-                token,
-                view.usdc_value,
-                price,
-                self.config.eurc_price_buffer_bps,
-            )
-            .ok_or(format!("{PERMANENT}cannot value lock {}", locked.lockId))?;
+            for r in reads.iter_mut().filter(|r| r.kind == LockedToken::Eurc) {
+                r.view.usdc_value = rules::usdc_value(
+                    r.kind,
+                    r.view.usdc_value,
+                    price,
+                    self.config.eurc_price_buffer_bps,
+                )
+                .ok_or(format!("{PERMANENT}cannot value lock {}", r.leg.lock_id))?;
+            }
         }
-        let plan = match decide(&view) {
-            Ok(plan) => plan,
+        let (plan, combined) = match decide(reads.iter().map(|r| (r.view, r.src_now)).collect()) {
+            Ok(decided) => decided,
             Err(skip) => {
-                eprintln!("matchmaker: skip lock {}: {skip:?}", locked.lockId);
+                eprintln!("matchmaker: skip order {}: {skip:?}", locked.orderId);
                 return Ok(());
             }
         };
-        // Circle can block an address for USDC or EURC; Bob is paid in the token that was locked.
-        if IFiatToken::new(on_chain.token, self.provider(chain_id)?)
-            .isBlacklisted(bob)
-            .call()
-            .await
-            .map_err(err)?
-        {
-            eprintln!(
-                "matchmaker: skip lock {}: Circle has blacklisted Bob, he could not redeem",
-                locked.lockId
-            );
-            return Ok(());
-        }
-        let gas = self
-            .provider(chain_id)?
-            .get_balance(self.filler)
-            .await
-            .map_err(err)?;
-        let min_gas = self
-            .config
-            .min_filler_gas_wei
-            .get(&chain_id)
-            .copied()
-            .unwrap_or(u128::MAX);
-        if gas < U256::from(min_gas) {
-            return Err(format!(
-                "filler has too little gas on chain {chain_id} to redeem later ({gas} wei); top it up"
-            ));
+        for r in &reads {
+            // Circle can block an address for USDC or EURC; Bob is paid in the token that was
+            // locked.
+            if IFiatToken::new(r.token, self.provider(r.leg.chain_id)?)
+                .isBlacklisted(bob)
+                .call()
+                .await
+                .map_err(err)?
+            {
+                eprintln!(
+                    "matchmaker: skip lock {}: Circle has blacklisted Bob, he could not redeem",
+                    r.leg.lock_id
+                );
+                return Ok(());
+            }
+            let gas = self
+                .provider(r.leg.chain_id)?
+                .get_balance(self.filler)
+                .await
+                .map_err(err)?;
+            let min_gas = self
+                .config
+                .min_filler_gas_wei
+                .get(&r.leg.chain_id)
+                .copied()
+                .unwrap_or(u128::MAX);
+            if gas < U256::from(min_gas) {
+                return Err(format!(
+                    "filler has too little gas on chain {} to redeem later ({gas} wei); top it up",
+                    r.leg.chain_id
+                ));
+            }
         }
 
         let fill = PayoutPool::Fill {
             orderId: locked.orderId,
             merchant: plan.merchant,
             amount: plan.amount,
-            hashlock: view.hashlock,
+            hashlock: combined.hashlock,
             expiry: plan.destination_expiry,
-            srcChainId: U256::from(chain_id),
-            srcLockId: locked.lockId,
+            srcChainId: U256::from(anchor.chain_id),
+            srcLockId: anchor.lock_id,
         };
         let tx = PayoutPool::new(self.payout_pool, shop)
             .fill(self.strategy()?, fill)
@@ -877,25 +976,40 @@ impl Worker {
         match self.send(self.shop_chain_id, tx).await? {
             Sent::WouldRevert(reason) => {
                 eprintln!(
-                    "matchmaker: skip lock {}: fill would revert: {reason}",
-                    locked.lockId
+                    "matchmaker: skip order {}: fill would revert: {reason}",
+                    locked.orderId
                 );
                 Ok(())
             }
             Sent::Mined(hash) => {
-                eprintln!("matchmaker: filled order {} in {hash}", locked.orderId);
-                self.store
-                    .record_fill_if_missing(&Fill {
-                        order_id: locked.orderId,
-                        src_chain_id: chain_id,
-                        src_lock_id: locked.lockId,
-                        src_expiry: view.expiry,
-                        destination_lock_id,
-                        destination_expiry: plan.destination_expiry,
-                        amount: plan.amount,
-                        status: "filled".into(),
-                        secret: None,
+                eprintln!(
+                    "matchmaker: filled order {} ({} source lock(s)) in {hash}",
+                    locked.orderId,
+                    reads.len()
+                );
+                let sources: Vec<SourceLeg> = reads
+                    .iter()
+                    .map(|r| SourceLeg {
+                        chain_id: r.leg.chain_id,
+                        lock_id: r.leg.lock_id,
+                        expiry: r.view.expiry,
                     })
+                    .collect();
+                self.store
+                    .record_fill_if_missing(
+                        &Fill {
+                            order_id: locked.orderId,
+                            src_chain_id: anchor.chain_id,
+                            src_lock_id: anchor.lock_id,
+                            src_expiry: reads[0].view.expiry,
+                            destination_lock_id,
+                            destination_expiry: plan.destination_expiry,
+                            amount: plan.amount,
+                            status: "filled".into(),
+                            secret: None,
+                        },
+                        &sources,
+                    )
                     .await
                     .map_err(err)?;
                 Ok(())
@@ -903,11 +1017,12 @@ impl Worker {
         }
     }
 
-    /// Records a destination lock Bob opened in an earlier run that stopped before recording it.
+    /// Records a destination lock Bob opened in an earlier run that stopped before recording it,
+    /// with every source lock it pays for.
     async fn record_existing_fill(
         &self,
-        chain_id: u64,
         locked: &SourceLock::Locked,
+        legs: &[OrderLeg],
         destination_lock_id: B256,
         existing: DestinationLock::locksReturn,
     ) -> Result<()> {
@@ -927,19 +1042,23 @@ impl Worker {
             (OPEN | CLAIMED, _) => "filled",
             _ => "refunded",
         };
+        let anchor = legs[0];
         let new = self
             .store
-            .record_fill_if_missing(&Fill {
-                order_id: locked.orderId,
-                src_chain_id: chain_id,
-                src_lock_id: locked.lockId,
-                src_expiry: locked.expiry,
-                destination_lock_id,
-                destination_expiry: existing.expiry,
-                amount: U256::from(existing.amount),
-                status: status.into(),
-                secret,
-            })
+            .record_fill_if_missing(
+                &Fill {
+                    order_id: locked.orderId,
+                    src_chain_id: anchor.chain_id,
+                    src_lock_id: anchor.lock_id,
+                    src_expiry: anchor.expiry,
+                    destination_lock_id,
+                    destination_expiry: existing.expiry,
+                    amount: U256::from(existing.amount),
+                    status: status.into(),
+                    secret,
+                },
+                &source_legs(legs),
+            )
             .await
             .map_err(err)?;
         if new {
@@ -1032,19 +1151,39 @@ impl Worker {
                 .call()
                 .await
                 .map_err(err)?;
+        let anchor = OrderLeg {
+            chain_id: src_chain_id,
+            lock_id: settled.srcLockId,
+            expiry: source.expiry,
+        };
+        // A split payment's other source locks are listed only by the Order Desk.
+        let legs = match self.desk.order(settled.orderId).await? {
+            OrderLookup::Found(order) => legs_for(&order, anchor),
+            OrderLookup::NotFound => None,
+        }
+        .unwrap_or_else(|| {
+            eprintln!(
+                "matchmaker: CHECK order {}: the Order Desk no longer lists source lock {}; recording only that one, so any other lock of this payment must be redeemed by hand",
+                settled.orderId, settled.srcLockId
+            );
+            vec![anchor]
+        });
         let new = self
             .store
-            .record_fill_if_missing(&Fill {
-                order_id: settled.orderId,
-                src_chain_id,
-                src_lock_id: settled.srcLockId,
-                src_expiry: source.expiry,
-                destination_lock_id: settled.lockId,
-                destination_expiry: existing.expiry,
-                amount: settled.amount,
-                status: "settled".into(),
-                secret: Some(settled.secret),
-            })
+            .record_fill_if_missing(
+                &Fill {
+                    order_id: settled.orderId,
+                    src_chain_id,
+                    src_lock_id: settled.srcLockId,
+                    src_expiry: source.expiry,
+                    destination_lock_id: settled.lockId,
+                    destination_expiry: existing.expiry,
+                    amount: settled.amount,
+                    status: "settled".into(),
+                    secret: Some(settled.secret),
+                },
+                &source_legs(&legs),
+            )
             .await
             .map_err(err)?;
         if new {
@@ -1109,46 +1248,83 @@ impl Worker {
         }
     }
 
+    /// Redeems every open source lock of a settled fill with its secret. Once none is open, the
+    /// fill is claimed, or missed if any lock could not be redeemed.
     async fn redeem(&self, fill: &Fill) -> Result<()> {
         let Some(secret) = fill.secret else {
             return Ok(());
         };
-        let Some(&lock_address) = self.source_locks.get(&fill.src_chain_id) else {
+        let legs = self
+            .store
+            .legs(fill.destination_lock_id)
+            .await
+            .map_err(err)?;
+        let mut first_error = None;
+        for leg in legs.iter().filter(|l| l.status == "open") {
+            if let Err(e) = self.redeem_leg(leg, secret).await {
+                eprintln!(
+                    "matchmaker: source redeem for lock {}: {e}",
+                    leg.src_lock_id
+                );
+                first_error.get_or_insert(e);
+            }
+        }
+        if let Some(e) = first_error {
+            return Err(e);
+        }
+        let legs = self
+            .store
+            .legs(fill.destination_lock_id)
+            .await
+            .map_err(err)?;
+        if legs.is_empty() || legs.iter().any(|l| l.status == "open") {
             return Ok(());
+        }
+        let status = if legs.iter().all(|l| l.status == "claimed") {
+            "claimed"
+        } else {
+            "missed"
         };
-        let lock = SourceLock::new(lock_address, self.provider(fill.src_chain_id)?);
-        let on_chain = lock.locks(fill.src_lock_id).call().await.map_err(err)?;
+        self.store
+            .set_fill_status(fill.destination_lock_id, status)
+            .await
+            .map_err(err)
+    }
+
+    async fn redeem_leg(&self, leg: &FillLeg, secret: B256) -> Result<()> {
+        let Some(&lock_address) = self.source_locks.get(&leg.src_chain_id) else {
+            // Not a chain this Matchmaker watches (its config changed): it cannot redeem here.
+            return self.mark_missed(leg).await;
+        };
+        let lock = SourceLock::new(lock_address, self.provider(leg.src_chain_id)?);
+        let on_chain = lock.locks(leg.src_lock_id).call().await.map_err(err)?;
         match on_chain.state {
             CLAIMED => {
-                return self
-                    .store
-                    .set_fill_status(fill.destination_lock_id, "claimed")
-                    .await
-                    .map_err(err);
+                return self.store.set_leg_status(leg, "claimed").await.map_err(err);
             }
-            REFUNDED => return self.mark_missed(fill).await,
+            REFUNDED => return self.mark_missed(leg).await,
             OPEN => {}
             _ => {
                 return Err(format!(
                     "source lock {} reads as empty; the node may be behind",
-                    fill.src_lock_id
+                    leg.src_lock_id
                 ));
             }
         }
-        let now = self.chain_time(fill.src_chain_id).await?;
+        let now = self.chain_time(leg.src_chain_id).await?;
         if now >= on_chain.expiry {
             // Confirm with a second read before giving up the redeem.
-            let again = lock.locks(fill.src_lock_id).call().await.map_err(err)?;
-            let now = self.chain_time(fill.src_chain_id).await?;
+            let again = lock.locks(leg.src_lock_id).call().await.map_err(err)?;
+            let now = self.chain_time(leg.src_chain_id).await?;
             if again.state == OPEN && now >= again.expiry {
-                return self.mark_missed(fill).await;
+                return self.mark_missed(leg).await;
             }
             return Ok(());
         }
         match self
             .send(
-                fill.src_chain_id,
-                lock.claim(fill.src_lock_id, secret)
+                leg.src_chain_id,
+                lock.claim(leg.src_lock_id, secret)
                     .into_transaction_request(),
             )
             .await?
@@ -1156,26 +1332,20 @@ impl Worker {
             Sent::Mined(hash) => {
                 eprintln!(
                     "matchmaker: redeemed source lock {} in {hash}",
-                    fill.src_lock_id
+                    leg.src_lock_id
                 );
-                self.store
-                    .set_fill_status(fill.destination_lock_id, "claimed")
-                    .await
-                    .map_err(err)
+                self.store.set_leg_status(leg, "claimed").await.map_err(err)
             }
             Sent::WouldRevert(reason) => Err(format!("claim would revert: {reason}")),
         }
     }
 
-    async fn mark_missed(&self, fill: &Fill) -> Result<()> {
+    async fn mark_missed(&self, leg: &FillLeg) -> Result<()> {
         eprintln!(
             "matchmaker: MISSED source lock {} for order {}: the shop was paid but the lock expired or was refunded",
-            fill.src_lock_id, fill.order_id
+            leg.src_lock_id, leg.order_id
         );
-        self.store
-            .set_fill_status(fill.destination_lock_id, "missed")
-            .await
-            .map_err(err)
+        self.store.set_leg_status(leg, "missed").await.map_err(err)
     }
 
     /// Bob's destination locks that timed out unclaimed: send the USDT back into his strategy.
@@ -1249,7 +1419,7 @@ impl Worker {
         }
     }
 
-    /// Source locks of Bob's fills that timed out unredeemed: send the USDC back to the customer.
+    /// Source locks of Bob's fills that timed out unredeemed: send the tokens back to the customer.
     /// Only locks Bob filled are handled, so nobody can make Bob pay gas for locks he never used.
     async fn refund_expired_sources(&self) {
         for (&chain_id, &lock_address) in &self.source_locks {
@@ -1271,11 +1441,11 @@ impl Worker {
                     continue;
                 }
             };
-            for fill in due {
-                if let Err(e) = self.refund_source(chain_id, lock_address, &fill, now).await {
+            for leg in due {
+                if let Err(e) = self.refund_source(chain_id, lock_address, &leg, now).await {
                     eprintln!(
                         "matchmaker: source refund for lock {}: {e}",
-                        fill.src_lock_id
+                        leg.src_lock_id
                     );
                 }
             }
@@ -1286,44 +1456,37 @@ impl Worker {
         &self,
         chain_id: u64,
         lock_address: Address,
-        fill: &Fill,
+        leg: &FillLeg,
         now: u64,
     ) -> Result<()> {
         let lock = SourceLock::new(lock_address, self.provider(chain_id)?);
-        let on_chain = lock.locks(fill.src_lock_id).call().await.map_err(err)?;
+        let on_chain = lock.locks(leg.src_lock_id).call().await.map_err(err)?;
         match on_chain.state {
             OPEN if on_chain.expiry <= now => {}
             OPEN => return Ok(()),
             CLAIMED | REFUNDED => {
-                return self
-                    .store
-                    .source_done(fill.destination_lock_id)
-                    .await
-                    .map_err(err);
+                return self.store.source_done(leg).await.map_err(err);
             }
             _ => {
                 return Err(format!(
                     "source lock {} reads as empty; the node may be behind",
-                    fill.src_lock_id
+                    leg.src_lock_id
                 ));
             }
         }
         match self
             .send(
                 chain_id,
-                lock.refund(fill.src_lock_id).into_transaction_request(),
+                lock.refund(leg.src_lock_id).into_transaction_request(),
             )
             .await?
         {
             Sent::Mined(hash) => {
                 eprintln!(
                     "matchmaker: refunded source lock {} in {hash}",
-                    fill.src_lock_id
+                    leg.src_lock_id
                 );
-                self.store
-                    .source_done(fill.destination_lock_id)
-                    .await
-                    .map_err(err)
+                self.store.source_done(leg).await.map_err(err)
             }
             Sent::WouldRevert(reason) => Err(format!("refund would revert: {reason}")),
         }
@@ -1377,6 +1540,46 @@ mod tests {
         assert_eq!(both.kind(Address::ZERO), None);
         let usdc_only = LockTokens { usdc, eurc: None };
         assert_eq!(usdc_only.kind(eurc), None);
+    }
+
+    fn order_with(legs: Vec<OrderLeg>) -> Order {
+        Order {
+            view: crate::rules::OrderView {
+                merchant: Address::repeat_byte(5),
+                amount: U256::from(10_000_000u64),
+                status: common::status::OrderStatus::Paying,
+            },
+            legs,
+        }
+    }
+
+    fn leg(chain_id: u64, byte: u8) -> OrderLeg {
+        OrderLeg {
+            chain_id,
+            lock_id: B256::repeat_byte(byte),
+            expiry: 2000,
+        }
+    }
+
+    #[test]
+    fn a_split_order_is_paid_by_all_its_listed_locks_in_a_fixed_order() {
+        let order = order_with(vec![leg(84532, 9), leg(11155111, 1)]);
+        let from_either = |seen| legs_for(&order, seen).unwrap();
+        assert_eq!(from_either(leg(11155111, 1)), from_either(leg(84532, 9)));
+        assert_eq!(from_either(leg(11155111, 1))[0], leg(84532, 9));
+        assert_eq!(from_either(leg(11155111, 1)).len(), 2);
+    }
+
+    #[test]
+    fn a_lock_the_order_does_not_list_pays_for_nothing() {
+        let order = order_with(vec![leg(84532, 9), leg(11155111, 1)]);
+        assert_eq!(legs_for(&order, leg(84532, 2)), None);
+        assert_eq!(legs_for(&order, leg(11155111, 9)), None);
+    }
+
+    #[test]
+    fn an_order_without_listed_locks_is_paid_by_no_lock() {
+        assert_eq!(legs_for(&order_with(vec![]), leg(84532, 2)), None);
     }
 
     #[test]

@@ -2,7 +2,7 @@
   "whitechainSepolia": {
     "chainId": 1874,
     "role": "shop",
-    "rpc": "https://rpc.testnet.whitechain.io",
+    "rpc": "https://rpc.ankr.com/whitechain_testnet",
     "explorer": "https://explorer.testnet.whitechain.io",
     "tokens": {
       "USDT": {

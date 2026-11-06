@@ -73,7 +73,7 @@ pub fn router(state: AppState) -> Router {
 }
 
 /// Writes one job for the Relayer. A second unfinished job of the same kind for the order is a
-/// conflict (`relayer_jobs_one_live_per_order_and_kind`): a double click cannot send twice.
+/// conflict (`relayer_jobs_one_live_per_order_kind_and_chain`): a double click cannot send twice.
 pub async fn insert_job(
     tx: &mut PgConnection,
     order_id: &str,

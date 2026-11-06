@@ -26,7 +26,7 @@ pub struct Provider {
 }
 
 /// A source lock as stored on chain (`SourceLock.locks(lockId)`), with its token valued in USDC.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SourceLockView {
     pub open: bool,
     pub receiver: Address,
@@ -87,10 +87,21 @@ pub enum Skip {
     ZeroHashlock,
     OrderNotPayable(OrderStatus),
     ZeroOrderAmount,
-    NotEnoughLocked { locked: U256, needed: U256 },
-    AboveMaxPerOrder { amount: U256, max: U256 },
-    TooLittleTime { left: u64, needed: u64 },
+    NotEnoughLocked {
+        locked: U256,
+        needed: U256,
+    },
+    AboveMaxPerOrder {
+        amount: U256,
+        max: U256,
+    },
+    TooLittleTime {
+        left: u64,
+        needed: u64,
+    },
     AlreadyFilled,
+    /// A split order's locks are not all under one hashlock, so one secret cannot redeem them all.
+    HashlockMismatch,
 }
 
 /// The USDC the customer must lock for an order: the amount plus Bob's fee, rounded up.
@@ -109,6 +120,33 @@ pub fn destination_expiry(dest_now: u64, source_left: u64, timing: Timing) -> Op
     let latest = dest_now.checked_add(source_left.checked_sub(timing.min_gap)?)?;
     let expiry = wanted.min(latest);
     (expiry >= dest_now.checked_add(timing.min_destination_lock)?).then_some(expiry)
+}
+
+/// A split order's source locks as one lock for `fill_decision`: open only if every lock is open,
+/// for one receiver and under one hashlock; worth the sum of their values. Each lock comes with its
+/// own chain's time, so `expiry` is the shortest time left of any lock: pass `src_now = 0` with
+/// the result.
+pub fn combine(locks: &[(SourceLockView, u64)]) -> Result<SourceLockView, Skip> {
+    let (first, _) = locks.first().ok_or(Skip::NotOpen)?;
+    let mut combined = SourceLockView {
+        usdc_value: U256::ZERO,
+        expiry: u64::MAX,
+        ..*first
+    };
+    for (lock, src_now) in locks {
+        if !lock.open {
+            return Err(Skip::NotOpen);
+        }
+        if lock.receiver != first.receiver {
+            return Err(Skip::NotForProvider(lock.receiver));
+        }
+        if lock.hashlock != first.hashlock {
+            return Err(Skip::HashlockMismatch);
+        }
+        combined.usdc_value = combined.usdc_value.saturating_add(lock.usdc_value);
+        combined.expiry = combined.expiry.min(lock.expiry.saturating_sub(*src_now));
+    }
+    Ok(combined)
 }
 
 /// Whether to fill this source lock, and how. `src_now` is the source chain's time and
@@ -460,6 +498,61 @@ mod tests {
             Err(Skip::AboveMaxPerOrder {
                 amount: U256::MAX,
                 max: U256::from(20_000_000u64)
+            })
+        );
+    }
+
+    #[test]
+    fn split_locks_add_up_and_take_the_shortest_time_left() {
+        // 6 USDC on one chain and 6.036 on another, whose clock is 100 s ahead.
+        let mut a = lock();
+        a.usdc_value = U256::from(6_000_000u64);
+        let mut b = lock();
+        b.usdc_value = U256::from(6_036_000u64);
+        b.expiry = NOW + 100 + 1000;
+        let combined = combine(&[(a, NOW), (b, NOW + 100)]).unwrap();
+        assert_eq!(combined.usdc_value, U256::from(12_036_000u64));
+        assert_eq!(combined.expiry, 1000);
+        let plan =
+            fill_decision(&combined, &order(), &provider(), false, 0, NOW, timing()).unwrap();
+        assert_eq!(plan.amount, U256::from(12_000_000u64));
+        assert_eq!(plan.destination_expiry, NOW + 600);
+    }
+
+    #[test]
+    fn split_locks_must_each_be_open_for_bob_under_one_hashlock() {
+        let mut half = lock();
+        half.usdc_value = U256::from(6_018_000u64);
+        let mut closed = half;
+        closed.open = false;
+        assert_eq!(combine(&[(half, NOW), (closed, NOW)]), Err(Skip::NotOpen));
+        let mut stranger = half;
+        stranger.receiver = SHOP;
+        assert_eq!(
+            combine(&[(half, NOW), (stranger, NOW)]),
+            Err(Skip::NotForProvider(SHOP))
+        );
+        let mut other = half;
+        other.hashlock = B256::repeat_byte(0xcd);
+        assert_eq!(
+            combine(&[(half, NOW), (other, NOW)]),
+            Err(Skip::HashlockMismatch)
+        );
+        assert_eq!(combine(&[]), Err(Skip::NotOpen));
+    }
+
+    #[test]
+    fn split_locks_that_fall_short_together_are_not_filled() {
+        let mut a = lock();
+        a.usdc_value = U256::from(6_000_000u64);
+        let mut b = lock();
+        b.usdc_value = U256::from(6_000_000u64);
+        let combined = combine(&[(a, NOW), (b, NOW)]).unwrap();
+        assert_eq!(
+            fill_decision(&combined, &order(), &provider(), false, 0, NOW, timing()),
+            Err(Skip::NotEnoughLocked {
+                locked: U256::from(12_000_000u64),
+                needed: U256::from(12_036_000u64)
             })
         );
     }

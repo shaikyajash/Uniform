@@ -15,4 +15,12 @@ if [ "${CHAIN:-base}" = ethereum ]; then RPC=http://127.0.0.1:8604; LOCK=0x3aCDE
 else RPC=http://127.0.0.1:8601; LOCK=0x02dF2659B5B4956EAFEe3293584C2aaefC114871; USDC=0x036CbD53842c5426634e7929541eC2318f3dCF7e; fi
 HERE=$PWD; cd ../../../contracts
 SOURCE_LOCK=$LOCK CUSTOMER_PRIVATE_KEY=$(cat $HERE/.state/customer.key) GAS_PAYER_PRIVATE_KEY=0x7c852118294e51e653712a81e05800f419141751be58f605c371e15141b007a6 BOB_ADDRESS=0x70997970C51812dc3A010C7d01b50e0d17dc79C8 ORDER_ID=$ORDER SECRET=$SECRET TOKEN=${TOKEN:-$USDC} AMOUNT=${AMOUNT:-1003000} MIN_USDC_OUT=${MIN_USDC_OUT:-0} \
-  forge script script/LockForBob.s.sol --rpc-url $RPC --broadcast 2>&1 | grep -A1 "source lockId" | tail -1
+  forge script script/LockForBob.s.sol --rpc-url $RPC --broadcast 2>&1 | grep -A1 "source lockId" | tail -1 > $HERE/.state/last_lock
+cd $HERE; LOCK_ID=$(tr -d '[:space:]' < .state/last_lock); echo "$LOCK_ID"
+# The Order Desk lists the locks signed for an order; the Matchmaker fills only those.
+EXPIRY=$(cast call $LOCK "locks(bytes32)(address,uint64,uint8,address,uint96,bytes32,bytes32,address)" "$LOCK_ID" --rpc-url $RPC | sed -n 2p | awk '{print $1}')
+python3 - "$ORDER" "$(cast chain-id --rpc-url $RPC)" "$LOCK_ID" "$EXPIRY" <<'PY'
+import json,sys; p='.state/orders.json'; d=json.load(open(p))
+d[sys.argv[1]]["legs"]=[{"chainId":int(sys.argv[2]),"lockId":sys.argv[3],"expiry":int(sys.argv[4])}]
+json.dump(d,open(p,'w'))
+PY
