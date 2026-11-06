@@ -1,12 +1,69 @@
-// The Demo Store's products. Prices are in USDT and kept small: it runs on testnet money.
+// The demo store's products. Prices are in USDT and kept small: it runs on testnet money.
 // The server prices the cart from this list; the browser's numbers are never trusted.
 
-export type Product = { id: string; name: string; detail: string; price: string };
+export type Roast = "Light" | "Medium" | "Dark";
+
+export type Product = {
+  id: string;
+  name: string;
+  /** The name as it sits on the bag's label, one entry per line. */
+  label: string[];
+  region: string;
+  notes: string[];
+  roast: Roast;
+  price: string;
+  /** The bag's colour, and the lighter colour of the card behind it. */
+  color: string;
+  tint: string;
+};
+
+export const STORE = { name: "Monsoon", full: "Monsoon Coffee Roasters", referencePrefix: "MSN" };
 
 export const CATALOG: Product[] = [
-  { id: "kettle", name: "Gooseneck kettle", detail: "0.9 L, brushed steel", price: "1.20" },
-  { id: "cup", name: "Stoneware cup", detail: "Hand-thrown, 240 ml", price: "0.40" },
-  { id: "filters", name: "Paper filters", detail: "Pack of 100", price: "0.15" },
+  {
+    id: "araku",
+    name: "Araku Valley",
+    label: ["Araku", "Valley"],
+    region: "Andhra Pradesh",
+    notes: ["Jaggery", "Orange", "Black tea"],
+    roast: "Light",
+    price: "1.40",
+    color: "#d9822b",
+    tint: "#f1dcc0",
+  },
+  {
+    id: "chikmagalur",
+    name: "Chikmagalur",
+    label: ["Chikma-", "galur"],
+    region: "Karnataka",
+    notes: ["Milk chocolate", "Almond", "Fig"],
+    roast: "Medium",
+    price: "1.10",
+    color: "#a8432f",
+    tint: "#ecd2c6",
+  },
+  {
+    id: "coorg",
+    name: "Coorg Peaberry",
+    label: ["Coorg", "Peaberry"],
+    region: "Karnataka",
+    notes: ["Cherry", "Cacao nib", "Honey"],
+    roast: "Medium",
+    price: "1.30",
+    color: "#5d6b9a",
+    tint: "#d8dbe8",
+  },
+  {
+    id: "malabar",
+    name: "Monsooned Malabar",
+    label: ["Monsooned", "Malabar"],
+    region: "Malabar Coast",
+    notes: ["Cedar", "Cocoa", "Spice"],
+    roast: "Dark",
+    price: "1.20",
+    color: "#1f4b45",
+    tint: "#cfdcd6",
+  },
 ];
 
 export type Cart = Record<string, number>;
