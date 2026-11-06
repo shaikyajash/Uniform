@@ -14,6 +14,7 @@ BASE=http://127.0.0.1:8601
 WC=http://127.0.0.1:8602
 DEPLOYER=0x7801aE8881A59F231fA31D7a5b56cb20766fd2eB
 USDC=0x036CbD53842c5426634e7929541eC2318f3dCF7e
+EURC=0x808456652fdb597867f38412077A9182bf77359F
 USDT=0xcedfB56113143d55b2358b8CFbB0dEB5Ad2f55a7
 AQUA=0x02dF2659B5B4956EAFEe3293584C2aaefC114871
 POOL=0x3D79F7D2366D26c7325F58bEADbf7ECcB1d13E01
@@ -46,7 +47,9 @@ STRATEGY=$(cast abi-encode "f(address,address,address,uint128,uint16,bytes32)" $
 cast send $AQUA "ship(address,bytes,address[],uint256[])" $POOL $STRATEGY "[$USDT]" "[2000000]" --private-key $BOB_KEY --rpc-url $WC >/dev/null
 echo "bob strategy shipped; bob USDT=$(cast call $USDT 'balanceOf(address)(uint256)' $BOB --rpc-url $WC)"
 
-# Base: give the customer 3 USDC.
+# Base: give the customer 3 USDC and 3 EURC.
 cast rpc anvil_impersonateAccount $DEPLOYER --rpc-url $BASE >/dev/null
-cast send $USDC "transfer(address,uint256)" $CUSTOMER 3000000 --from $DEPLOYER --unlocked --rpc-url $BASE >/dev/null
-echo "customer USDC=$(cast call $USDC 'balanceOf(address)(uint256)' $CUSTOMER --rpc-url $BASE)"
+for token in $USDC $EURC; do
+  cast send $token "transfer(address,uint256)" $CUSTOMER 3000000 --from $DEPLOYER --unlocked --rpc-url $BASE >/dev/null
+done
+echo "customer USDC=$(cast call $USDC 'balanceOf(address)(uint256)' $CUSTOMER --rpc-url $BASE) EURC=$(cast call $EURC 'balanceOf(address)(uint256)' $CUSTOMER --rpc-url $BASE)"
