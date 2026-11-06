@@ -25,14 +25,43 @@ pub struct Provider {
     pub fee_bps: u16,
 }
 
-/// A source lock as stored on chain (`SourceLock.locks(lockId)`).
+/// A source lock as stored on chain (`SourceLock.locks(lockId)`), with its token valued in USDC.
 #[derive(Debug, Clone, Copy)]
 pub struct SourceLockView {
     pub open: bool,
     pub receiver: Address,
-    pub amount: U256,
+    /// What Bob credits the lock, in USDC's smallest units (see `usdc_value`).
+    pub usdc_value: U256,
     pub hashlock: B256,
     pub expiry: u64,
+}
+
+/// The token a source lock holds. Only these two can be locked (SourceLock's allowed tokens).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LockedToken {
+    Usdc,
+    Eurc,
+}
+
+/// What a lock is worth to Bob in USDC: USDC at face value; EURC at `eurc_micro_usd` (one EURC in
+/// micro-dollars) less `buffer_bps`, rounded down. The buffer covers the price moving before Bob
+/// converts the EURC. All three tokens have 6 decimals. `None` if the value cannot be computed.
+pub fn usdc_value(
+    token: LockedToken,
+    amount: U256,
+    eurc_micro_usd: u64,
+    buffer_bps: u16,
+) -> Option<U256> {
+    match token {
+        LockedToken::Usdc => Some(amount),
+        LockedToken::Eurc => {
+            let keep = 10_000u64.checked_sub(u64::from(buffer_bps))?;
+            let scaled = amount
+                .checked_mul(U256::from(eurc_micro_usd))?
+                .checked_mul(U256::from(keep))?;
+            Some(scaled / U256::from(10_000_000_000u64))
+        }
+    }
 }
 
 /// What the Order Desk says about the order.
@@ -124,9 +153,9 @@ pub fn fill_decision(
         amount: order.amount,
         max: provider.max_per_order,
     })?;
-    if lock.amount < needed {
+    if lock.usdc_value < needed {
         return Err(Skip::NotEnoughLocked {
-            locked: lock.amount,
+            locked: lock.usdc_value,
             needed,
         });
     }
@@ -179,7 +208,7 @@ mod tests {
         SourceLockView {
             open: true,
             receiver: BOB,
-            amount: U256::from(12_036_000u64),
+            usdc_value: U256::from(12_036_000u64),
             hashlock: B256::repeat_byte(0xab),
             expiry: NOW + 1200,
         }
@@ -195,6 +224,79 @@ mod tests {
 
     fn decide(lock: SourceLockView, order: OrderView) -> Result<FillPlan, Skip> {
         fill_decision(&lock, &order, &provider(), false, NOW, NOW, timing())
+    }
+
+    #[test]
+    fn usdc_is_valued_at_face_value() {
+        let amount = U256::from(12_036_000u64);
+        assert_eq!(
+            usdc_value(LockedToken::Usdc, amount, 1_120_000, 100),
+            Some(amount)
+        );
+    }
+
+    #[test]
+    fn eurc_is_valued_at_the_price_less_the_buffer_rounded_down() {
+        // 10 EURC at 1.12 USD, less 1%: 11.088 USDC.
+        assert_eq!(
+            usdc_value(LockedToken::Eurc, U256::from(10_000_000u64), 1_120_000, 100),
+            Some(U256::from(11_088_000u64))
+        );
+        assert_eq!(
+            usdc_value(LockedToken::Eurc, U256::from(1u64), 1_120_000, 100),
+            Some(U256::from(1u64))
+        );
+        assert_eq!(
+            usdc_value(LockedToken::Eurc, U256::from(10_000_000u64), 1_120_000, 0),
+            Some(U256::from(11_200_000u64))
+        );
+    }
+
+    #[test]
+    fn an_eurc_lock_must_cover_the_order_after_the_buffer() {
+        // 12 USDT + 0.3% = 12.036 USDC. At 1.12 less 1%, that needs 10.854 EURC (rounded up).
+        let needed = required_usdc(U256::from(12_000_000u64), 30).unwrap();
+        let enough = usdc_value(LockedToken::Eurc, U256::from(10_855_000u64), 1_120_000, 100);
+        let short = usdc_value(LockedToken::Eurc, U256::from(10_854_000u64), 1_120_000, 100);
+        assert!(enough.unwrap() >= needed);
+        assert!(short.unwrap() < needed);
+
+        let mut l = lock();
+        l.usdc_value = short.unwrap();
+        assert!(matches!(
+            decide(l, order()),
+            Err(Skip::NotEnoughLocked { .. })
+        ));
+        l.usdc_value = enough.unwrap();
+        assert!(decide(l, order()).is_ok());
+    }
+
+    #[test]
+    fn the_spec_quote_formula_always_covers_the_order() {
+        // docs/SPEC.md: EURC to ask = ceil(required × 10^10 / (price × (10000 − buffer))).
+        for (price, buffer) in [(1_120_000u64, 100u16), (1_083_457, 0), (999_999, 250)] {
+            for order in [1u64, 999_999, 12_000_000, 19_999_999] {
+                let needed = required_usdc(U256::from(order), 30).unwrap();
+                let divisor = U256::from(price * (10_000 - u64::from(buffer)));
+                let ask = (needed * U256::from(10_000_000_000u64)).div_ceil(divisor);
+                let value = usdc_value(LockedToken::Eurc, ask, price, buffer).unwrap();
+                assert!(value >= needed, "price {price} buffer {buffer} order {order}");
+                let less = usdc_value(LockedToken::Eurc, ask - U256::from(1u64), price, buffer);
+                assert!(less.unwrap() < needed, "ask is not the minimum");
+            }
+        }
+    }
+
+    #[test]
+    fn eurc_value_math_cannot_overflow_or_take_a_full_buffer() {
+        assert_eq!(
+            usdc_value(LockedToken::Eurc, U256::MAX, 1_120_000, 100),
+            None
+        );
+        assert_eq!(
+            usdc_value(LockedToken::Eurc, U256::from(1u64), 1_120_000, 10_001),
+            None
+        );
     }
 
     #[test]
@@ -268,7 +370,7 @@ mod tests {
         assert_eq!(decide(lock(), o), Err(Skip::ZeroOrderAmount));
 
         let mut l = lock();
-        l.amount = U256::from(12_035_999u64);
+        l.usdc_value = U256::from(12_035_999u64);
         assert_eq!(
             decide(l, order()),
             Err(Skip::NotEnoughLocked {
@@ -280,7 +382,7 @@ mod tests {
         let mut o = order();
         o.amount = U256::from(21_000_000u64);
         let mut l = lock();
-        l.amount = U256::from(30_000_000u64);
+        l.usdc_value = U256::from(30_000_000u64);
         assert_eq!(
             decide(l, o),
             Err(Skip::AboveMaxPerOrder {
@@ -352,7 +454,7 @@ mod tests {
         let mut o = order();
         o.amount = U256::MAX;
         let mut l = lock();
-        l.amount = U256::MAX;
+        l.usdc_value = U256::MAX;
         assert_eq!(
             decide(l, o),
             Err(Skip::AboveMaxPerOrder {

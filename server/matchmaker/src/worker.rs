@@ -10,7 +10,7 @@ use std::{
 
 use alloy::{
     network::{EthereumWallet, TransactionBuilder},
-    primitives::{keccak256, Address, B256, U256},
+    primitives::{Address, B256, U256, keccak256},
     providers::{DynProvider, Provider, ProviderBuilder},
     rpc::{
         client::RpcClient,
@@ -28,7 +28,8 @@ use crate::{
     config::Config,
     events::{self, Action, Source},
     order_desk::{OrderDesk, OrderLookup, ReportError},
-    rules::{self, SourceLockView},
+    price::EurcPrice,
+    rules::{self, LockedToken, SourceLockView},
     store::{Fill, PendingLog, Store},
 };
 
@@ -166,9 +167,30 @@ pub struct Worker {
     usdt: Address,
     payout_pool: Address,
     destination_lock: Address,
-    /// Our SourceLock and the chain's USDC on each customer chain.
+    /// Our SourceLock and the tokens it accepts on each customer chain.
     source_locks: HashMap<u64, Address>,
-    usdc: HashMap<u64, Address>,
+    tokens: HashMap<u64, LockTokens>,
+    eurc_price: EurcPrice,
+}
+
+/// The tokens a chain's SourceLock accepts, from chains.json.
+#[derive(Debug, Clone, Copy)]
+struct LockTokens {
+    usdc: Address,
+    /// `None` if chains.json lists no EURC for the chain; EURC locks there are then skipped.
+    eurc: Option<Address>,
+}
+
+impl LockTokens {
+    fn kind(&self, token: Address) -> Option<LockedToken> {
+        if token == self.usdc {
+            Some(LockedToken::Usdc)
+        } else if Some(token) == self.eurc {
+            Some(LockedToken::Eurc)
+        } else {
+            None
+        }
+    }
 }
 
 impl Worker {
@@ -251,7 +273,7 @@ impl Worker {
         ));
 
         let mut source_locks = HashMap::new();
-        let mut usdc = HashMap::new();
+        let mut tokens = HashMap::new();
         for chain in config.chains.customer_chains() {
             let Some(lock) = chain.contracts.source_lock else {
                 continue;
@@ -260,8 +282,30 @@ impl Worker {
                 .tokens
                 .get("USDC")
                 .ok_or(format!("chains.json: chain {} has no USDC", chain.chain_id))?;
+            let eurc = chain.tokens.get("EURC");
+            // Valuing a lock assumes USDC, EURC and USDT all have 6 decimals.
+            for t in std::iter::once(token).chain(eurc) {
+                if t.decimals != 6 {
+                    return Err(format!(
+                        "chains.json: token {} on chain {} does not have 6 decimals",
+                        t.address, chain.chain_id
+                    ));
+                }
+            }
+            if eurc.is_none() {
+                eprintln!(
+                    "matchmaker: chains.json lists no EURC for chain {}; EURC locks there are skipped",
+                    chain.chain_id
+                );
+            }
             source_locks.insert(chain.chain_id, lock);
-            usdc.insert(chain.chain_id, token.address);
+            tokens.insert(
+                chain.chain_id,
+                LockTokens {
+                    usdc: token.address,
+                    eurc: eurc.map(|t| t.address),
+                },
+            );
             chains.push(watched(
                 chain.chain_id,
                 connect(chain.chain_id, &chain.rpc)?,
@@ -271,6 +315,7 @@ impl Worker {
             ));
         }
 
+        let eurc_price = EurcPrice::new(config.eurc_price_url.clone())?;
         let worker = Worker {
             shop_chain_id: shop.chain_id,
             config,
@@ -282,7 +327,8 @@ impl Worker {
             payout_pool,
             destination_lock,
             source_locks,
-            usdc,
+            tokens,
+            eurc_price,
         };
         worker.check_setup(aqua).await?;
         Ok(worker)
@@ -339,6 +385,37 @@ impl Worker {
             "matchmaker: strategy {hash} active, allowance {}",
             shipped.balance
         );
+        for (&chain_id, &lock_address) in &self.source_locks {
+            let lock = SourceLock::new(lock_address, self.provider(chain_id)?);
+            let usdc = lock.usdc().call().await.map_err(err)?;
+            let alt = lock.altToken().call().await.map_err(err)?;
+            let tokens = self.tokens[&chain_id];
+            if usdc != tokens.usdc || tokens.eurc.is_some_and(|eurc| eurc != alt) {
+                return Err(format!(
+                    "SourceLock {lock_address} on chain {chain_id} accepts {usdc} and {alt}, not the USDC and EURC in chains.json"
+                ));
+            }
+            for token in std::iter::once(usdc).chain(tokens.eurc) {
+                self.require_six_decimals(chain_id, token).await?;
+            }
+        }
+        self.require_six_decimals(self.shop_chain_id, self.usdt)
+            .await?;
+        Ok(())
+    }
+
+    /// Valuing a lock assumes USDC, EURC and USDT all have 6 decimals; refuse a token that doesn't.
+    async fn require_six_decimals(&self, chain_id: u64, token: Address) -> Result<()> {
+        let decimals = IFiatToken::new(token, self.provider(chain_id)?)
+            .decimals()
+            .call()
+            .await
+            .map_err(err)?;
+        if decimals != 6 {
+            return Err(format!(
+                "token {token} on chain {chain_id} has {decimals} decimals, not 6"
+            ));
+        }
         Ok(())
     }
 
@@ -396,9 +473,9 @@ impl Worker {
                 .provider
                 .get_block_by_number(BlockNumberOrTag::Safe)
                 .await
-            {
-                return Ok(Some(block.header.number));
-            }
+        {
+            return Ok(Some(block.header.number));
+        }
         let head = watched.provider.get_block_number().await.map_err(err)?;
         Ok(head.checked_sub(watched.confirmations))
     }
@@ -482,7 +559,10 @@ impl Worker {
             .to_block(to);
         let mut logs = match watched.provider.get_logs(&filter).await {
             Ok(logs) => {
-                let grown = range.saturating_mul(2).min(watched.ceiling.load(Ordering::Relaxed)).max(1);
+                let grown = range
+                    .saturating_mul(2)
+                    .min(watched.ceiling.load(Ordering::Relaxed))
+                    .max(1);
                 watched.range.store(grown, Ordering::Relaxed);
                 logs
             }
@@ -655,31 +735,62 @@ impl Worker {
                 locked.lockId
             ));
         }
-        let view = SourceLockView {
+        let Some(token) = self.tokens[&chain_id].kind(on_chain.token) else {
+            eprintln!(
+                "matchmaker: skip lock {}: token {} is not one Bob accepts here",
+                locked.lockId, on_chain.token
+            );
+            return Ok(());
+        };
+        let mut view = SourceLockView {
             open: on_chain.state == OPEN,
             receiver: on_chain.receiver,
-            amount: U256::from(on_chain.amount),
+            usdc_value: U256::from(on_chain.amount),
             hashlock: on_chain.hashlock,
             expiry: on_chain.expiry,
         };
         let src_now = self.chain_time(chain_id).await?;
         let dest_now = self.chain_time(self.shop_chain_id).await?;
-        let plan = match rules::fill_decision(
-            &view,
-            &order,
-            &self.config.provider,
-            false,
-            src_now,
-            dest_now,
-            self.config.timing,
-        ) {
+        let decide = |view: &SourceLockView| {
+            rules::fill_decision(
+                view,
+                &order,
+                &self.config.provider,
+                false,
+                src_now,
+                dest_now,
+                self.config.timing,
+            )
+        };
+        if token == LockedToken::Eurc {
+            // Every other rule first, so a lock that would be skipped anyway never waits on the
+            // price. A price outage is retried like any other: the log stays parked until it
+            // clears or the lock no longer passes these rules.
+            if let Err(skip) = decide(&SourceLockView {
+                usdc_value: U256::MAX,
+                ..view
+            }) {
+                eprintln!("matchmaker: skip lock {}: {skip:?}", locked.lockId);
+                return Ok(());
+            }
+            let price = self.eurc_price.micro_usd().await?;
+            view.usdc_value = rules::usdc_value(
+                token,
+                view.usdc_value,
+                price,
+                self.config.eurc_price_buffer_bps,
+            )
+            .ok_or(format!("{PERMANENT}cannot value lock {}", locked.lockId))?;
+        }
+        let plan = match decide(&view) {
             Ok(plan) => plan,
             Err(skip) => {
                 eprintln!("matchmaker: skip lock {}: {skip:?}", locked.lockId);
                 return Ok(());
             }
         };
-        if IFiatToken::new(self.usdc[&chain_id], self.provider(chain_id)?)
+        // Circle can block an address for USDC or EURC; Bob is paid in the token that was locked.
+        if IFiatToken::new(on_chain.token, self.provider(chain_id)?)
             .isBlacklisted(bob)
             .call()
             .await
@@ -697,7 +808,9 @@ impl Worker {
             .await
             .map_err(err)?;
         if gas < U256::from(self.config.min_filler_gas_wei) {
-            return Err(format!("filler has too little gas on chain {chain_id} to redeem later ({gas} wei); top it up"));
+            return Err(format!(
+                "filler has too little gas on chain {chain_id} to redeem later ({gas} wei); top it up"
+            ));
         }
 
         let fill = PayoutPool::Fill {
@@ -962,7 +1075,7 @@ impl Worker {
                     .store
                     .set_fill_status(fill.destination_lock_id, "claimed")
                     .await
-                    .map_err(err)
+                    .map_err(err);
             }
             REFUNDED => return self.mark_missed(fill).await,
             OPEN => {}
@@ -970,7 +1083,7 @@ impl Worker {
                 return Err(format!(
                     "source lock {} reads as empty; the node may be behind",
                     fill.src_lock_id
-                ))
+                ));
             }
         }
         let now = self.chain_time(fill.src_chain_id).await?;
@@ -1137,13 +1250,13 @@ impl Worker {
                     .store
                     .source_done(fill.destination_lock_id)
                     .await
-                    .map_err(err)
+                    .map_err(err);
             }
             _ => {
                 return Err(format!(
                     "source lock {} reads as empty; the node may be behind",
                     fill.src_lock_id
-                ))
+                ));
             }
         }
         match self
@@ -1178,13 +1291,15 @@ impl Worker {
             let done = match self.desk.report(&body).await {
                 Ok(()) => self.store.dequeue(chain_id, &tx_hash, log_index).await,
                 Err(ReportError::Rejected(reason)) => {
-                    eprintln!("matchmaker: Order Desk refused event {tx_hash}:{log_index}; kept in dead_letters: {reason}");
+                    eprintln!(
+                        "matchmaker: Order Desk refused event {tx_hash}:{log_index}; kept in dead_letters: {reason}"
+                    );
                     self.store
                         .dead_letter(chain_id, &tx_hash, log_index, &body, &reason)
                         .await
                 }
                 Err(ReportError::Retry(reason)) => {
-                    return eprintln!("matchmaker: reporting: {reason}")
+                    return eprintln!("matchmaker: reporting: {reason}");
                 }
             };
             if let Err(e) = done {
@@ -1200,9 +1315,27 @@ mod tests {
     use alloy::primitives::address;
 
     #[test]
+    fn only_the_configured_usdc_and_eurc_are_lock_tokens() {
+        let usdc = Address::repeat_byte(1);
+        let eurc = Address::repeat_byte(2);
+        let both = LockTokens {
+            usdc,
+            eurc: Some(eurc),
+        };
+        assert_eq!(both.kind(usdc), Some(LockedToken::Usdc));
+        assert_eq!(both.kind(eurc), Some(LockedToken::Eurc));
+        assert_eq!(both.kind(Address::repeat_byte(3)), None);
+        assert_eq!(both.kind(Address::ZERO), None);
+        let usdc_only = LockTokens { usdc, eurc: None };
+        assert_eq!(usdc_only.kind(eurc), None);
+    }
+
+    #[test]
     fn urls_are_removed_from_error_text() {
         assert_eq!(
-            redact_urls("error sending request for url (https://rpc.ankr.com/base_sepolia/SECRETKEY): timeout"),
+            redact_urls(
+                "error sending request for url (https://rpc.ankr.com/base_sepolia/SECRETKEY): timeout"
+            ),
             "error sending request for url (<rpc>): timeout"
         );
         assert_eq!(redact_urls("no url here"), "no url here");

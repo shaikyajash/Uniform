@@ -23,6 +23,11 @@ pub struct Config {
     /// Skip filling when the filler holds less than this on the source chain, so it can always
     /// afford the source redeem.
     pub min_filler_gas_wei: u128,
+    /// Where one EURC's USD price is read (CoinGecko's reply shape).
+    pub eurc_price_url: String,
+    /// EURC locks are valued this far below the price, so a price move before Bob converts the
+    /// EURC cannot leave him short (100 = 1%).
+    pub eurc_price_buffer_bps: u16,
 }
 
 impl Config {
@@ -59,6 +64,11 @@ impl Config {
             poll_seconds: number("POLL_SECONDS", 4)?,
             max_block_range: number("MAX_BLOCK_RANGE", 1000)?,
             min_filler_gas_wei: number("MIN_FILLER_GAS_WEI", 100_000_000_000_000u128)?,
+            eurc_price_url: env::var("EURC_PRICE_URL").unwrap_or_else(|_| {
+                "https://api.coingecko.com/api/v3/simple/price?ids=euro-coin&vs_currencies=usd&include_last_updated_at=true"
+                    .into()
+            }),
+            eurc_price_buffer_bps: number("EURC_PRICE_BUFFER_BPS", 100)?,
             chains,
         };
         config.check()?;
@@ -92,6 +102,15 @@ impl Config {
                 "STRATEGY_FEE_BPS ({}) differs from providerFeeBps in chains.json ({}): quotes and fills would disagree",
                 self.provider.fee_bps, self.chains.provider_fee_bps
             ));
+        }
+        if self.eurc_price_buffer_bps > 1_000 {
+            return Err(format!(
+                "EURC_PRICE_BUFFER_BPS ({}) must be at most 1000 (10%)",
+                self.eurc_price_buffer_bps
+            ));
+        }
+        if !self.eurc_price_url.starts_with("https://") {
+            return Err("EURC_PRICE_URL must use https".into());
         }
         let t = self.timing;
         if t.min_gap < 300 {
