@@ -1,0 +1,142 @@
+//! Settings from the environment and `shared/chains.json`.
+
+use std::{env, str::FromStr};
+
+use alloy::primitives::B256;
+use common::chains::Chains;
+
+use crate::rules::{Provider, Timing};
+
+pub struct Config {
+    pub chains: Chains,
+    pub order_desk_url: String,
+    pub internal_token: String,
+    /// The Matchmaker's own key: pays gas on every chain and is the strategy's filler.
+    pub filler_key: String,
+    pub provider: Provider,
+    pub strategy_salt: B256,
+    pub timing: Timing,
+    pub db_path: String,
+    pub poll_seconds: u64,
+    /// Largest block range read in one `eth_getLogs` call.
+    pub max_block_range: u64,
+    /// Skip filling when the filler holds less than this on the source chain, so it can always
+    /// afford the source redeem.
+    pub min_filler_gas_wei: u128,
+}
+
+impl Config {
+    pub fn from_env() -> Result<Config, String> {
+        let chains_path =
+            env::var("CHAINS_PATH").unwrap_or_else(|_| "../shared/chains.json".into());
+        let chains = Chains::load(&chains_path).map_err(|e| e.to_string())?;
+        let timeouts = chains.timeouts_seconds;
+        let provider = Provider {
+            address: parse("BOB_ADDRESS")?,
+            max_per_order: parse("STRATEGY_MAX_PER_ORDER")?,
+            fee_bps: env::var("STRATEGY_FEE_BPS")
+                .map(|v| {
+                    v.parse()
+                        .map_err(|_| "STRATEGY_FEE_BPS is not a number".to_string())
+                })
+                .unwrap_or(Ok(chains.provider_fee_bps))?,
+        };
+        let config = Config {
+            order_desk_url: required("ORDER_DESK_URL")?
+                .trim_end_matches('/')
+                .to_string(),
+            internal_token: required("INTERNAL_EVENTS_TOKEN")?,
+            filler_key: required("FILLER_PRIVATE_KEY")?,
+            provider,
+            strategy_salt: parse("STRATEGY_SALT")?,
+            timing: Timing {
+                fill_cutoff: timeouts.fill_cutoff,
+                destination_lock: timeouts.destination_lock,
+                min_gap: number("MIN_GAP_SECONDS", 300)?,
+                min_destination_lock: 300,
+            },
+            db_path: env::var("DB_PATH").unwrap_or_else(|_| "matchmaker.db".into()),
+            poll_seconds: number("POLL_SECONDS", 4)?,
+            max_block_range: number("MAX_BLOCK_RANGE", 1000)?,
+            min_filler_gas_wei: number("MIN_FILLER_GAS_WEI", 100_000_000_000_000u128)?,
+            chains,
+        };
+        config.check()?;
+        Ok(config)
+    }
+
+    /// Rejects settings that would make the Matchmaker stall or fill unsafely.
+    fn check(&self) -> Result<(), String> {
+        if self.internal_token.trim().is_empty() {
+            return Err("INTERNAL_EVENTS_TOKEN is empty".into());
+        }
+        // The shop address comes from the Order Desk, so the connection to it must not be open to
+        // tampering unless it is on this machine.
+        let local = ["http://127.0.0.1", "http://localhost", "http://[::1]"]
+            .iter()
+            .any(|p| self.order_desk_url.starts_with(p));
+        if !self.order_desk_url.starts_with("https://") && !local {
+            return Err("ORDER_DESK_URL must use https unless it is on this machine".into());
+        }
+        if self.max_block_range == 0 {
+            return Err("MAX_BLOCK_RANGE must be at least 1".into());
+        }
+        if self.poll_seconds == 0 {
+            return Err("POLL_SECONDS must be at least 1".into());
+        }
+        if self.provider.max_per_order.is_zero() {
+            return Err("STRATEGY_MAX_PER_ORDER must be above zero".into());
+        }
+        if self.provider.fee_bps != self.chains.provider_fee_bps {
+            return Err(format!(
+                "STRATEGY_FEE_BPS ({}) differs from providerFeeBps in chains.json ({}): quotes and fills would disagree",
+                self.provider.fee_bps, self.chains.provider_fee_bps
+            ));
+        }
+        let t = self.timing;
+        if t.min_gap < 300 {
+            return Err(format!(
+                "MIN_GAP_SECONDS ({}) must be at least 300 (time to redeem after the shop is paid)",
+                t.min_gap
+            ));
+        }
+        if !(300..=7200).contains(&t.destination_lock) {
+            return Err(format!(
+                "timeoutsSeconds.destinationLock ({}) must be between 300 and 7200, the DestinationLock limits",
+                t.destination_lock
+            ));
+        }
+        if t.destination_lock
+            .checked_add(t.min_gap)
+            .is_none_or(|needed| t.fill_cutoff < needed)
+        {
+            return Err(format!(
+                "fillCutoff ({}) must be at least destinationLock ({}) + MIN_GAP_SECONDS ({})",
+                t.fill_cutoff, t.destination_lock, t.min_gap
+            ));
+        }
+        Ok(())
+    }
+
+    /// `RPC_<chainId>` overrides the RPC in chains.json (for example a private Whitechain RPC).
+    pub fn rpc_for(&self, chain_id: u64, default: &str) -> String {
+        env::var(format!("RPC_{chain_id}")).unwrap_or_else(|_| default.to_string())
+    }
+}
+
+fn required(name: &str) -> Result<String, String> {
+    env::var(name).map_err(|_| format!("{name} is not set"))
+}
+
+fn parse<T: FromStr>(name: &str) -> Result<T, String> {
+    required(name)?
+        .parse()
+        .map_err(|_| format!("{name} is not valid"))
+}
+
+fn number<T: FromStr>(name: &str, default: T) -> Result<T, String> {
+    match env::var(name) {
+        Ok(value) => value.parse().map_err(|_| format!("{name} is not a number")),
+        Err(_) => Ok(default),
+    }
+}

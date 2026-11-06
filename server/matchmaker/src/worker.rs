@@ -1,0 +1,1243 @@
+//! The Matchmaker's duties. `tick` reads new confirmed logs on every chain, reports and acts on
+//! them, retries logs that failed, reports events and refunds expired locks. `redeem_duty` runs on
+//! its own loop so nothing else can delay Bob's source redeems.
+
+use std::{
+    collections::HashMap,
+    sync::atomic::{AtomicU64, Ordering},
+    time::{Duration, SystemTime, UNIX_EPOCH},
+};
+
+use alloy::{
+    network::{EthereumWallet, TransactionBuilder},
+    primitives::{keccak256, Address, B256, U256},
+    providers::{DynProvider, Provider, ProviderBuilder},
+    rpc::{
+        client::RpcClient,
+        types::{BlockNumberOrTag, Filter, Log, TransactionRequest},
+    },
+    signers::local::PrivateKeySigner,
+    sol_types::{SolEvent, SolValue},
+    transports::http::reqwest,
+};
+use bindings::{DestinationLock, IAqua, IFiatToken, PayoutPool, SourceLock};
+use common::chains::Role;
+use tokio::sync::Mutex;
+
+use crate::{
+    config::Config,
+    events::{self, Action, Source},
+    order_desk::{OrderDesk, OrderLookup, ReportError},
+    rules::{self, SourceLockView},
+    store::{Fill, PendingLog, Store},
+};
+
+/// How far back the first run starts (about 3 hours of Base blocks), so locks made before
+/// start-up are still seen.
+const FIRST_RUN_LOOKBACK: u64 = 6_000;
+/// A parked log whose handling fails permanently this many times is dropped and logged loudly.
+/// Network and Order Desk outages are not counted: those logs are retried until they clear.
+const MAX_LOG_FAILURES: u64 = 30;
+/// Marks an error that retrying cannot fix (data on chain that does not match), as opposed to an
+/// outage.
+const PERMANENT: &str = "permanent: ";
+/// How far back to search for a destination lock's Settled log when its secret is needed.
+const SECRET_SEARCH_BLOCKS: u64 = 200_000;
+/// Refunds sent per chain per pass, so a flood of expired locks cannot hold up other duties.
+const REFUNDS_PER_PASS: usize = 5;
+/// A node whose latest block is older than this is treated as behind, and its time not trusted.
+const MAX_CLOCK_LAG: u64 = 120;
+const RPC_TIMEOUT: Duration = Duration::from_secs(20);
+const RECEIPT_TIMEOUT: Duration = Duration::from_secs(90);
+/// DestinationLock's lock id tag (see DestinationLock.sol).
+const DESTINATION_LOCK_TAG: &str = "uniform.destinationlock.lock.v1";
+/// Lock states as stored on chain.
+const NONE: u8 = 0;
+const OPEN: u8 = 1;
+const CLAIMED: u8 = 2;
+const REFUNDED: u8 = 3;
+
+pub type Result<T> = std::result::Result<T, String>;
+
+/// Error text with any URL removed, so RPC keys in URLs never reach the logs.
+fn err(e: impl std::fmt::Display) -> String {
+    redact_urls(&e.to_string())
+}
+
+fn redact_urls(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(start) = [rest.find("http://"), rest.find("https://")]
+        .into_iter()
+        .flatten()
+        .min()
+    {
+        out.push_str(&rest[..start]);
+        out.push_str("<rpc>");
+        let tail = &rest[start..];
+        let end = tail
+            .find(|c: char| c.is_whitespace() || c == ')' || c == '"' || c == '\'')
+            .unwrap_or(tail.len());
+        rest = &tail[end..];
+    }
+    out.push_str(rest);
+    out
+}
+
+/// Whether an `eth_getLogs` error means "ask for fewer blocks" (as opposed to an outage or a rate
+/// limit, which a smaller range would not fix).
+fn is_range_error(message: &str) -> bool {
+    let m = message.to_lowercase();
+    if m.contains("rate") || m.contains("429") || m.contains("timed out") || m.contains("timeout") {
+        return false;
+    }
+    [
+        "block range",
+        "range is too",
+        "range too",
+        "too many",
+        "exceed",
+        "response size",
+        "limit",
+    ]
+    .iter()
+    .any(|p| m.contains(p))
+}
+
+fn unix_now() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+/// DestinationLock.lockIdFor, computed locally:
+/// keccak256(abi.encode(LOCK_TAG, chainid, lock, srcChainId, srcLockId, maker)).
+pub fn destination_lock_id(
+    chain_id: u64,
+    lock: Address,
+    src_chain_id: u64,
+    src_lock_id: B256,
+    maker: Address,
+) -> B256 {
+    let tag = keccak256(DESTINATION_LOCK_TAG.as_bytes());
+    keccak256(
+        (
+            tag,
+            U256::from(chain_id),
+            lock,
+            U256::from(src_chain_id),
+            src_lock_id,
+            maker,
+        )
+            .abi_encode(),
+    )
+}
+
+/// What happened to a transaction the Matchmaker tried to send.
+enum Sent {
+    Mined(B256),
+    /// The simulation reverted, so nothing was sent.
+    WouldRevert(String),
+}
+
+struct Watched {
+    chain_id: u64,
+    provider: DynProvider,
+    confirmations: u64,
+    /// Customer chains are rollups: read up to the "safe" block instead of a few confirmations.
+    use_safe_tag: bool,
+    contracts: Vec<(Address, Source)>,
+    /// Block range used for `eth_getLogs`: halved when a provider refuses a range, grown back after.
+    range: AtomicU64,
+    /// The largest range the provider has not refused; growth never goes past it.
+    ceiling: AtomicU64,
+    /// One transaction at a time per chain, so the two loops never race for a nonce.
+    send_lock: Mutex<()>,
+}
+
+pub struct Worker {
+    config: Config,
+    store: Store,
+    desk: OrderDesk,
+    filler: Address,
+    chains: Vec<Watched>,
+    shop_chain_id: u64,
+    usdt: Address,
+    payout_pool: Address,
+    destination_lock: Address,
+    /// Our SourceLock and the chain's USDC on each customer chain.
+    source_locks: HashMap<u64, Address>,
+    usdc: HashMap<u64, Address>,
+}
+
+impl Worker {
+    pub async fn new(config: Config) -> Result<Worker> {
+        let signer: PrivateKeySigner = config
+            .filler_key
+            .parse()
+            .map_err(|_| "FILLER_PRIVATE_KEY is not a key")?;
+        let filler = signer.address();
+        let wallet = EthereumWallet::from(signer);
+        let store = Store::open(&config.db_path).await.map_err(err)?;
+        let desk = OrderDesk::new(config.order_desk_url.clone(), config.internal_token.clone());
+
+        let shop = config.chains.shop_chain();
+        let usdt = shop
+            .tokens
+            .get("USDT")
+            .ok_or("chains.json: shop chain has no USDT")?
+            .address;
+        let payout_pool = shop
+            .contracts
+            .payout_pool
+            .ok_or("chains.json: no payoutPool")?;
+        let destination_lock = shop
+            .contracts
+            .destination_lock
+            .ok_or("chains.json: no destinationLock")?;
+        let aqua = shop.contracts.aqua.ok_or("chains.json: no aqua")?;
+
+        let http = reqwest::Client::builder()
+            .timeout(RPC_TIMEOUT)
+            .connect_timeout(Duration::from_secs(10))
+            .build()
+            .map_err(err)?;
+        let connect = |chain_id: u64, rpc: &str| -> Result<DynProvider> {
+            let url = config
+                .rpc_for(chain_id, rpc)
+                .parse()
+                .map_err(|_| format!("bad RPC url for chain {chain_id}"))?;
+            let client = RpcClient::new_http_with_client(http.clone(), url);
+            // The nonce is read from the chain for every transaction, so a send that fails before
+            // reaching the chain can never leave a gap that blocks later transactions.
+            Ok(ProviderBuilder::new()
+                .disable_recommended_fillers()
+                .with_gas_estimation()
+                .with_simple_nonce_management()
+                .fetch_chain_id()
+                .wallet(wallet.clone())
+                .connect_client(client)
+                .erased())
+        };
+        let watched =
+            |chain_id: u64, provider: DynProvider, confirmations: u64, role: Role, contracts| {
+                Watched {
+                    chain_id,
+                    provider,
+                    confirmations,
+                    use_safe_tag: role == Role::Customer,
+                    contracts,
+                    range: AtomicU64::new(config.max_block_range),
+                    ceiling: AtomicU64::new(config.max_block_range),
+                    send_lock: Mutex::new(()),
+                }
+            };
+
+        let mut chains = vec![];
+        let mut shop_contracts = vec![
+            (payout_pool, Source::PayoutPool),
+            (destination_lock, Source::DestinationLock),
+        ];
+        if let Some(direct_pay) = shop.contracts.direct_pay {
+            shop_contracts.push((direct_pay, Source::DirectPay));
+        }
+        chains.push(watched(
+            shop.chain_id,
+            connect(shop.chain_id, &shop.rpc)?,
+            shop.confirmations,
+            shop.role,
+            shop_contracts,
+        ));
+
+        let mut source_locks = HashMap::new();
+        let mut usdc = HashMap::new();
+        for chain in config.chains.customer_chains() {
+            let Some(lock) = chain.contracts.source_lock else {
+                continue;
+            };
+            let token = chain
+                .tokens
+                .get("USDC")
+                .ok_or(format!("chains.json: chain {} has no USDC", chain.chain_id))?;
+            source_locks.insert(chain.chain_id, lock);
+            usdc.insert(chain.chain_id, token.address);
+            chains.push(watched(
+                chain.chain_id,
+                connect(chain.chain_id, &chain.rpc)?,
+                chain.confirmations,
+                chain.role,
+                vec![(lock, Source::SourceLock)],
+            ));
+        }
+
+        let worker = Worker {
+            shop_chain_id: shop.chain_id,
+            config,
+            store,
+            desk,
+            filler,
+            chains,
+            usdt,
+            payout_pool,
+            destination_lock,
+            source_locks,
+            usdc,
+        };
+        worker.check_setup(aqua).await?;
+        Ok(worker)
+    }
+
+    /// Refuses to start against the wrong contracts or a strategy Bob never shipped.
+    async fn check_setup(&self, aqua: Address) -> Result<()> {
+        let shop = self.provider(self.shop_chain_id)?;
+        let pool = PayoutPool::new(self.payout_pool, shop);
+        let wired = pool.destinationLock().call().await.map_err(err)?;
+        if wired != self.destination_lock {
+            return Err(format!(
+                "chains.json destinationLock {} is not the pool's lock {wired}",
+                self.destination_lock
+            ));
+        }
+        let probe = B256::repeat_byte(0x42);
+        let on_chain_id = DestinationLock::new(self.destination_lock, shop)
+            .lockIdFor(U256::from(84532u64), probe, self.config.provider.address)
+            .call()
+            .await
+            .map_err(err)?;
+        let local_id = destination_lock_id(
+            self.shop_chain_id,
+            self.destination_lock,
+            84532,
+            probe,
+            self.config.provider.address,
+        );
+        if on_chain_id != local_id {
+            return Err("DestinationLock.lockIdFor does not match the local calculation".into());
+        }
+        let hash = pool
+            .strategyHashOf(self.strategy()?)
+            .call()
+            .await
+            .map_err(err)?;
+        let shipped = IAqua::new(aqua, shop)
+            .rawBalances(
+                self.config.provider.address,
+                self.payout_pool,
+                hash,
+                self.usdt,
+            )
+            .call()
+            .await
+            .map_err(err)?;
+        if shipped.tokensCount == 0 || shipped.tokensCount == u8::MAX {
+            return Err(format!(
+                "Bob's strategy {hash} is not active on Aqua: check BOB_ADDRESS, STRATEGY_SALT, STRATEGY_MAX_PER_ORDER and STRATEGY_FEE_BPS"
+            ));
+        }
+        eprintln!(
+            "matchmaker: strategy {hash} active, allowance {}",
+            shipped.balance
+        );
+        Ok(())
+    }
+
+    pub fn filler(&self) -> Address {
+        self.filler
+    }
+
+    fn strategy(&self) -> Result<PayoutPool::Strategy> {
+        Ok(PayoutPool::Strategy {
+            maker: self.config.provider.address,
+            token: self.usdt,
+            filler: self.filler,
+            maxPerOrder: u128::try_from(self.config.provider.max_per_order)
+                .map_err(|_| "maxPerOrder too large")?,
+            feeBps: self.config.provider.fee_bps,
+            salt: self.config.strategy_salt,
+        })
+    }
+
+    fn watched(&self, chain_id: u64) -> Result<&Watched> {
+        self.chains
+            .iter()
+            .find(|c| c.chain_id == chain_id)
+            .ok_or_else(|| format!("not watching chain {chain_id}"))
+    }
+
+    fn provider(&self, chain_id: u64) -> Result<&DynProvider> {
+        self.watched(chain_id).map(|w| &w.provider)
+    }
+
+    /// The chain's latest block time. A node whose latest block is far behind real time is not
+    /// trusted, because a stale clock would overstate how long a source lock has left.
+    async fn chain_time(&self, chain_id: u64) -> Result<u64> {
+        let block = self
+            .provider(chain_id)?
+            .get_block_by_number(BlockNumberOrTag::Latest)
+            .await
+            .map_err(err)?
+            .ok_or("no latest block")?;
+        let time = block.header.timestamp;
+        if time.saturating_add(MAX_CLOCK_LAG) < unix_now() {
+            return Err(format!(
+                "chain {chain_id} node is behind: latest block is {}s old",
+                unix_now() - time
+            ));
+        }
+        Ok(time)
+    }
+
+    /// The last block to read on a chain: the "safe" block on rollups, otherwise head minus the
+    /// confirmations in chains.json.
+    async fn readable_head(&self, watched: &Watched) -> Result<Option<u64>> {
+        if watched.use_safe_tag
+            && let Ok(Some(block)) = watched
+                .provider
+                .get_block_by_number(BlockNumberOrTag::Safe)
+                .await
+            {
+                return Ok(Some(block.header.number));
+            }
+        let head = watched.provider.get_block_number().await.map_err(err)?;
+        Ok(head.checked_sub(watched.confirmations))
+    }
+
+    /// Simulates, then sends and waits (with a time limit) for the receipt, one transaction at a
+    /// time per chain. Only a revert in the simulation counts as `WouldRevert`; network errors are
+    /// returned as `Err` to be retried.
+    async fn send(&self, chain_id: u64, tx: TransactionRequest) -> Result<Sent> {
+        let watched = self.watched(chain_id)?;
+        let _one_at_a_time = watched.send_lock.lock().await;
+        let tx = tx.with_from(self.filler);
+        if let Err(e) = watched.provider.call(tx.clone()).await {
+            let reverted = e
+                .as_error_resp()
+                .is_some_and(|r| r.as_revert_data().is_some() || r.message.contains("revert"));
+            return if reverted {
+                Ok(Sent::WouldRevert(err(e)))
+            } else {
+                Err(err(e))
+            };
+        }
+        let pending = watched.provider.send_transaction(tx).await.map_err(err)?;
+        let receipt = pending
+            .with_timeout(Some(RECEIPT_TIMEOUT))
+            .get_receipt()
+            .await
+            .map_err(err)?;
+        if receipt.status() {
+            Ok(Sent::Mined(receipt.transaction_hash))
+        } else {
+            Err(format!(
+                "transaction {} reverted on chain",
+                receipt.transaction_hash
+            ))
+        }
+    }
+
+    /// The main pass. A failure on one chain or one item never stops the others.
+    pub async fn tick(&self) {
+        for i in 0..self.chains.len() {
+            if let Err(e) = self.scan(i).await {
+                eprintln!("matchmaker: chain {}: {e}", self.chains[i].chain_id);
+            }
+        }
+        self.retry_parked_logs().await;
+        self.flush_outbox().await;
+        self.refund_expired_destinations().await;
+        self.refund_expired_sources().await;
+    }
+
+    /// Reads the next confirmed block range on one chain. A log whose handling fails is parked for
+    /// retry, so it never holds up the cursor. The cursor only moves once the node is known to have
+    /// the range's last block.
+    async fn scan(&self, index: usize) -> Result<()> {
+        let watched = &self.chains[index];
+        let Some(safe) = self.readable_head(watched).await? else {
+            return Ok(());
+        };
+        let from = match self.store.cursor(watched.chain_id).await.map_err(err)? {
+            Some(next) => next,
+            None => safe.saturating_sub(FIRST_RUN_LOOKBACK),
+        };
+        if from > safe {
+            return Ok(());
+        }
+        let range = watched.range.load(Ordering::Relaxed).max(1);
+        let to = safe.min(from.saturating_add(range - 1));
+        if watched
+            .provider
+            .get_block_by_number(to.into())
+            .await
+            .map_err(err)?
+            .is_none()
+        {
+            return Ok(());
+        }
+        let addresses: Vec<Address> = watched.contracts.iter().map(|(a, _)| *a).collect();
+        let filter = Filter::new()
+            .address(addresses)
+            .from_block(from)
+            .to_block(to);
+        let mut logs = match watched.provider.get_logs(&filter).await {
+            Ok(logs) => {
+                let grown = range.saturating_mul(2).min(watched.ceiling.load(Ordering::Relaxed)).max(1);
+                watched.range.store(grown, Ordering::Relaxed);
+                logs
+            }
+            Err(e) => {
+                let message = err(e);
+                if is_range_error(&message) && range > 1 {
+                    watched.ceiling.store(range / 2, Ordering::Relaxed);
+                    watched.range.store(range / 2, Ordering::Relaxed);
+                }
+                return Err(format!("get_logs {from}..={to}: {message}"));
+            }
+        };
+        logs.sort_by_key(|l| (l.block_number, l.log_index));
+
+        for log in &logs {
+            let Some(source) = watched
+                .contracts
+                .iter()
+                .find(|(a, _)| *a == log.address())
+                .map(|(_, s)| *s)
+            else {
+                continue;
+            };
+            if let Err(e) = self.handle(watched.chain_id, source, log).await {
+                let (Some(tx), Some(log_index)) = (log.transaction_hash, log.log_index) else {
+                    return Err(e);
+                };
+                eprintln!("matchmaker: parking log {tx}:{log_index} for retry: {e}");
+                self.store
+                    .park_log(&PendingLog {
+                        chain_id: watched.chain_id,
+                        tx_hash: tx.to_string(),
+                        log_index,
+                        source: source.as_str().into(),
+                        log_json: serde_json::to_string(log).map_err(err)?,
+                    })
+                    .await
+                    .map_err(err)?;
+            }
+        }
+        self.store
+            .set_cursor(watched.chain_id, to + 1)
+            .await
+            .map_err(err)
+    }
+
+    /// Retries every parked log. Outages are retried until they clear; a log that fails for a
+    /// permanent reason is dropped after `MAX_LOG_FAILURES` tries.
+    async fn retry_parked_logs(&self) {
+        let parked = match self.store.pending_logs().await {
+            Ok(parked) => parked,
+            Err(e) => return eprintln!("matchmaker: parked logs: {}", err(e)),
+        };
+        for p in parked {
+            let (Ok(log), Some(source)) = (
+                serde_json::from_str::<Log>(&p.log_json),
+                Source::parse(&p.source),
+            ) else {
+                let _ = self
+                    .store
+                    .drop_pending(p.chain_id, &p.tx_hash, p.log_index)
+                    .await;
+                continue;
+            };
+            match self.handle(p.chain_id, source, &log).await {
+                Ok(()) => {
+                    let _ = self
+                        .store
+                        .drop_pending(p.chain_id, &p.tx_hash, p.log_index)
+                        .await;
+                }
+                Err(e) if e.starts_with(PERMANENT) => {
+                    let failures = self
+                        .store
+                        .bump_pending(p.chain_id, &p.tx_hash, p.log_index)
+                        .await
+                        .unwrap_or(0);
+                    if failures >= MAX_LOG_FAILURES {
+                        eprintln!(
+                            "matchmaker: GIVING UP on log {}:{} after {failures} tries: {e}",
+                            p.tx_hash, p.log_index
+                        );
+                        let _ = self
+                            .store
+                            .drop_pending(p.chain_id, &p.tx_hash, p.log_index)
+                            .await;
+                    }
+                }
+                Err(e) => eprintln!(
+                    "matchmaker: parked log {}:{} still failing: {e}",
+                    p.tx_hash, p.log_index
+                ),
+            }
+        }
+    }
+
+    async fn handle(&self, chain_id: u64, source: Source, log: &Log) -> Result<()> {
+        let (report, action) = events::decode(chain_id, source, log);
+        if let Some(event) = report {
+            let body = serde_json::to_string(&event).map_err(err)?;
+            self.store
+                .enqueue(chain_id, event.tx_hash, event.log_index, &body)
+                .await
+                .map_err(err)?;
+        }
+        match action {
+            Action::Locked(locked) => self.on_locked(chain_id, locked).await,
+            Action::Settled(settled) => self.on_settled(settled).await,
+            Action::None => Ok(()),
+        }
+    }
+
+    /// A customer locked on a source chain for Bob. If Bob already filled it (an earlier run
+    /// stopped before recording), record it from the chain. Otherwise, if it passes every rule,
+    /// open the destination lock for the shop with Bob's USDT.
+    async fn on_locked(&self, chain_id: u64, locked: SourceLock::Locked) -> Result<()> {
+        let bob = self.config.provider.address;
+        if locked.receiver != bob {
+            return Ok(());
+        }
+        let Some(&lock_address) = self.source_locks.get(&chain_id) else {
+            return Ok(());
+        };
+        let shop = self.provider(self.shop_chain_id)?;
+        let destination = DestinationLock::new(self.destination_lock, shop);
+        let destination_lock_id = destination_lock_id(
+            self.shop_chain_id,
+            self.destination_lock,
+            chain_id,
+            locked.lockId,
+            bob,
+        );
+        let existing = destination
+            .locks(destination_lock_id)
+            .call()
+            .await
+            .map_err(err)?;
+        if existing.state != NONE {
+            return self
+                .record_existing_fill(chain_id, &locked, destination_lock_id, existing)
+                .await;
+        }
+
+        // Cheapest check first: a lock for an order the Order Desk doesn't know costs one request.
+        let order = match self.desk.order(locked.orderId).await? {
+            OrderLookup::Found(order) => order,
+            OrderLookup::NotFound => {
+                eprintln!(
+                    "matchmaker: skip lock {}: order {} is unknown",
+                    locked.lockId, locked.orderId
+                );
+                return Ok(());
+            }
+        };
+        if self.store.has_fill(locked.orderId).await.map_err(err)? {
+            eprintln!(
+                "matchmaker: skip lock {}: order {} was already filled",
+                locked.lockId, locked.orderId
+            );
+            return Ok(());
+        }
+        let on_chain = SourceLock::new(lock_address, self.provider(chain_id)?)
+            .locks(locked.lockId)
+            .call()
+            .await
+            .map_err(err)?;
+        if on_chain.state == NONE {
+            return Err(format!(
+                "source lock {} reads as empty; the node may be behind",
+                locked.lockId
+            ));
+        }
+        let view = SourceLockView {
+            open: on_chain.state == OPEN,
+            receiver: on_chain.receiver,
+            amount: U256::from(on_chain.amount),
+            hashlock: on_chain.hashlock,
+            expiry: on_chain.expiry,
+        };
+        let src_now = self.chain_time(chain_id).await?;
+        let dest_now = self.chain_time(self.shop_chain_id).await?;
+        let plan = match rules::fill_decision(
+            &view,
+            &order,
+            &self.config.provider,
+            false,
+            src_now,
+            dest_now,
+            self.config.timing,
+        ) {
+            Ok(plan) => plan,
+            Err(skip) => {
+                eprintln!("matchmaker: skip lock {}: {skip:?}", locked.lockId);
+                return Ok(());
+            }
+        };
+        if IFiatToken::new(self.usdc[&chain_id], self.provider(chain_id)?)
+            .isBlacklisted(bob)
+            .call()
+            .await
+            .map_err(err)?
+        {
+            eprintln!(
+                "matchmaker: skip lock {}: Circle has blacklisted Bob, he could not redeem",
+                locked.lockId
+            );
+            return Ok(());
+        }
+        let gas = self
+            .provider(chain_id)?
+            .get_balance(self.filler)
+            .await
+            .map_err(err)?;
+        if gas < U256::from(self.config.min_filler_gas_wei) {
+            return Err(format!("filler has too little gas on chain {chain_id} to redeem later ({gas} wei); top it up"));
+        }
+
+        let fill = PayoutPool::Fill {
+            orderId: locked.orderId,
+            merchant: plan.merchant,
+            amount: plan.amount,
+            hashlock: view.hashlock,
+            expiry: plan.destination_expiry,
+            srcChainId: U256::from(chain_id),
+            srcLockId: locked.lockId,
+        };
+        let tx = PayoutPool::new(self.payout_pool, shop)
+            .fill(self.strategy()?, fill)
+            .into_transaction_request();
+        match self.send(self.shop_chain_id, tx).await? {
+            Sent::WouldRevert(reason) => {
+                eprintln!(
+                    "matchmaker: skip lock {}: fill would revert: {reason}",
+                    locked.lockId
+                );
+                Ok(())
+            }
+            Sent::Mined(hash) => {
+                eprintln!("matchmaker: filled order {} in {hash}", locked.orderId);
+                self.store
+                    .record_fill_if_missing(&Fill {
+                        order_id: locked.orderId,
+                        src_chain_id: chain_id,
+                        src_lock_id: locked.lockId,
+                        src_expiry: view.expiry,
+                        destination_lock_id,
+                        destination_expiry: plan.destination_expiry,
+                        amount: plan.amount,
+                        status: "filled".into(),
+                        secret: None,
+                    })
+                    .await
+                    .map_err(err)?;
+                Ok(())
+            }
+        }
+    }
+
+    /// Records a destination lock Bob opened in an earlier run that stopped before recording it.
+    async fn record_existing_fill(
+        &self,
+        chain_id: u64,
+        locked: &SourceLock::Locked,
+        destination_lock_id: B256,
+        existing: DestinationLock::locksReturn,
+    ) -> Result<()> {
+        if existing.maker != self.config.provider.address || existing.hashlock != locked.hashlock {
+            return Err(format!(
+                "{PERMANENT}destination lock {destination_lock_id} does not match source lock {}",
+                locked.lockId
+            ));
+        }
+        let secret = if existing.state == CLAIMED {
+            self.find_secret(destination_lock_id).await?
+        } else {
+            None
+        };
+        let status = match (existing.state, secret) {
+            (CLAIMED, Some(_)) => "settled",
+            (OPEN | CLAIMED, _) => "filled",
+            _ => "refunded",
+        };
+        let new = self
+            .store
+            .record_fill_if_missing(&Fill {
+                order_id: locked.orderId,
+                src_chain_id: chain_id,
+                src_lock_id: locked.lockId,
+                src_expiry: locked.expiry,
+                destination_lock_id,
+                destination_expiry: existing.expiry,
+                amount: U256::from(existing.amount),
+                status: status.into(),
+                secret,
+            })
+            .await
+            .map_err(err)?;
+        if new {
+            eprintln!(
+                "matchmaker: recorded an earlier fill for order {} from the chain",
+                locked.orderId
+            );
+        }
+        Ok(())
+    }
+
+    /// The secret revealed for one of our destination locks, read from its Settled log.
+    async fn find_secret(&self, lock_id: B256) -> Result<Option<B256>> {
+        let provider = self.provider(self.shop_chain_id)?;
+        let chunk = self.config.max_block_range.max(1);
+        let head = provider.get_block_number().await.map_err(err)?;
+        let floor = head.saturating_sub(SECRET_SEARCH_BLOCKS);
+        let mut to = head;
+        loop {
+            let from = to.saturating_sub(chunk - 1).max(floor);
+            let filter = Filter::new()
+                .address(self.destination_lock)
+                .event_signature(DestinationLock::Settled::SIGNATURE_HASH)
+                .topic1(lock_id)
+                .from_block(from)
+                .to_block(to);
+            for log in provider.get_logs(&filter).await.map_err(err)? {
+                if let Ok(settled) = DestinationLock::Settled::decode_log(&log.inner) {
+                    return Ok(Some(settled.secret));
+                }
+            }
+            if from <= floor {
+                return Ok(None);
+            }
+            to = from - 1;
+        }
+    }
+
+    /// The shop was paid on Whitechain and the secret is public. The log came from our
+    /// DestinationLock. A fill that was never recorded (a run stopped right after filling) is
+    /// recorded now, once the chain confirms the lock is Bob's and matches the source lock.
+    async fn on_settled(&self, settled: DestinationLock::Settled) -> Result<()> {
+        if self
+            .store
+            .fill_by_destination(settled.lockId)
+            .await
+            .map_err(err)?
+            .is_some()
+        {
+            return self
+                .store
+                .mark_settled(settled.lockId, settled.secret)
+                .await
+                .map_err(err);
+        }
+        let bob = self.config.provider.address;
+        let Ok(src_chain_id) = u64::try_from(settled.srcChainId) else {
+            return Ok(());
+        };
+        let Some(&lock_address) = self.source_locks.get(&src_chain_id) else {
+            return Ok(());
+        };
+        if destination_lock_id(
+            self.shop_chain_id,
+            self.destination_lock,
+            src_chain_id,
+            settled.srcLockId,
+            bob,
+        ) != settled.lockId
+        {
+            return Ok(()); // someone else's destination lock
+        }
+        let source = SourceLock::new(lock_address, self.provider(src_chain_id)?)
+            .locks(settled.srcLockId)
+            .call()
+            .await
+            .map_err(err)?;
+        if source.state == NONE {
+            return Err(format!(
+                "source lock {} reads as empty; the node may be behind",
+                settled.srcLockId
+            ));
+        }
+        if source.receiver != bob {
+            return Ok(());
+        }
+        let existing =
+            DestinationLock::new(self.destination_lock, self.provider(self.shop_chain_id)?)
+                .locks(settled.lockId)
+                .call()
+                .await
+                .map_err(err)?;
+        let new = self
+            .store
+            .record_fill_if_missing(&Fill {
+                order_id: settled.orderId,
+                src_chain_id,
+                src_lock_id: settled.srcLockId,
+                src_expiry: source.expiry,
+                destination_lock_id: settled.lockId,
+                destination_expiry: existing.expiry,
+                amount: settled.amount,
+                status: "settled".into(),
+                secret: Some(settled.secret),
+            })
+            .await
+            .map_err(err)?;
+        if new {
+            eprintln!(
+                "matchmaker: recorded an unrecorded fill for order {} from its Settled log",
+                settled.orderId
+            );
+        }
+        Ok(())
+    }
+
+    /// The redeem loop's pass: notice destination locks paid to the shop (even if their Settled log
+    /// was missed), then redeem every settled fill's source lock for Bob.
+    pub async fn redeem_duty(&self) {
+        match self.store.fills_with_status("filled").await {
+            Ok(fills) => {
+                for fill in fills {
+                    if let Err(e) = self.check_filled(&fill).await {
+                        eprintln!("matchmaker: checking fill for order {}: {e}", fill.order_id);
+                    }
+                }
+            }
+            Err(e) => eprintln!("matchmaker: checking fills: {}", err(e)),
+        }
+        match self.store.fills_with_status("settled").await {
+            Ok(fills) => {
+                for fill in fills {
+                    if let Err(e) = self.redeem(&fill).await {
+                        eprintln!("matchmaker: source redeem for order {}: {e}", fill.order_id);
+                    }
+                }
+            }
+            Err(e) => eprintln!("matchmaker: source redeem: {}", err(e)),
+        }
+    }
+
+    /// A destination lock that was paid to the shop moves its fill to settled with the secret.
+    async fn check_filled(&self, fill: &Fill) -> Result<()> {
+        let state = DestinationLock::new(self.destination_lock, self.provider(self.shop_chain_id)?)
+            .locks(fill.destination_lock_id)
+            .call()
+            .await
+            .map_err(err)?
+            .state;
+        match state {
+            CLAIMED => match self.find_secret(fill.destination_lock_id).await? {
+                Some(secret) => self
+                    .store
+                    .mark_settled(fill.destination_lock_id, secret)
+                    .await
+                    .map_err(err),
+                None => Err(format!(
+                    "destination lock {} was claimed but its Settled log was not found yet",
+                    fill.destination_lock_id
+                )),
+            },
+            NONE => Err(format!(
+                "destination lock {} reads as empty; the node may be behind",
+                fill.destination_lock_id
+            )),
+            _ => Ok(()),
+        }
+    }
+
+    async fn redeem(&self, fill: &Fill) -> Result<()> {
+        let Some(secret) = fill.secret else {
+            return Ok(());
+        };
+        let Some(&lock_address) = self.source_locks.get(&fill.src_chain_id) else {
+            return Ok(());
+        };
+        let lock = SourceLock::new(lock_address, self.provider(fill.src_chain_id)?);
+        let on_chain = lock.locks(fill.src_lock_id).call().await.map_err(err)?;
+        match on_chain.state {
+            CLAIMED => {
+                return self
+                    .store
+                    .set_fill_status(fill.destination_lock_id, "claimed")
+                    .await
+                    .map_err(err)
+            }
+            REFUNDED => return self.mark_missed(fill).await,
+            OPEN => {}
+            _ => {
+                return Err(format!(
+                    "source lock {} reads as empty; the node may be behind",
+                    fill.src_lock_id
+                ))
+            }
+        }
+        let now = self.chain_time(fill.src_chain_id).await?;
+        if now >= on_chain.expiry {
+            // Confirm with a second read before giving up the redeem.
+            let again = lock.locks(fill.src_lock_id).call().await.map_err(err)?;
+            let now = self.chain_time(fill.src_chain_id).await?;
+            if again.state == OPEN && now >= again.expiry {
+                return self.mark_missed(fill).await;
+            }
+            return Ok(());
+        }
+        match self
+            .send(
+                fill.src_chain_id,
+                lock.claim(fill.src_lock_id, secret)
+                    .into_transaction_request(),
+            )
+            .await?
+        {
+            Sent::Mined(hash) => {
+                eprintln!(
+                    "matchmaker: redeemed source lock {} in {hash}",
+                    fill.src_lock_id
+                );
+                self.store
+                    .set_fill_status(fill.destination_lock_id, "claimed")
+                    .await
+                    .map_err(err)
+            }
+            Sent::WouldRevert(reason) => Err(format!("claim would revert: {reason}")),
+        }
+    }
+
+    async fn mark_missed(&self, fill: &Fill) -> Result<()> {
+        eprintln!(
+            "matchmaker: MISSED source lock {} for order {}: the shop was paid but the lock expired or was refunded",
+            fill.src_lock_id, fill.order_id
+        );
+        self.store
+            .set_fill_status(fill.destination_lock_id, "missed")
+            .await
+            .map_err(err)
+    }
+
+    /// Bob's destination locks that timed out unclaimed: send the USDT back into his strategy.
+    async fn refund_expired_destinations(&self) {
+        let fills = match self.store.fills_with_status("filled").await {
+            Ok(fills) => fills,
+            Err(e) => return eprintln!("matchmaker: destination refunds: {}", err(e)),
+        };
+        if fills.is_empty() {
+            return;
+        }
+        let now = match self.chain_time(self.shop_chain_id).await {
+            Ok(now) => now,
+            Err(e) => return eprintln!("matchmaker: destination refunds: {e}"),
+        };
+        for fill in fills
+            .into_iter()
+            .filter(|f| f.destination_expiry <= now)
+            .take(REFUNDS_PER_PASS)
+        {
+            if let Err(e) = self.refund_destination(&fill).await {
+                eprintln!(
+                    "matchmaker: destination refund for order {}: {e}",
+                    fill.order_id
+                );
+            }
+        }
+    }
+
+    async fn refund_destination(&self, fill: &Fill) -> Result<()> {
+        let destination =
+            DestinationLock::new(self.destination_lock, self.provider(self.shop_chain_id)?);
+        let state = destination
+            .locks(fill.destination_lock_id)
+            .call()
+            .await
+            .map_err(err)?
+            .state;
+        match state {
+            OPEN => match self
+                .send(
+                    self.shop_chain_id,
+                    destination
+                        .refund(fill.destination_lock_id)
+                        .into_transaction_request(),
+                )
+                .await?
+            {
+                Sent::Mined(hash) => {
+                    eprintln!(
+                        "matchmaker: refunded destination lock {} in {hash}",
+                        fill.destination_lock_id
+                    );
+                    self.store
+                        .set_fill_status(fill.destination_lock_id, "refunded")
+                        .await
+                        .map_err(err)
+                }
+                Sent::WouldRevert(reason) => Err(format!("refund would revert: {reason}")),
+            },
+            REFUNDED => self
+                .store
+                .set_fill_status(fill.destination_lock_id, "refunded")
+                .await
+                .map_err(err),
+            CLAIMED => Ok(()), // the redeem loop moves it to settled
+            _ => Err(format!(
+                "destination lock {} reads as empty; the node may be behind",
+                fill.destination_lock_id
+            )),
+        }
+    }
+
+    /// Source locks of Bob's fills that timed out unredeemed: send the USDC back to the customer.
+    /// Only locks Bob filled are handled, so nobody can make Bob pay gas for locks he never used.
+    async fn refund_expired_sources(&self) {
+        for (&chain_id, &lock_address) in &self.source_locks {
+            let now = match self.chain_time(chain_id).await {
+                Ok(now) => now,
+                Err(e) => {
+                    eprintln!("matchmaker: source refunds on chain {chain_id}: {e}");
+                    continue;
+                }
+            };
+            let due = match self
+                .store
+                .source_refunds_due(chain_id, now, REFUNDS_PER_PASS as u32)
+                .await
+            {
+                Ok(due) => due,
+                Err(e) => {
+                    eprintln!("matchmaker: source refunds on chain {chain_id}: {}", err(e));
+                    continue;
+                }
+            };
+            for fill in due {
+                if let Err(e) = self.refund_source(chain_id, lock_address, &fill, now).await {
+                    eprintln!(
+                        "matchmaker: source refund for lock {}: {e}",
+                        fill.src_lock_id
+                    );
+                }
+            }
+        }
+    }
+
+    async fn refund_source(
+        &self,
+        chain_id: u64,
+        lock_address: Address,
+        fill: &Fill,
+        now: u64,
+    ) -> Result<()> {
+        let lock = SourceLock::new(lock_address, self.provider(chain_id)?);
+        let on_chain = lock.locks(fill.src_lock_id).call().await.map_err(err)?;
+        match on_chain.state {
+            OPEN if on_chain.expiry <= now => {}
+            OPEN => return Ok(()),
+            CLAIMED | REFUNDED => {
+                return self
+                    .store
+                    .source_done(fill.destination_lock_id)
+                    .await
+                    .map_err(err)
+            }
+            _ => {
+                return Err(format!(
+                    "source lock {} reads as empty; the node may be behind",
+                    fill.src_lock_id
+                ))
+            }
+        }
+        match self
+            .send(
+                chain_id,
+                lock.refund(fill.src_lock_id).into_transaction_request(),
+            )
+            .await?
+        {
+            Sent::Mined(hash) => {
+                eprintln!(
+                    "matchmaker: refunded source lock {} in {hash}",
+                    fill.src_lock_id
+                );
+                self.store
+                    .source_done(fill.destination_lock_id)
+                    .await
+                    .map_err(err)
+            }
+            Sent::WouldRevert(reason) => Err(format!("refund would revert: {reason}")),
+        }
+    }
+
+    /// Reports queued events in order. A temporary failure stops here to keep the order; an event
+    /// the Order Desk refuses for good is moved to `dead_letters` so it cannot block the rest.
+    async fn flush_outbox(&self) {
+        let items = match self.store.outbox().await {
+            Ok(items) => items,
+            Err(e) => return eprintln!("matchmaker: reporting: {}", err(e)),
+        };
+        for (chain_id, tx_hash, log_index, body) in items {
+            let done = match self.desk.report(&body).await {
+                Ok(()) => self.store.dequeue(chain_id, &tx_hash, log_index).await,
+                Err(ReportError::Rejected(reason)) => {
+                    eprintln!("matchmaker: Order Desk refused event {tx_hash}:{log_index}; kept in dead_letters: {reason}");
+                    self.store
+                        .dead_letter(chain_id, &tx_hash, log_index, &body, &reason)
+                        .await
+                }
+                Err(ReportError::Retry(reason)) => {
+                    return eprintln!("matchmaker: reporting: {reason}")
+                }
+            };
+            if let Err(e) = done {
+                return eprintln!("matchmaker: reporting: {}", err(e));
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use alloy::primitives::address;
+
+    #[test]
+    fn urls_are_removed_from_error_text() {
+        assert_eq!(
+            redact_urls("error sending request for url (https://rpc.ankr.com/base_sepolia/SECRETKEY): timeout"),
+            "error sending request for url (<rpc>): timeout"
+        );
+        assert_eq!(redact_urls("no url here"), "no url here");
+        assert_eq!(redact_urls("http://a/1 and https://b/2"), "<rpc> and <rpc>");
+        assert_eq!(
+            redact_urls("a https://x/KEY b http://y/z"),
+            "a <rpc> b <rpc>"
+        );
+    }
+
+    #[test]
+    fn only_range_errors_shrink_the_log_range() {
+        assert!(is_range_error(
+            "query returned more than 10000 results; try with this block range"
+        ));
+        assert!(is_range_error("block range is too wide"));
+        assert!(!is_range_error("429 Too Many Requests: rate limited"));
+        assert!(!is_range_error("operation timed out"));
+        assert!(!is_range_error("connection reset"));
+    }
+
+    #[test]
+    fn local_destination_lock_id_matches_the_live_contract() {
+        // Checked against DestinationLock.lockIdFor on Whitechain Sepolia (cast call).
+        let id = destination_lock_id(
+            1874,
+            address!("669c928135B848C828144360aD7a73391968BDA3"),
+            84532,
+            B256::repeat_byte(0x42),
+            address!("C2bF8030f00CAB26c4611f93c5F71b9d01Ec120A"),
+        );
+        assert_eq!(id, EXPECTED_ID);
+    }
+
+    const EXPECTED_ID: B256 = alloy::primitives::b256!(
+        "6b2a6c18d08a7ee37c0ec7f5b7edee81bb20cc12cf69c7b45f35aa61bd250ba2"
+    );
+}
