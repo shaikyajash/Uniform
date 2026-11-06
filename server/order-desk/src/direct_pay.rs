@@ -88,6 +88,18 @@ pub fn typed_data(token: &Token, chain_id: u64, note: &Note) -> Value {
     })
 }
 
+/// The same note as a `TransferWithAuthorization`: anyone may submit it, and the USDT goes straight
+/// to `to`. Used for a shop's refund to the customer.
+pub fn transfer_typed_data(token: &Token, chain_id: u64, note: &Note) -> Value {
+    let mut data = typed_data(token, chain_id, note);
+    let fields = data["types"]["ReceiveWithAuthorization"].take();
+    let types = data["types"].as_object_mut().expect("types is an object");
+    types.remove("ReceiveWithAuthorization");
+    types.insert("TransferWithAuthorization".into(), fields);
+    data["primaryType"] = json!("TransferWithAuthorization");
+    data
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

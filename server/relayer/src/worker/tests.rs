@@ -143,6 +143,7 @@ impl Chain for FakeChain {
             Call::DirectPay(call) => call.amount.0,
             Call::SourceLock(call) => call.amount.0,
             Call::DirectRefund(call) => call.amount.0,
+            Call::TransferRefund(call) => call.amount.0,
             Call::DestinationClaim(_) | Call::SourceRefund { .. } => U256::ZERO,
         };
         self.with(|state| {
@@ -775,6 +776,33 @@ async fn a_mined_shop_refund_marks_the_order_partly_then_fully_refunded(pool: Pg
     chain.mine(hash, false);
     assert_eq!(outcome(&pool, &chain, NOW + 100 + RECEIPT_POLL_SECONDS).await, Some(Outcome::Confirmed(hash)));
     assert_eq!(statuses(&pool, rest).await, ("confirmed".into(), "refunded".into()));
+}
+
+/// A shop's USDT refund of `amount` of order 1, paid cross-chain, straight to the customer.
+fn transfer_refund(amount: u64, refunded_before: u64) -> Job {
+    let signature = PrivateKeySigner::random().sign_hash_sync(&note(8)).unwrap();
+    Job::TransferRefund {
+        order_id: order_id(1).parse().unwrap(),
+        merchant: SHOP,
+        customer: PAYER,
+        amount: Amount::from(amount),
+        refunded_before: Amount::from(refunded_before),
+        valid_after: NOW - 60,
+        valid_before: NOW + 1_800,
+        nonce: B256::repeat_byte(if refunded_before == 0 { 0xb1 } else { 0xb2 }),
+        signature: Bytes::from(signature.as_bytes().to_vec()),
+    }
+}
+
+#[sqlx::test(migrations = "../order-desk/migrations")]
+async fn a_mined_usdt_refund_of_a_cross_chain_payment_marks_the_order_refunded(pool: PgPool) {
+    let job = add_order_and_job(&pool, 1, AMOUNT, "paid", &transfer_refund(AMOUNT, 0)).await;
+    sqlx::query("UPDATE orders SET path = 'crosschain'").execute(&pool).await.unwrap();
+    let chain = FakeChain::new();
+    let hash = sent(&pool, &chain, NOW).await;
+    chain.mine(hash, false);
+    assert_eq!(outcome(&pool, &chain, NOW + RECEIPT_POLL_SECONDS).await, Some(Outcome::Confirmed(hash)));
+    assert_eq!(statuses(&pool, job).await, ("confirmed".into(), "refunded".into()));
 }
 
 #[sqlx::test(migrations = "../order-desk/migrations")]

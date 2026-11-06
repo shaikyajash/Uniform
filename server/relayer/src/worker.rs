@@ -21,7 +21,7 @@ use alloy::primitives::{B256, Bytes, U256};
 use common::{amount::Amount, jobs::Job};
 use sqlx::{PgConnection, PgPool, postgres::PgQueryResult};
 
-use crate::chain::{Call, Chain, ChainError, Mined, SignedTx};
+use crate::chain::{Call, Chain, ChainError, Mined, RefundCall, SignedTx, TransferRefundCall};
 
 /// What the operator sets; see `main.rs` for the environment variables.
 #[derive(Debug, Clone)]
@@ -482,8 +482,9 @@ impl Taken<'_> {
                 }
             }
             // A shop refund: `refunded` once the whole payment is back with the customer.
-            Call::DirectRefund(call) => {
-                let total = call.refunded_before.0 + call.amount.0;
+            Call::DirectRefund(RefundCall { refunded_before, amount, .. })
+            | Call::TransferRefund(TransferRefundCall { refunded_before, amount, .. }) => {
+                let total = refunded_before.0 + amount.0;
                 sqlx::query(
                     "UPDATE orders
                      SET status = CASE WHEN $2::numeric >= amount THEN 'refunded' ELSE 'partially_refunded' END

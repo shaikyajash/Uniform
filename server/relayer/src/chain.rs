@@ -20,7 +20,7 @@ use alloy::{
 use common::{
     amount::Amount,
     chains::Chain as ChainConfig,
-    jobs::Job,
+    jobs::{Job, transfer_refund_nonce},
     locks::{SourceLockParams, hashlock_of, source_lock_id},
 };
 
@@ -44,10 +44,14 @@ sol! {
     }
 
     /// USDT on Whitechain, and USDC or EURC on customer chains: the EIP-3009 parts.
+    #[allow(clippy::too_many_arguments)]
     #[sol(rpc)]
     interface IToken {
         function balanceOf(address owner) external view returns (uint256);
         function authorizationState(address authorizer, bytes32 nonce) external view returns (bool);
+        function transferWithAuthorization(address from, address to, uint256 value, uint256 validAfter,
+            uint256 validBefore, bytes32 nonce, uint8 v, bytes32 r, bytes32 s) external;
+        event AuthorizationUsed(address indexed authorizer, bytes32 indexed nonce);
     }
 
     /// Tether's block list (USDT).
@@ -186,6 +190,24 @@ pub struct RefundCall {
     pub s: B256,
 }
 
+/// A shop's USDT refund of a cross-chain or split payment: `USDT.transferWithAuthorization` from the
+/// shop's payout wallet to the customer.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TransferRefundCall {
+    pub order_id: B256,
+    pub merchant: Address,
+    pub customer: Address,
+    pub amount: Amount,
+    pub refunded_before: Amount,
+    pub valid_after: u64,
+    pub valid_before: u64,
+    /// `transfer_refund_nonce(..)`: the note's nonce.
+    pub nonce: B256,
+    pub v: u8,
+    pub r: B256,
+    pub s: B256,
+}
+
 /// `DestinationLock.claim`, and what the lock must promise before the secret is sent.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ClaimCall {
@@ -205,6 +227,7 @@ pub enum Call {
     DestinationClaim(ClaimCall),
     SourceRefund { lock_id: B256 },
     DirectRefund(RefundCall),
+    TransferRefund(TransferRefundCall),
 }
 
 impl Call {
@@ -275,6 +298,32 @@ impl Call {
                     s,
                 })
             }
+            Job::TransferRefund {
+                order_id,
+                merchant,
+                customer,
+                amount,
+                refunded_before,
+                valid_after,
+                valid_before,
+                nonce,
+                signature,
+            } => {
+                let (v, r, s) = split_signature(signature)?;
+                Call::TransferRefund(TransferRefundCall {
+                    order_id: *order_id,
+                    merchant: *merchant,
+                    customer: *customer,
+                    amount: *amount,
+                    refunded_before: *refunded_before,
+                    valid_after: *valid_after,
+                    valid_before: *valid_before,
+                    nonce: *nonce,
+                    v,
+                    r,
+                    s,
+                })
+            }
         })
     }
 
@@ -287,14 +336,17 @@ impl Call {
             Call::DestinationClaim(call) => call.lock_id,
             Call::SourceRefund { lock_id } => *lock_id,
             Call::DirectRefund(call) => call.nonce,
+            Call::TransferRefund(call) => call.nonce,
         }
     }
 
-    /// The first indexed topic of the log this call emits. The done id, except for a shop refund,
-    /// whose `Refunded` log is under the payment id.
+    /// The first indexed topic of the log this call emits. The done id, except for a shop refund:
+    /// DirectPay's `Refunded` log is under the payment id, and USDT's `AuthorizationUsed` under the
+    /// shop's address.
     pub fn log_topic(&self) -> B256 {
         match self {
             Call::DirectRefund(call) => call.payment_id,
+            Call::TransferRefund(call) => call.merchant.into_word(),
             _ => self.done_id(),
         }
     }
@@ -307,6 +359,7 @@ impl Call {
             Call::DestinationClaim(call) => Some(call.deadline),
             Call::SourceRefund { .. } => None,
             Call::DirectRefund(call) => Some(call.valid_before),
+            Call::TransferRefund(call) => Some(call.valid_before),
         }
     }
 
@@ -315,7 +368,7 @@ impl Call {
     /// claim or a lock refund finishes money already locked, so it is sent even when the shop has
     /// spent its budget.
     pub fn uses_shop_budget(&self) -> bool {
-        matches!(self, Call::DirectPay(_) | Call::SourceLock(_) | Call::DirectRefund(_))
+        matches!(self, Call::DirectPay(_) | Call::SourceLock(_) | Call::DirectRefund(_) | Call::TransferRefund(_))
     }
 
     /// The amount checked against the Relayer's order limit, in 6-decimal units. A lock carries
@@ -324,7 +377,7 @@ impl Call {
         match self {
             Call::DirectPay(call) => Some(call.amount.0),
             Call::SourceLock(call) => Some(call.amount.0 * U256::from(100u64) / U256::from(101u64)),
-            Call::DestinationClaim(_) | Call::SourceRefund { .. } | Call::DirectRefund(_) => None,
+            Call::DestinationClaim(_) | Call::SourceRefund { .. } | Call::DirectRefund(_) | Call::TransferRefund(_) => None,
         }
     }
 
@@ -337,7 +390,7 @@ impl Call {
     /// For messages: what runs out at the deadline.
     pub fn what_runs_out(&self) -> &'static str {
         match self {
-            Call::DirectPay(_) | Call::SourceLock(_) | Call::DirectRefund(_) => "the note",
+            Call::DirectPay(_) | Call::SourceLock(_) | Call::DirectRefund(_) | Call::TransferRefund(_) => "the note",
             Call::DestinationClaim(_) | Call::SourceRefund { .. } => "the lock",
         }
     }
@@ -366,6 +419,22 @@ impl RefundCall {
             amount: self.amount.0,
             validAfter: U256::from(self.valid_after),
             validBefore: U256::from(self.valid_before),
+            v: self.v,
+            r: self.r,
+            s: self.s,
+        }
+    }
+}
+
+impl TransferRefundCall {
+    fn abi(&self) -> IToken::transferWithAuthorizationCall {
+        IToken::transferWithAuthorizationCall {
+            from: self.merchant,
+            to: self.customer,
+            value: self.amount.0,
+            validAfter: U256::from(self.valid_after),
+            validBefore: U256::from(self.valid_before),
+            nonce: self.nonce,
             v: self.v,
             r: self.r,
             s: self.s,
@@ -525,6 +594,7 @@ impl Rpc {
                 ISourceLock::refundCall { lockId: *lock_id }.abi_encode(),
             ),
             Call::DirectRefund(call) => (self.need(self.contracts.direct_pay, "DirectPay")?, call.abi().abi_encode()),
+            Call::TransferRefund(call) => (self.need(self.contracts.usdt, "USDT")?, call.abi().abi_encode()),
         })
     }
 
@@ -648,6 +718,33 @@ impl Rpc {
         Ok(())
     }
 
+    /// A shop's USDT refund: the nonce must be the one for this order, customer, amount and earlier
+    /// refunds, Tether must not have blocked either side, and the shop must hold the USDT.
+    async fn check_transfer_refund(&self, call: &TransferRefundCall) -> Result<(), ChainError> {
+        let usdt = self.need(self.contracts.usdt, "USDT")?;
+        let nonce = transfer_refund_nonce(
+            self.chain_id,
+            usdt,
+            call.order_id,
+            call.customer,
+            call.amount,
+            call.refunded_before,
+        );
+        if nonce != call.nonce {
+            return refuse("the note's nonce is not the one for this refund");
+        }
+        let tether = ITether::new(usdt, &self.provider);
+        for (who, address) in [("merchant", call.merchant), ("customer", call.customer)] {
+            if self.contract(async { tether.isBlocked(address).call().await }).await? {
+                return refuse(format!("the {who} is blocked by USDT"));
+            }
+        }
+        if self.balance(usdt, call.merchant).await? < call.amount.0 {
+            return refuse("the merchant does not have enough USDT for the refund");
+        }
+        Ok(())
+    }
+
     /// Whether the lock has timed out is the chain's call: the dry run runs on its clock.
     async fn check_refund(&self, lock_id: B256) -> Result<(), ChainError> {
         match self.source_lock_state(lock_id).await?.state {
@@ -672,6 +769,9 @@ impl Chain for Rpc {
             Call::DirectRefund(call) => {
                 self.note_used(self.need(self.contracts.usdt, "USDT")?, call.merchant, call.nonce).await
             }
+            Call::TransferRefund(call) => {
+                self.note_used(self.need(self.contracts.usdt, "USDT")?, call.merchant, call.nonce).await
+            }
         }
     }
 
@@ -682,6 +782,7 @@ impl Chain for Rpc {
             Call::DestinationClaim(call) => self.check_claim(call, now).await?,
             Call::SourceRefund { lock_id } => self.check_refund(*lock_id).await?,
             Call::DirectRefund(call) => self.check_direct_refund(call).await?,
+            Call::TransferRefund(call) => self.check_transfer_refund(call).await?,
         }
         self.dry_run(call).await
     }
@@ -745,6 +846,7 @@ impl Chain for Rpc {
                 (self.need(self.contracts.source_lock, "SourceLock")?, ISourceLock::Refunded::SIGNATURE_HASH)
             }
             Call::DirectRefund(_) => (self.need(self.contracts.direct_pay, "DirectPay")?, IDirectPay::Refunded::SIGNATURE_HASH),
+            Call::TransferRefund(_) => (self.need(self.contracts.usdt, "USDT")?, IToken::AuthorizationUsed::SIGNATURE_HASH),
         };
         let latest = self.rpc(self.provider.get_block_number().into_future()).await?;
         let filter = Filter::new()
@@ -759,6 +861,8 @@ impl Chain for Rpc {
         let ours = |log: &&alloy::rpc::types::Log| match call {
             Call::DirectRefund(call) => IDirectPay::Refunded::decode_log_data(log.data())
                 .is_ok_and(|event| event.totalRefunded == call.refunded_before.0 + call.amount.0),
+            // The shop authorizes many transfers: ours is the one under this note's nonce.
+            Call::TransferRefund(call) => log.topics().get(2) == Some(&call.nonce),
             _ => true,
         };
         Ok(logs.iter().find(ours).and_then(|log| log.transaction_hash))

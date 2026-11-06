@@ -1,6 +1,6 @@
 "use client";
 
-// The merchant's orders, newest first, with refunds for Path A payments.
+// The merchant's orders, newest first, with refunds in USDT for every paid order.
 
 import { useWallets } from "@privy-io/react-auth";
 import { useMemo, useState } from "react";
@@ -183,7 +183,7 @@ function OrdersTable({ orders, onRefund }: { orders: OrderRow[] | null; onRefund
 function OrderLine({ order, onRefund }: { order: OrderRow; onRefund: (order: OrderRow) => void }) {
   const status = ORDER_STATUS[order.status];
   const refundable =
-    order.path === "direct" &&
+    order.path !== null &&
     (order.status === "paid" || order.status === "partially_refunded") &&
     order.refundStatus !== "pending" &&
     order.refundStatus !== "sending" &&
@@ -245,7 +245,7 @@ function OrderLine({ order, onRefund }: { order: OrderRow; onRefund: (order: Ord
   );
 }
 
-/** Refund part or all of a Path A payment: the payout wallet signs a note, the Relayer sends it. */
+/** Refund part or all of a payment in USDT: the payout wallet signs a note, the Relayer sends it. */
 function RefundDialog({
   session,
   order,
@@ -314,6 +314,7 @@ function RefundDialog({
           <DialogDescription className="leading-[1.65]">
             The USDT goes from your payout wallet back to the customer who paid. Your wallet signs a note; Uniform sends
             it and pays the gas.
+            {order && order.path !== "direct" && " They paid in USDC; the refund is USDT on Whitechain, to the same address."}
           </DialogDescription>
         </DialogHeader>
         <form
