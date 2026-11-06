@@ -9,10 +9,10 @@ const display = Google_Sans({ variable: "--font-google-sans", subsets: ["latin"]
 
 export const metadata: Metadata = {
   title: "Uniform",
-  description: "Stablecoin checkout. Shops receive USDT on Whitechain, customers pay no gas.",
+  description: "Stablecoin checkout. Merchants receive USDT on Whitechain, customers pay no gas.",
 };
 
-// Inside the checkout widget's card (an iframe on a shop's page) the site's nav and side lines are
+// Inside the checkout widget's card (an iframe on a merchant's page) the site's nav and side lines are
 // hidden. Set before the first paint, so they never flash.
 const MARK_EMBEDDED = "try{if(self!==top)document.documentElement.dataset.embedded=''}catch(e){document.documentElement.dataset.embedded=''}";
 

@@ -69,7 +69,7 @@ pub async fn reveal(
     if status != OrderStatus::DestinationLocked {
         return Err(ApiError::conflict(
             "not_ready",
-            format!("order is {status}; the secret is only taken once the shop's lock is open"),
+            format!("order is {status}; the secret is only taken once the merchant's lock is open"),
         ));
     }
     let hashlock: B256 = order.hashlock.as_deref().unwrap_or_default().parse().map_err(ApiError::internal)?;

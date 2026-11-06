@@ -28,7 +28,7 @@ for url in $BASE $WC $ETH; do cast rpc anvil_setBalance "$RELAYER" 0xDE0B6B3A764
 
 dropdb --if-exists uniform_e2e; createdb uniform_e2e
 cd "$SERVER"
-DATABASE_URL=$DB ./target/debug/order-desk add-shop --name "Kettle & Co" --payout $SHOP \
+DATABASE_URL=$DB ./target/debug/order-desk add-merchant --name "Kettle & Co" --payout $SHOP \
   | awk '/API key:/ {print $3}' > "$STATE/shop.key"
 
 # Only our own earlier run: a dev Order Desk or Relayer started elsewhere keeps running.

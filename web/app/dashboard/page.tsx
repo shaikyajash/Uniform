@@ -5,7 +5,7 @@ import { Dashboard } from "./dashboard";
 
 export const metadata: Metadata = { title: "Dashboard · Uniform" };
 
-/** `/dashboard`: the shop's payments, refunds, webhooks and settings, behind a payout-wallet sign-in. */
+/** `/dashboard`: the merchant's payments, refunds, webhooks and settings, behind a payout-wallet sign-in. */
 export default function DashboardPage() {
   return (
     <main className="relative min-h-screen overflow-x-hidden px-[calc(var(--gutter)+20px)] pt-[max(120px,14vh)] pb-20">

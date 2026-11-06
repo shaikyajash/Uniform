@@ -1,17 +1,17 @@
 /*
- * Uniform checkout widget. A shop adds one script and one button:
+ * Uniform checkout widget. A merchant adds one script and one button:
  *
  *   <script src="https://<uniform>/widget.js" defer></script>
  *   <button data-uniform-checkout="/api/checkout">Pay</button>
  *
- * On click, the widget POSTs to the shop's own endpoint (which creates the order with the shop's
- * API key, on the shop's server) and expects `{ payUrl }` back. It opens Uniform's pay page in a
- * card over the shop's page (an iframe in a dialog), the same in every browser: no new tab and no
+ * On click, the widget POSTs to the merchant's own endpoint (which creates the order with the merchant's
+ * API key, on the merchant's server) and expects `{ payUrl }` back. It opens Uniform's pay page in a
+ * card over the merchant's page (an iframe in a dialog), the same in every browser: no new tab and no
  * separate window. On a phone the card fills the screen. When the order is paid the card closes by
  * itself, and the widget fires `uniform:paid` (detail: { orderId }) on the button; closing the
  * card first fires `uniform:closed`.
  *
- * The pay page runs on Uniform's own origin inside the iframe, so the shop page's scripts cannot
+ * The pay page runs on Uniform's own origin inside the iframe, so the merchant page's scripts cannot
  * reach the customer's login or signatures. "Paid" is only believed from that iframe and origin.
  *
  * From code: `Uniform.checkout(payUrlOrFunction)` returns a promise for { orderId }.
@@ -104,7 +104,7 @@
     box.appendChild(body);
     root.appendChild(box);
 
-    // The shop's page stays put underneath; it must not scroll behind the card.
+    // The merchant's page stays put underneath; it must not scroll behind the card.
     var html = document.documentElement;
     var overflow = html.style.overflow;
     html.style.overflow = "hidden";
@@ -192,7 +192,7 @@
         },
         function (error) {
           if (done) return;
-          ui.fail((error && error.message) || "The shop couldn't create the order.");
+          ui.fail((error && error.message) || "The merchant couldn't create the order.");
         },
       );
     });
@@ -210,7 +210,7 @@
         return fetch(endpoint, { method: "POST", headers: { "content-type": "application/json" }, body: body })
           .then(function (response) {
             return response.json().then(function (json) {
-              if (!response.ok || !json.payUrl) throw new Error(json.error || "The shop couldn't create the order.");
+              if (!response.ok || !json.payUrl) throw new Error(json.error || "The merchant couldn't create the order.");
               return json.payUrl;
             });
           });

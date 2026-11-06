@@ -1,7 +1,7 @@
 # To do
 
 What is left, in one place. A is chain side (contracts, Matchmaker, Earn page); B is app side
-(Order Desk, Gas Payer, notifier, web, demo shop). Tick an item in the PR that does it.
+(Order Desk, Gas Payer, notifier, web, demo store). Tick an item in the PR that does it.
 
 Deadline: Sat Nov 7, 09:00 IST. Feature freeze: Sat 02:00.
 
@@ -12,11 +12,11 @@ Deadline: Sat Nov 7, 09:00 IST. Feature freeze: Sat 02:00.
 - [x] **A8: split payments** (part on Base, part on Ethereum Sepolia; see the A8 plan). The pay
   page (B5) must send `legs` in `POST /quote` and `signatures` in `POST /legs`, and sign every
   note behind one **Pay** click with Privy's `showWalletUIs: false` (see the A8 plan). (A + B)
-- [ ] **A9: shop refunds** on the cross-chain path. (A)
+- [ ] **A9: merchant refunds** on the cross-chain path. (A)
 - [ ] **A10: Earn page.** (A)
 
 ## Safety and correctness
-- [ ] **`Settled` must say which lock and which shop.** Add `destinationLockId` and `merchant`, so the
+- [ ] **`Settled` must say which lock and which merchant.** Add `destinationLockId` and `merchant`, so the
   Order Desk can tell a real payment from a fake one. Today, anyone can open a lock with an order's
   id and claim it, and the Matchmaker reports that `Settled` too. (A, Matchmaker and `common`)
 - [x] **The Matchmaker should fill only our exact lock** (A8: it fills only locks in the order's
@@ -41,7 +41,7 @@ Deadline: Sat Nov 7, 09:00 IST. Feature freeze: Sat 02:00.
   does not eat Bob's 15 minutes. (B)
 - [ ] **Limit failed payments per wallet.** A user can make us pay gas for a lock plus a refund,
   over and over, with orders Bob will not fill; a split makes it easier (empty one chain before the
-  Gas Payer sends). The shop's daily gas budget caps this at about twice the budget per shop per
+  Gas Payer sends). The merchant's daily gas budget caps this at about twice the budget per merchant per
   day. To make it tighter, limit failed cross-chain payments per wallet per hour. (B)
 - [ ] **Webhooks must watch the order's status.** `paid` is written in two places: by the Gas Payer
   when its claim is mined, and by `Settled`. So the notifier must react to the order's status, not

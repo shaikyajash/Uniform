@@ -153,7 +153,7 @@ mod tests {
     }
 
     async fn owner_for(pool: &PgPool, header: &str) -> Result<i64, StatusCode> {
-        let request = Request::builder().uri("/v1/shop").header(AUTHORIZATION, header);
+        let request = Request::builder().uri("/v1/merchant").header(AUTHORIZATION, header);
         let (mut parts, ()) = request.body(()).unwrap().into_parts();
         Owner::from_request_parts(&mut parts, pool).await.map(|owner| owner.merchant_id).map_err(|error| error.status)
     }

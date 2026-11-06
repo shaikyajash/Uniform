@@ -1,8 +1,8 @@
 # A8: split payments (Path C)
 
 One order, paid from two chains at once: part of the USDC locked on Base Sepolia, the rest on
-Ethereum Sepolia, both for Bob and under one hashlock. Bob fills the shop's destination lock only
-once every lock is in and together they cover the order plus his fee. One secret then pays the shop
+Ethereum Sepolia, both for Bob and under one hashlock. Bob fills the merchant's destination lock only
+once every lock is in and together they cover the order plus his fee. One secret then pays the merchant
 and lets Bob redeem every lock. If any lock is missing, Bob never fills, and every lock that did
 open is refunded after its expiry.
 
@@ -84,7 +84,7 @@ destination lock as before. Its `srcChainId` and `srcLockId` name the first leg,
 
 - Unit tests: Matchmaker 45, Order Desk 66, Gas Payer 34.
 - Fork test (`server/order-desk/e2e/pay.sh <amount> <label> split|split-missing`):
-  - split: 1 USDC on Base plus the rest on Ethereum pays the shop, and Bob redeems both.
+  - split: 1 USDC on Base plus the rest on Ethereum pays the merchant, and Bob redeems both.
   - missing leg: Bob does not fill, the Base lock is refunded in full after expiry, and the order
     ends `returned`.
 

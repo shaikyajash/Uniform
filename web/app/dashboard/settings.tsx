@@ -1,6 +1,6 @@
 "use client";
 
-// The shop's settings: where webhooks go, the secret that signs them, and the API key.
+// The merchant's settings: where webhooks go, the secret that signs them, and the API key.
 
 import { useState, type ReactNode } from "react";
 import { Check, Copy, Eye, EyeOff, Loader2 } from "lucide-react";
@@ -43,7 +43,7 @@ export function Settings({
   }
   return (
     <div className="grid gap-6">
-      <Panel title="Shop">
+      <Panel title="Merchant">
         <Row label="Name">{settings.name}</Row>
         <Row label="Paid to">
           <span className="font-mono text-[13px]">{settings.payoutAddress}</span>
@@ -95,7 +95,7 @@ function WebhookUrl({ session, settings, onChange }: { session: Session; setting
       >
         <Input
           type="url"
-          placeholder="https://your-shop.com/uniform/webhook"
+          placeholder="https://your-site.com/uniform/webhook"
           value={url}
           onChange={(event) => setUrl(event.target.value)}
           className="h-10 border-hair-strong bg-black/30 font-mono text-[13px]"

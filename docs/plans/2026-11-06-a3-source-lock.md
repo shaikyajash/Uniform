@@ -585,7 +585,7 @@ interface IDomain {
 /// End-to-end check of SourceLock on Base Sepolia with test wallets: the customer signs a lock
 /// for the receiver, the gas payer submits it, then claims it with the secret (source redeem).
 /// Reads CUSTOMER_PRIVATE_KEY, GAS_PAYER_PRIVATE_KEY, SOURCE_LOCK and optional AMOUNT and
-/// RECEIVER (defaults to the shop test wallet) from the env.
+/// RECEIVER (defaults to the merchant test wallet) from the env.
 contract TrySourceLock is Script {
     IERC20 constant USDC = IERC20(0x036CbD53842c5426634e7929541eC2318f3dCF7e);
     bytes32 constant RECEIVE_TYPEHASH = keccak256(

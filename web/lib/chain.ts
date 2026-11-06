@@ -1,4 +1,4 @@
-// The chains, from shared/chains.json via next.config.ts: the shop chain (Whitechain, where shops
+// The chains, from shared/chains.json via next.config.ts: the merchant chain (Whitechain, where merchants
 // are paid in USDT) and the customer chains a payment can come from (USDC, through a SourceLock).
 // Everything here reads the chains directly, so the pay page never has to trust the Order Desk
 // about money.
@@ -89,7 +89,7 @@ export function explorerTx(chainId: number, hash: string): string {
   return `${base.replace(/\/$/, "")}/tx/${hash}`;
 }
 
-/** The wallet's USDT on the shop chain, in base units. */
+/** The wallet's USDT on the merchant chain, in base units. */
 export async function usdtBalance(owner: Address): Promise<bigint> {
   return shopClient.readContract({ address: shopChain.usdt, abi: erc20Abi, functionName: "balanceOf", args: [owner] });
 }
@@ -155,7 +155,7 @@ export type LockCheck = { ok: true } | { ok: false; reason: string };
 
 /**
  * SPEC, before revealing the secret: read both locks on chain and check that Bob's lock pays this
- * shop at least the order amount, under our hashlock, and ends well before the customer's lock.
+ * merchant at least the order amount, under our hashlock, and ends well before the customer's lock.
  * The lock checked is the one only Bob can open for our source lock, recomputed here.
  */
 export async function checkShopLock(args: {
@@ -186,12 +186,12 @@ export async function checkShopLock(args: {
     args: [id],
   });
   const now = BigInt(Math.floor(Date.now() / 1000));
-  if (state !== LOCK_OPEN) return { ok: false, reason: "the shop's lock is not open yet" };
-  if (maker.toLowerCase() !== receiver.toLowerCase()) return { ok: false, reason: "the shop's lock is from someone else" };
+  if (state !== LOCK_OPEN) return { ok: false, reason: "the merchant's lock is not open yet" };
+  if (maker.toLowerCase() !== receiver.toLowerCase()) return { ok: false, reason: "the merchant's lock is from someone else" };
   if (merchant.toLowerCase() !== args.merchant.toLowerCase()) return { ok: false, reason: "the lock pays another address" };
   if (amount < args.amountUnits) return { ok: false, reason: "the lock holds less than the order" };
   if (hashlock.toLowerCase() !== args.hashlock.toLowerCase()) return { ok: false, reason: "the lock is under another key" };
-  if (expiry + BigInt(300) > srcExpiry) return { ok: false, reason: "the shop's lock ends too close to yours" };
-  if (expiry < now + BigInt(120)) return { ok: false, reason: "the shop's lock is about to end" };
+  if (expiry + BigInt(300) > srcExpiry) return { ok: false, reason: "the merchant's lock ends too close to yours" };
+  if (expiry < now + BigInt(120)) return { ok: false, reason: "the merchant's lock is about to end" };
   return { ok: true };
 }

@@ -1,7 +1,7 @@
 "use client";
 
 // The frame every page sits in: two thin lines down each side and the floating nav.
-// The nav links to the Demo Shop and the dashboard from every page that has it.
+// The nav links to the Demo Store and the dashboard from every page that has it.
 // The nav hides while a Privy window (login, signing) is open over the page.
 // Only the home page shows the "How it works" button; the pay page keeps the customer on the payment.
 // On the home page it waits until the hero's own big "How it works" button is scrolled away.
@@ -57,7 +57,7 @@ function SiteHeader({ howItWorks }: { howItWorks: boolean }) {
 }
 
 const NAV_LINKS = [
-  { label: "Demo shop", href: "/demo" },
+  { label: "Demo store", href: "/demo" },
   { label: "Dashboard", href: "/dashboard" },
 ];
 

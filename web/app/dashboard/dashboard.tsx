@@ -1,6 +1,6 @@
 "use client";
 
-// The shop dashboard: sign in with the payout wallet, then payments, webhooks and settings.
+// The merchant dashboard: sign in with the payout wallet, then payments, webhooks and settings.
 
 import { useEffect, useState } from "react";
 import { LogOut } from "lucide-react";
@@ -43,11 +43,11 @@ function SignedIn({ session }: { session: Session }) {
     <div className="mx-auto grid w-full max-w-[1080px] gap-8">
       <header className="flex flex-wrap items-end justify-between gap-4">
         <div className="grid gap-2">
-          <Eyebrow>Shop dashboard</Eyebrow>
-          <h1 className="font-display text-[40px] leading-none tracking-[-0.03em]">{session.shop.name}</h1>
+          <Eyebrow>Merchant dashboard</Eyebrow>
+          <h1 className="font-display text-[40px] leading-none tracking-[-0.03em]">{session.merchant.name}</h1>
           <p className="flex items-center gap-2 text-[13px] text-muted-foreground">
             <span className="size-1.5 rounded-full bg-ok" aria-hidden="true" />
-            Paid in USDT to <span className="font-mono">{shortAddress(session.shop.payoutAddress)}</span>
+            Paid in USDT to <span className="font-mono">{shortAddress(session.merchant.payoutAddress)}</span>
           </p>
         </div>
         <Button

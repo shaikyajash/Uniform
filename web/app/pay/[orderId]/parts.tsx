@@ -183,29 +183,61 @@ export function Problem({ children }: { children: ReactNode }) {
   );
 }
 
-export function ExplorerLink({ href }: { href: string }) {
+/** `label`: which chain, when there are several links (a split's locks). */
+export function ExplorerLink({ href, label }: { href: string; label?: string }) {
   return (
     <TextButton asChild>
       <a href={href} target="_blank" rel="noreferrer">
-        View on explorer <ArrowUpRight />
+        {label ? `${label} explorer` : "View on explorer"} <ArrowUpRight />
       </a>
     </TextButton>
   );
 }
 
+/**
+ * Copies text. The Clipboard API is missing on some pages (plain http, some embedded frames) and
+ * can refuse a write, so fall back to selecting a hidden field and running the copy command.
+ */
+async function copyText(text: string): Promise<boolean> {
+  try {
+    if (navigator.clipboard?.writeText) {
+      await navigator.clipboard.writeText(text);
+      return true;
+    }
+  } catch {
+    // Fall through to the older method below.
+  }
+  const field = document.createElement("textarea");
+  field.value = text;
+  field.setAttribute("readonly", "");
+  field.style.position = "fixed";
+  field.style.opacity = "0";
+  document.body.appendChild(field);
+  field.select();
+  try {
+    return document.execCommand("copy");
+  } catch {
+    return false;
+  } finally {
+    field.remove();
+  }
+}
+
 export function CopyText({ text }: { text: string }) {
-  const [copied, setCopied] = useState(false);
+  const [state, setState] = useState<"idle" | "copied" | "failed">("idle");
   return (
     <Button
       variant="outline"
       size="xs"
       className="mx-0.5 h-5 border-hair-strong bg-transparent px-2 font-mono text-xs"
       title={text}
-      onClick={() => {
-        void navigator.clipboard.writeText(text).then(() => setCopied(true));
+      onClick={async () => {
+        const ok = await copyText(text);
+        setState(ok ? "copied" : "failed");
+        setTimeout(() => setState("idle"), 2000);
       }}
     >
-      {copied ? "copied ✓" : shortAddress(text)}
+      {state === "copied" ? "copied ✓" : state === "failed" ? "copy failed, select it" : shortAddress(text)}
     </Button>
   );
 }

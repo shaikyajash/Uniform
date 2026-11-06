@@ -7,7 +7,7 @@ python3 - "$ORDER" <<'PY'
 import json,sys; p='.state/orders.json'
 try: d=json.load(open(p))
 except Exception: d={}
-d[sys.argv[1]]={"shop":{"name":"Kettle & Co","address":"0x15d34AAf54267DB7D7c367839AAf71A00a2C6A65"},"amount":"1.000000","status":"quoted"}
+d[sys.argv[1]]={"merchant":{"name":"Kettle & Co","address":"0x15d34AAf54267DB7D7c367839AAf71A00a2C6A65"},"amount":"1.000000","status":"quoted"}
 json.dump(d,open(p,'w'))
 PY
 # CHAIN=ethereum locks on the Ethereum Sepolia fork instead of Base (default USDC there too).

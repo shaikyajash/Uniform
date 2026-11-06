@@ -562,7 +562,7 @@ async fn a_refused_claim_sends_nothing_and_leaves_the_order_alone(pool: PgPool) 
     };
     let job = add_order_and_job(&pool, 1, AMOUNT, "destination_locked", &claim).await;
     let chain = FakeChain::new();
-    chain.with(|state| state.dry_run = Some(ChainError::Revert("the shop's lock pays someone else".into())));
+    chain.with(|state| state.dry_run = Some(ChainError::Revert("the merchant's lock pays someone else".into())));
     let result = outcome(&pool, &chain, NOW).await;
     assert!(matches!(result, Some(Outcome::Failed(ref reason)) if reason.contains("someone else")), "{result:?}");
     assert_eq!(chain.signed_count(), 0, "the secret never left");

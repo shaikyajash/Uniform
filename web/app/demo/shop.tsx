@@ -1,7 +1,7 @@
 "use client";
 
-// The Demo Shop's page: three products, a cart, and Uniform's widget for checkout. Styled as a
-// different site on purpose, so the checkout reads as something the shop plugged in.
+// The Demo Store's page: three products, a cart, and Uniform's widget for checkout. Styled as a
+// different site on purpose, so the checkout reads as something the merchant plugged in.
 
 import { useEffect, useState } from "react";
 import { ArrowUpRight, Check, Minus, Plus } from "lucide-react";
@@ -17,7 +17,7 @@ declare global {
 type Paid = { orderId: string; reference: string };
 type Delivery = { type: string; receivedAt: number } | null;
 
-export function Shop() {
+export function Store() {
   const [cart, setCart] = useState<Cart>({ kettle: 1 });
   const [busy, setBusy] = useState(false);
   const [problem, setProblem] = useState<string | null>(null);
@@ -64,14 +64,14 @@ export function Shop() {
   return (
     <>
       <div className="border-b border-[#1f1b16]/10 bg-[#1f1b16] px-4 py-2 text-center font-mono text-[11px] tracking-[0.06em] text-[#f3eee5]/80">
-        DEMO SHOP · PAYMENTS RUN ON TEST NETWORKS (TESTNET USDT AND USDC) ·{" "}
+        DEMO STORE · PAYMENTS RUN ON TEST NETWORKS (TESTNET USDT AND USDC) ·{" "}
         <Link href="/" className="whitespace-nowrap text-[#f3eee5] underline underline-offset-4 hover:no-underline">
           BACK TO UNIFORM
         </Link>
       </div>
 
       <header className="mx-auto flex max-w-6xl items-center justify-between px-5 py-6 md:px-8">
-        <a href="/demo" className="font-[family-name:var(--font-shop)] text-[30px] leading-none tracking-[-0.01em]">
+        <a href="/demo" className="font-[family-name:var(--font-merchant)] text-[30px] leading-none tracking-[-0.01em]">
           Kettle &amp; Co.
         </a>
         <span className="text-sm text-[#1f1b16]/60">Cart · {count}</span>
@@ -79,7 +79,7 @@ export function Shop() {
 
       <main className="mx-auto grid max-w-6xl gap-10 px-5 pb-20 md:grid-cols-[1fr_340px] md:px-8">
         <section>
-          <h1 className="max-w-xl font-[family-name:var(--font-shop)] text-[44px] leading-[1.05] tracking-[-0.015em] md:text-[56px]">
+          <h1 className="max-w-xl font-[family-name:var(--font-merchant)] text-[44px] leading-[1.05] tracking-[-0.015em] md:text-[56px]">
             Slow coffee, made at home.
           </h1>
           <p className="mt-3 max-w-md text-[15px] leading-relaxed text-[#1f1b16]/65">
@@ -92,7 +92,7 @@ export function Shop() {
               return (
                 <li key={product.id} className="flex flex-col rounded-xl bg-[#fbf8f2] p-4 ring-1 ring-[#1f1b16]/8">
                   <div className="grid aspect-[4/3] place-items-center rounded-lg bg-[#ebe3d6]">
-                    <span className="font-[family-name:var(--font-shop)] text-[64px] leading-none text-[#1f1b16]/25">
+                    <span className="font-[family-name:var(--font-merchant)] text-[64px] leading-none text-[#1f1b16]/25">
                       {product.name[0]}
                     </span>
                   </div>
@@ -125,7 +125,7 @@ export function Shop() {
             <Thanks paid={paid} onAgain={() => setPaid(null)} />
           ) : (
             <>
-              <h2 className="font-[family-name:var(--font-shop)] text-[26px] leading-none">Your cart</h2>
+              <h2 className="font-[family-name:var(--font-merchant)] text-[26px] leading-none">Your cart</h2>
               {count === 0 ? (
                 <p className="mt-4 text-[14px] text-[#1f1b16]/55">Nothing here yet.</p>
               ) : (
@@ -182,7 +182,7 @@ function Stepper({ n, onLess, onMore }: { n: number; onLess: () => void; onMore:
   );
 }
 
-/** After paying: the order, and whether the shop's server got the signed webhook. */
+/** After paying: the order, and whether the merchant's server got the signed webhook. */
 function Thanks({ paid, onAgain }: { paid: Paid; onAgain: () => void }) {
   const [delivery, setDelivery] = useState<Delivery>(null);
   useEffect(() => {
@@ -205,7 +205,7 @@ function Thanks({ paid, onAgain }: { paid: Paid; onAgain: () => void }) {
       <span className="grid size-10 place-items-center rounded-full bg-[#1f1b16] text-[#f3eee5]">
         <Check className="size-5" />
       </span>
-      <h2 className="mt-4 font-[family-name:var(--font-shop)] text-[28px] leading-tight">Thank you. Order paid.</h2>
+      <h2 className="mt-4 font-[family-name:var(--font-merchant)] text-[28px] leading-tight">Thank you. Order paid.</h2>
       <p className="mt-1 font-mono text-[12.5px] text-[#1f1b16]/55">{paid.reference}</p>
       <dl className="mt-5 grid gap-2.5 border-t border-[#1f1b16]/10 pt-4 text-[13.5px]">
         <div className="flex justify-between gap-3">
@@ -240,7 +240,7 @@ const SNIPPET = `<!-- 1. On the page -->
     }).then(({ orderId }) => showThanks(orderId));
 </script>
 
-// 2. On the shop's server: make the order with the secret API key
+// 2. On the merchant's server: make the order with the secret API key
 const order = await fetch(UNIFORM + "/v1/orders", {
   method: "POST",
   headers: { authorization: "Bearer " + process.env.UNIFORM_API_KEY },
@@ -253,7 +253,7 @@ function HowItsAdded() {
   return (
     <details className="group mt-14 rounded-xl ring-1 ring-[#1f1b16]/10">
       <summary className="flex cursor-pointer list-none items-center justify-between px-5 py-4 text-[14px]">
-        <span>How this shop added Uniform</span>
+        <span>How this store added Uniform</span>
         <span className="font-mono text-[12px] text-[#1f1b16]/50 group-open:hidden">show</span>
         <span className="hidden font-mono text-[12px] text-[#1f1b16]/50 group-open:inline">hide</span>
       </summary>

@@ -6,7 +6,7 @@
 import { formatUnits } from "viem";
 import { Check, Loader2 } from "lucide-react";
 import { chainName, explorerTx, trimAmount } from "@/lib/chain";
-import type { Order } from "@/lib/desk";
+import { currentLegs, type Leg, type Order } from "@/lib/desk";
 import { cn } from "@/lib/utils";
 import { ExplorerLink } from "./parts";
 
@@ -14,41 +14,63 @@ type State = "done" | "working" | "waiting";
 
 const RANK: Record<string, number> = { paying: 0, source_locked: 1, destination_locked: 2, paid: 3 };
 
+/** "6.00 USDC on Base" for one leg; "6.00 on Base and 4.03 USDC on Ethereum Sepolia" for a split. */
+export function describeLegs(legs: Leg[]): string {
+  const parts = legs.map((leg) => `${trimAmount(formatUnits(BigInt(leg.amount), 6))} USDC on ${chainName(leg.chainId)}`);
+  if (parts.length === 1) return parts[0];
+  return `${parts.slice(0, -1).join(", ")} and ${parts[parts.length - 1]}`;
+}
+
 export function Progress({ order, amount }: { order: Order; amount: string }) {
-  const leg = order.legs[order.legs.length - 1];
+  const legs = currentLegs(order);
+  const leg = legs[0];
+  const split = legs.length > 1;
   const rank = RANK[order.status] ?? 0;
   const lockTx = leg?.lockTx ?? order.payment?.txHash ?? null;
-  const usdc = leg ? trimAmount(formatUnits(BigInt(leg.amount), 6)) : "";
   const chain = leg ? chainName(leg.chainId) : "";
+  const lockedCount = legs.filter((each) => each.status !== "pending").length;
   const claim = order.claim;
 
-  const steps: { title: string; detail: string; state: State; link?: string | null }[] = [
+  const steps: {
+    title: string;
+    detail: string;
+    state: State;
+    link?: string | null;
+    links?: { label: string; href: string }[];
+  }[] = [
     {
-      title: `Lock ${usdc} USDC on ${chain}`,
+      title: legs.length > 0 ? `Lock ${describeLegs(legs)}` : "Lock your USDC",
       detail:
         rank > 0
-          ? "Held for the provider. It comes back to you if the shop isn't paid."
-          : order.payment?.status === "sent"
-            ? `Waiting for ${chain} to confirm…`
-            : "Sending your signed note…",
+          ? split
+            ? "Both held for the provider. They come back to you if the merchant isn't paid."
+            : "Held for the provider. It comes back to you if the merchant isn't paid."
+          : split
+            ? `${lockedCount} of ${legs.length} locked. The provider waits for all of them.`
+            : order.payment?.status === "sent"
+              ? `Waiting for ${chain} to confirm…`
+              : "Sending your signed note…",
       state: rank > 0 ? "done" : "working",
-      link: lockTx && leg ? explorerTx(leg.chainId, lockTx) : null,
+      link: !split && lockTx && leg ? explorerTx(leg.chainId, lockTx) : null,
+      links: split
+        ? legs.filter((each) => each.lockTx).map((each) => ({ label: chainName(each.chainId), href: explorerTx(each.chainId, each.lockTx as string) }))
+        : undefined,
     },
     {
-      title: `Provider locks ${amount} USDT for ${order.shop.name}`,
+      title: `Provider locks ${amount} USDT for ${order.merchant.name}`,
       detail: rank > 1 ? "Locked on Whitechain, waiting for your key." : "Usually under a minute.",
       state: rank > 1 ? "done" : rank === 1 ? "working" : "waiting",
     },
     {
-      title: "Pay the shop",
+      title: "Pay the merchant",
       detail:
         rank > 2
           ? "Paid."
           : claim?.status === "sent" || claim?.status === "sending"
-            ? "Releasing the USDT to the shop…"
+            ? "Releasing the USDT to the merchant…"
             : rank === 2
-              ? "Checking the shop's lock, then releasing it…"
-              : "Your key releases the shop's USDT.",
+              ? "Checking the merchant's lock, then releasing it…"
+              : "Your key releases the merchant's USDT.",
       state: rank > 2 ? "done" : rank === 2 ? "working" : "waiting",
       link: claim?.explorerUrl,
     },
@@ -76,6 +98,13 @@ export function Progress({ order, amount }: { order: Order; amount: string }) {
             {step.link && (
               <div>
                 <ExplorerLink href={step.link} />
+              </div>
+            )}
+            {step.links && step.links.length > 0 && (
+              <div className="flex flex-wrap gap-x-4 gap-y-1">
+                {step.links.map((link) => (
+                  <ExplorerLink key={link.href} href={link.href} label={link.label} />
+                ))}
               </div>
             )}
           </div>

@@ -594,19 +594,19 @@ impl Rpc {
     async fn check_claim(&self, call: &ClaimCall, now: u64) -> Result<(), ChainError> {
         let lock = self.destination_lock_state(call.lock_id).await?;
         if lock.state != LOCK_OPEN {
-            return refuse("the shop's lock is not open");
+            return refuse("the merchant's lock is not open");
         }
         if lock.merchant != call.merchant {
-            return refuse("the shop's lock pays someone else");
+            return refuse("the merchant's lock pays someone else");
         }
         if U256::from(lock.amount) < call.min_amount.0 {
-            return refuse("the shop's lock holds less than the order");
+            return refuse("the merchant's lock holds less than the order");
         }
         if lock.hashlock != hashlock_of(call.secret) {
-            return refuse("the shop's lock is under another secret");
+            return refuse("the merchant's lock is under another secret");
         }
         if lock.expiry < now + MIN_CLAIM_TIME_LEFT {
-            return refuse("too little time left on the shop's lock to send the secret safely");
+            return refuse("too little time left on the merchant's lock to send the secret safely");
         }
         let usdt = self.need(self.contracts.usdt, "USDT")?;
         let destination_lock = self.need(self.contracts.destination_lock, "DestinationLock")?;
@@ -626,10 +626,10 @@ impl Rpc {
             return refuse("DirectPay has no such payment");
         }
         if payment.merchant != call.merchant {
-            return refuse("the payment went to another shop");
+            return refuse("the payment went to another merchant");
         }
         if U256::from(payment.refunded) != call.refunded_before.0 {
-            return refuse("another refund landed first; the shop must sign a new note");
+            return refuse("another refund landed first; the merchant must sign a new note");
         }
         if call.amount.0 > U256::from(payment.amount) - U256::from(payment.refunded) {
             return refuse("the refund is more than what is left of the payment");
@@ -643,7 +643,7 @@ impl Rpc {
             return refuse("the note's nonce is not DirectPay's for this refund");
         }
         if self.balance(self.need(self.contracts.usdt, "USDT")?, call.merchant).await? < call.amount.0 {
-            return refuse("the shop does not have enough USDT for the refund");
+            return refuse("the merchant does not have enough USDT for the refund");
         }
         Ok(())
     }

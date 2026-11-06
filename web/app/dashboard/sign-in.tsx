@@ -1,6 +1,6 @@
 "use client";
 
-// Signing in with the shop's payout wallet: connect it, sign one free message, done.
+// Signing in with the merchant's payout wallet: connect it, sign one free message, done.
 
 import { useConnectWallet, usePrivy, useWallets } from "@privy-io/react-auth";
 import { useState } from "react";
@@ -36,14 +36,14 @@ export function SignIn() {
   return (
     <div className="mx-auto grid w-full max-w-[440px] gap-8">
       <div className="grid gap-3">
-        <Eyebrow>Shop dashboard</Eyebrow>
+        <Eyebrow>Merchant dashboard</Eyebrow>
         <h1 className="font-display text-[40px] leading-[1.05] tracking-[-0.03em]">
           Sign in with your
           <br />
           <span className="text-muted-foreground">payout wallet</span>
         </h1>
         <p className="text-[14.5px] leading-[1.7] text-muted-foreground">
-          The wallet your shop is paid to is your login. You sign one message. It is free and moves no money.
+          The wallet you are paid to is your login. You sign one message. It is free and moves no money.
         </p>
       </div>
 
