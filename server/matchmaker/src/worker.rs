@@ -46,6 +46,9 @@ const PERMANENT: &str = "permanent: ";
 const SECRET_SEARCH_BLOCKS: u64 = 200_000;
 /// Refunds sent per chain per pass, so a flood of expired locks cannot hold up other duties.
 const REFUNDS_PER_PASS: usize = 5;
+/// Log ranges read per chain per pass while catching up, so one chain's backlog cannot hold up
+/// the others for long.
+const MAX_RANGES_PER_PASS: usize = 20;
 /// A node whose latest block is older than this is treated as behind, and its time not trusted.
 const MAX_CLOCK_LAG: u64 = 120;
 const RPC_TIMEOUT: Duration = Duration::from_secs(20);
@@ -541,8 +544,17 @@ impl Worker {
     /// The main pass. A failure on one chain or one item never stops the others.
     pub async fn tick(&self) {
         for i in 0..self.chains.len() {
-            if let Err(e) = self.scan(i).await {
-                eprintln!("matchmaker: chain {}: {e}", self.chains[i].chain_id);
+            // Read range after range until caught up, so a backlog (first start, an outage)
+            // clears in one pass instead of one range per poll.
+            for _ in 0..MAX_RANGES_PER_PASS {
+                match self.scan(i).await {
+                    Ok(true) => continue,
+                    Ok(false) => break,
+                    Err(e) => {
+                        eprintln!("matchmaker: chain {}: {e}", self.chains[i].chain_id);
+                        break;
+                    }
+                }
             }
         }
         self.retry_parked_logs().await;
@@ -554,17 +566,18 @@ impl Worker {
     /// Reads the next confirmed block range on one chain. A log whose handling fails is parked for
     /// retry, so it never holds up the cursor. The cursor only moves once the node is known to have
     /// the range's last block.
-    async fn scan(&self, index: usize) -> Result<()> {
+    /// Reads and handles one range of logs on a chain. Returns whether more blocks are ready.
+    async fn scan(&self, index: usize) -> Result<bool> {
         let watched = &self.chains[index];
         let Some(safe) = self.readable_head(watched).await? else {
-            return Ok(());
+            return Ok(false);
         };
         let from = match self.store.cursor(watched.chain_id).await.map_err(err)? {
             Some(next) => next,
             None => safe.saturating_sub(FIRST_RUN_LOOKBACK),
         };
         if from > safe {
-            return Ok(());
+            return Ok(false);
         }
         let range = watched.range.load(Ordering::Relaxed).max(1);
         let to = safe.min(from.saturating_add(range - 1));
@@ -575,7 +588,7 @@ impl Worker {
             .map_err(err)?
             .is_none()
         {
-            return Ok(());
+            return Ok(false);
         }
         let addresses: Vec<Address> = watched.contracts.iter().map(|(a, _)| *a).collect();
         let filter = Filter::new()
@@ -631,7 +644,8 @@ impl Worker {
         self.store
             .set_cursor(watched.chain_id, to + 1)
             .await
-            .map_err(err)
+            .map_err(err)?;
+        Ok(to < safe)
     }
 
     /// Retries every parked log. Outages are retried until they clear; a log that fails for a

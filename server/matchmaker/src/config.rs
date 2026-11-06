@@ -67,7 +67,7 @@ impl Config {
                 min_destination_lock: 300,
             },
             db_path: env::var("DB_PATH").unwrap_or_else(|_| "matchmaker.db".into()),
-            poll_seconds: number("POLL_SECONDS", 4)?,
+            poll_seconds: number("POLL_SECONDS", 2)?,
             max_block_range: number("MAX_BLOCK_RANGE", 1000)?,
             min_filler_gas_wei: HashMap::new(),
             eurc_price_url: env::var("EURC_PRICE_URL").unwrap_or_else(|_| {
