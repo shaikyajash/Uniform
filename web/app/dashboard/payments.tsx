@@ -183,7 +183,7 @@ function OrdersTable({ orders, onRefund }: { orders: OrderRow[] | null; onRefund
 function OrderLine({ order, onRefund }: { order: OrderRow; onRefund: (order: OrderRow) => void }) {
   const status = ORDER_STATUS[order.status];
   const refundable =
-    order.path !== "crosschain" &&
+    order.path === "direct" &&
     (order.status === "paid" || order.status === "partially_refunded") &&
     order.refundStatus !== "pending" &&
     order.refundStatus !== "sending" &&
@@ -200,7 +200,13 @@ function OrderLine({ order, onRefund }: { order: OrderRow; onRefund: (order: Ord
         )}
       </TableCell>
       <TableCell className="text-muted-foreground">
-        {order.path === "crosschain" ? "USDC → USDT" : order.path === "direct" ? "USDT" : "—"}
+        {order.path === "crosschain"
+          ? "USDC → USDT"
+          : order.path === "split"
+            ? "USDC ×2 → USDT"
+            : order.path === "direct"
+              ? "USDT"
+              : "—"}
       </TableCell>
       <TableCell>
         <span className="inline-flex items-center gap-2">

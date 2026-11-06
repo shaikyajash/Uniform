@@ -1,14 +1,18 @@
 "use client";
 
 // "Pay with": one row per way to pay, with what it costs and what the wallet holds there. A row
-// the wallet can't cover is still shown (the customer may top up), but can't be picked.
+// the wallet can't cover is still shown (the customer may top up), but can't be picked. A split
+// row (A8) takes part of the USDC from each chain when no one chain holds enough.
 
 import { formatUnits } from "viem";
 import { trimAmount } from "@/lib/chain";
 import { cn } from "@/lib/utils";
 import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group";
 
-export type Source = { kind: "usdt" } | { kind: "usdc"; chainId: number };
+/** One chain's part of a split payment, in 6-decimal base units. */
+export type SplitPart = { chainId: number; amount: bigint };
+
+export type Source = { kind: "usdt" } | { kind: "usdc"; chainId: number } | { kind: "split"; parts: SplitPart[] };
 
 export type SourceOption = {
   source: Source;
@@ -19,11 +23,12 @@ export type SourceOption = {
   /** What the wallet holds there; `null` while it is being read. */
   balance: bigint | null;
   note?: string;
+  /** A split row: how much comes from each chain, e.g. "6.00 on Base + 4.03 on Ethereum Sepolia". */
+  detail?: string;
 };
 
-const encode = (source: Source) => (source.kind === "usdt" ? "usdt" : `usdc:${source.chainId}`);
-const decode = (value: string): Source =>
-  value === "usdt" ? { kind: "usdt" } : { kind: "usdc", chainId: Number(value.slice(5)) };
+export const encodeSource = (source: Source) =>
+  source.kind === "usdt" ? "usdt" : source.kind === "usdc" ? `usdc:${source.chainId}` : "split";
 const show = (units: bigint) => trimAmount(formatUnits(units, 6));
 
 export function SourcePicker({
@@ -41,13 +46,16 @@ export function SourcePicker({
     <div className="grid gap-2">
       <small className="font-mono text-[9px] tracking-[0.1em] text-faint">PAY WITH</small>
       <RadioGroup
-        value={value ? encode(value) : undefined}
-        onValueChange={(next) => onChange(decode(next))}
+        value={value ? encodeSource(value) : undefined}
+        onValueChange={(next) => {
+          const option = options.find((candidate) => encodeSource(candidate.source) === next);
+          if (option) onChange(option.source);
+        }}
         disabled={disabled}
         className="gap-0 overflow-hidden rounded-lg border border-hair"
       >
         {options.map((option) => {
-          const id = `source-${encode(option.source)}`;
+          const id = `source-${encodeSource(option.source)}`;
           const short = option.balance !== null && option.balance < option.cost;
           return (
             <label
@@ -59,10 +67,12 @@ export function SourcePicker({
                 short && "cursor-not-allowed opacity-45 hover:bg-muted/40",
               )}
             >
-              <RadioGroupItem id={id} value={encode(option.source)} disabled={short || disabled} />
+              <RadioGroupItem id={id} value={encodeSource(option.source)} disabled={short || disabled} />
               <span className="grid min-w-0 flex-1 gap-0.5">
                 <span className="font-mono text-[13px] text-foreground">{option.token}</span>
-                <span className="truncate text-[12.5px] text-muted-foreground">on {option.chain}</span>
+                <span className="truncate text-[12.5px] text-muted-foreground">
+                  {option.detail ?? `on ${option.chain}`}
+                </span>
               </span>
               <span className="grid justify-items-end gap-0.5 text-right">
                 <span className="font-mono text-[13px] text-foreground">{show(option.cost)}</span>

@@ -67,7 +67,7 @@ export type TypedData = {
 
 export type Quote = {
   quoteId: string;
-  path: "direct" | "crosschain";
+  path: "direct" | "crosschain" | "split";
   expiresAt: number;
   total: string;
   fee: string;
@@ -100,15 +100,45 @@ async function call<T>(path: string, init?: RequestInit): Promise<T> {
 
 export const getOrder = (orderId: string) => call<Order>(`/orders/${orderId}`);
 
-/** Path A without `crosschain`; with it, a USDC note on that chain under the hashlock. */
-export const getQuote = (orderId: string, payer: string, crosschain?: { hashlock: string; chainId: number }) =>
-  call<Quote>(`/orders/${orderId}/quote`, { method: "POST", body: JSON.stringify({ payer, ...crosschain }) });
+/** One chain of a split payment: how much USDC (decimal text) to lock there; one leg may leave it out. */
+export type SplitLeg = { chainId: number; amount?: string };
 
-export const submitLegs = (orderId: string, quoteId: string, signature: string) =>
-  call<{ status: OrderStatus; jobId: number; lockId: string }>(`/orders/${orderId}/legs`, {
-    method: "POST",
-    body: JSON.stringify({ quoteId, signature }),
-  });
+/**
+ * Path A without `crosschain`. With `{hashlock, chainId}`: a USDC note on that chain under the
+ * hashlock. With `{hashlock, legs}` (A8 split): one note per chain, all under the one hashlock.
+ */
+export const getQuote = (
+  orderId: string,
+  payer: string,
+  crosschain?: { hashlock: string; chainId: number } | { hashlock: string; legs: SplitLeg[] },
+) => call<Quote>(`/orders/${orderId}/quote`, { method: "POST", body: JSON.stringify({ payer, ...crosschain }) });
+
+/** The signed notes of a cross-chain quote, one per `toSign` entry and in its order. */
+export const submitLegs = (orderId: string, quoteId: string, signatures: string[]) =>
+  call<{ status: OrderStatus; jobId: number | null; lockId: string; locks?: { chainId: number; lockId: string; jobId: number | null }[] }>(
+    `/orders/${orderId}/legs`,
+    {
+      method: "POST",
+      body: JSON.stringify(signatures.length === 1 ? { quoteId, signature: signatures[0] } : { quoteId, signatures }),
+    },
+  );
+
+/**
+ * The customer's locks of the latest attempt: an order keeps the legs of earlier quotes too, and
+ * every lock of one attempt (one chain, or a split's chains) shares one expiry.
+ */
+export function currentLegs(order: Order): Leg[] {
+  const last = order.legs[order.legs.length - 1];
+  return last ? order.legs.filter((leg) => leg.expiry === last.expiry) : [];
+}
+
+/** The leg Bob's destination lock id is built from: the first by (chainId, lockId) (A8). */
+export function anchorLeg(legs: Leg[]): Leg | null {
+  return (
+    [...legs].sort((a, b) => a.chainId - b.chainId || a.lockId.toLowerCase().localeCompare(b.lockId.toLowerCase()))[0] ??
+    null
+  );
+}
 
 export const revealSecret = (orderId: string, secret: string) =>
   call<{ status: OrderStatus; jobId: number }>(`/orders/${orderId}/secret`, {
@@ -140,6 +170,8 @@ export function explain(error: unknown): string {
         return "We couldn't find this order. Check the link.";
       case "crosschain_unavailable":
         return "Paying from another chain isn't available right now. Pay with USDT on Whitechain instead.";
+      case "bad_legs":
+        return "Those amounts don't add up for a split payment. Refresh and try again.";
       case "wrong_secret":
         return "That key doesn't match this payment. Sign again with the same wallet.";
       default:

@@ -27,6 +27,8 @@ import {
   withProviderFee,
 } from "@/lib/chain";
 import {
+  anchorLeg,
+  currentLegs,
   explain,
   getOrder,
   getQuote,
@@ -34,6 +36,7 @@ import {
   submitDirect,
   submitLegs,
   type Order,
+  type Quote,
   type Payment,
   type TypedData,
 } from "@/lib/desk";
@@ -59,8 +62,8 @@ import {
   formatCountdown,
   useNow,
 } from "./parts";
-import { SourcePicker, type Source, type SourceOption } from "./source-picker";
-import { Progress } from "./progress";
+import { SourcePicker, encodeSource, type Source, type SourceOption, type SplitPart } from "./source-picker";
+import { Progress, describeLegs } from "./progress";
 
 /** How often to look at the order while a payment is on its way. */
 const ORDER_POLL_MS = 2_000;
@@ -77,6 +80,9 @@ const STEP_LABEL: Record<Exclude<Step, "idle">, string> = {
   signing: "Waiting for your signature…",
   submitting: "Sending…",
 };
+
+/** The Order Desk's smallest split leg: 0.1 USDC (A8). */
+const MIN_SPLIT_LEG = BigInt(100_000);
 
 /** The payment's key, in memory only. */
 type Key = { orderId: string; secret: Hex; hashlock: Hex };
@@ -134,32 +140,13 @@ export function PayCard({ orderId }: { orderId: string }) {
   }, [moving, refresh]);
 
   // Every way to pay, with what it costs and whether the wallet has it.
-  const options: SourceOption[] = useMemo(() => {
-    if (units === null) return [];
-    const mine = balances && balances.owner === address ? balances.units : {};
-    const usdt: SourceOption = {
-      source: { kind: "usdt" },
-      token: "USDT",
-      chain: chainName(shopChain.id),
-      cost: units,
-      balance: mine.usdt ?? null,
-    };
-    const usdc = customerChains.map(
-      (chain): SourceOption => ({
-        source: { kind: "usdc", chainId: chain.id },
-        token: "USDC",
-        chain: chainName(chain.id),
-        cost: withProviderFee(units),
-        balance: mine[`usdc:${chain.id}`] ?? null,
-        note: "incl. 0.3% provider fee",
-      }),
-    );
-    return [usdt, ...usdc];
-  }, [units, balances, address]);
+  const options = useMemo(() => paymentOptions(units, balances, address), [units, balances, address]);
 
   const anyEnough = options.some((option) => option.balance !== null && option.balance >= option.cost);
   const firstEnough = options.find((option) => option.balance !== null && option.balance >= option.cost);
-  const source = picked ?? firstEnough?.source ?? options[0]?.source ?? null;
+  // The picked row as built from the latest balances: a split's parts follow them.
+  const pickedNow = picked ? (options.find((option) => sameSource(option.source, picked))?.source ?? null) : null;
+  const source = pickedNow ?? firstEnough?.source ?? options[0]?.source ?? null;
   const chosen = options.find((option) => sameSource(option.source, source)) ?? null;
   const chosenEnough = chosen !== null && chosen.balance !== null && chosen.balance >= chosen.cost;
 
@@ -206,13 +193,13 @@ export function PayCard({ orderId }: { orderId: string }) {
   }, [paid, orderId]);
 
   /** Signs this order's fixed message: the same order always gives the same key. */
-  const makeKey = useCallback(async (): Promise<Key> => {
+  const makeKey = useCallback(async (silent = false): Promise<Key> => {
     if (!address || units === null || !order) throw new Error("not ready");
     const { signature } = await signTypedData(secretTypedData(order.orderId as Hex, units), {
       address,
       uiOptions: {
         // In the widget's card our own button is the confirmation: no Privy window over the card.
-        showWalletUIs: !embedded,
+        showWalletUIs: !embedded && !silent,
         title: "Confirm this payment",
         description: "This signature makes a one-time key for this payment. It moves no money and costs nothing.",
         buttonText: "Confirm",
@@ -225,7 +212,8 @@ export function PayCard({ orderId }: { orderId: string }) {
 
   // Cross-chain: once the provider has locked USDT for the shop, check that lock on chain and
   // hand over the key. Runs again on every poll until the claim is under way.
-  const leg = order?.legs[order.legs.length - 1] ?? null;
+  // A split has a lock per chain; Bob's lock for the shop is named after the first (A8).
+  const leg = order ? anchorLeg(currentLegs(order)) : null;
   const keyFits = key !== null && order !== null && key.orderId === order.orderId && key.hashlock === order.hashlock;
   const claimLive = order?.claim != null && order.claim.status !== "failed";
   useEffect(() => {
@@ -256,10 +244,14 @@ export function PayCard({ orderId }: { orderId: string }) {
     })();
   }, [order, keyFits, claimLive, leg, units, key, refresh]);
 
-  async function signNote(typedData: TypedData, title: string, description: string): Promise<string> {
+  /** `silent`: no Privy window (a split signs several notes behind one Pay click, per A8). */
+  async function signNote(typedData: TypedData, title: string, description: string, silent = false): Promise<string> {
     if (!address) throw new Error("no wallet");
     const data = { ...typedData, domain: { ...typedData.domain, chainId: Number(typedData.domain.chainId) } };
-    const options = { address, uiOptions: { showWalletUIs: !embedded, title, description, buttonText: "Sign and pay" } };
+    const options = {
+      address,
+      uiOptions: { showWalletUIs: !embedded && !silent, title, description, buttonText: "Sign and pay" },
+    };
     try {
       return (await signTypedData(data, options)).signature;
     } catch (problem) {
@@ -285,22 +277,13 @@ export function PayCard({ orderId }: { orderId: string }) {
   }
 
   async function payCrossChain(chainId: number) {
-    const chain = customerChain(chainId);
-    if (!order || !address || !chain) return;
+    if (!order || !address || !customerChain(chainId)) return;
     setStep("keying");
     const made = keyFits && key ? key : await makeKey();
     setStep("quoting");
     const quote = await getQuote(orderId, address, { hashlock: made.hashlock, chainId });
     const note = quote.toSign[0];
-    // The note may only move this wallet's USDC into our SourceLock on that chain.
-    const message = note.typedData.message;
-    const fits =
-      note.chainId === chainId &&
-      note.typedData.domain.verifyingContract.toLowerCase() === chain.usdc.toLowerCase() &&
-      message.to?.toLowerCase() === chain.sourceLock.toLowerCase() &&
-      message.from?.toLowerCase() === address.toLowerCase() &&
-      message.nonce === note.lockId;
-    if (!fits) throw new Error("The payment details didn't check out. Nothing was signed.");
+    if (!noteFits(note, chainId, address)) throw new Error("The payment details didn't check out. Nothing was signed.");
     setStep("signing");
     const signature = await signNote(
       note.typedData,
@@ -308,7 +291,47 @@ export function PayCard({ orderId }: { orderId: string }) {
       `From ${chainName(chainId)}. Held for the provider until ${order.shop.name} is paid; it comes back to you if not.`,
     );
     setStep("submitting");
-    await submitLegs(orderId, quote.quoteId, signature);
+    await submitLegs(orderId, quote.quoteId, [signature]);
+  }
+
+  /** A8 split: part of the USDC from each chain, every signature behind this one Pay click. */
+  async function paySplit(parts: SplitPart[]) {
+    if (!order || !address || parts.length < 2) return;
+    setStep("keying");
+    const made = keyFits && key ? key : await makeKey(true);
+    setStep("quoting");
+    const [first, ...rest] = parts;
+    const quote = await getQuote(orderId, address, {
+      hashlock: made.hashlock,
+      legs: [{ chainId: first.chainId, amount: formatUnits(first.amount, 6) }, ...rest.map((part) => ({ chainId: part.chainId }))],
+    });
+    // Every note must be ours, one per planned chain, within what the wallet holds there, and
+    // together exactly the quoted total.
+    const held = balances?.owner === address ? balances.units : {};
+    const values = quote.toSign.map((note) => BigInt(note.typedData.message.value ?? "0"));
+    const fits =
+      quote.path === "split" &&
+      quote.toSign.length === parts.length &&
+      parts.every((part) => quote.toSign.some((note) => note.chainId === part.chainId)) &&
+      quote.toSign.every((note, index) => noteFits(note, note.chainId, address) && values[index] <= (held[`usdc:${note.chainId}`] ?? BigInt(0))) &&
+      values.reduce((sum, value) => sum + value, BigInt(0)) === parseUnits(quote.total, 6);
+    if (!fits) throw new Error("The payment details didn't check out. Nothing was signed.");
+    setStep("signing");
+    // One after another: each is a separate signature in the same wallet.
+    const signatures = await quote.toSign.reduce<Promise<string[]>>(
+      async (done, note, index) => [
+        ...(await done),
+        await signNote(
+          note.typedData,
+          `Pay ${formatUsdc(values[index])} USDC`,
+          `From ${chainName(note.chainId)}, part of ${trimAmount(quote.total)} USDC to ${order.shop.name}.`,
+          true,
+        ),
+      ],
+      Promise.resolve([]),
+    );
+    setStep("submitting");
+    await submitLegs(orderId, quote.quoteId, signatures);
   }
 
   async function pay() {
@@ -316,7 +339,8 @@ export function PayCard({ orderId }: { orderId: string }) {
     setError(null);
     try {
       if (source.kind === "usdt") await payDirect();
-      else await payCrossChain(source.chainId);
+      else if (source.kind === "usdc") await payCrossChain(source.chainId);
+      else await paySplit(source.parts);
     } catch (problem) {
       setError(explain(problem));
     } finally {
@@ -490,7 +514,7 @@ export function PayCard({ orderId }: { orderId: string }) {
                           : "Pay"}
                     </PrimaryButton>
                     <FinePrint>
-                      {chosen?.source.kind === "usdc" ? "Two signatures · " : ""}Expires in {formatCountdown(secondsLeft)}
+                      {signatureCount(chosen?.source ?? null)}Expires in {formatCountdown(secondsLeft)}
                     </FinePrint>
                   </>
                 )}
@@ -504,9 +528,39 @@ export function PayCard({ orderId }: { orderId: string }) {
 }
 
 function sameSource(a: Source | null, b: Source | null): boolean {
-  if (!a || !b) return false;
-  if (a.kind === "usdt" || b.kind === "usdt") return a.kind === b.kind;
-  return a.chainId === b.chainId;
+  return a !== null && b !== null && encodeSource(a) === encodeSource(b);
+}
+
+/** USDC base units as "6.03". */
+function formatUsdc(units: bigint): string {
+  return trimAmount(formatUnits(units, 6));
+}
+
+/** "Two signatures · " and so on: what the customer will be asked for, before the countdown. */
+function signatureCount(source: Source | null): string {
+  if (source?.kind === "usdc") return "Two signatures · ";
+  if (source?.kind === "split") return `${source.parts.length + 1} signatures, one click · `;
+  return "";
+}
+
+/**
+ * A8 split: when no one chain holds enough USDC but two together do, take as much as possible from
+ * the fuller chain (leaving the other at least the Order Desk's minimum) and the rest from the
+ * other. `null` when one chain is enough, or two are not.
+ */
+function planSplit(cost: bigint, held: { chainId: number; balance: bigint | null }[]): SplitPart[] | null {
+  const known = held
+    .filter((entry): entry is { chainId: number; balance: bigint } => entry.balance !== null)
+    .sort((a, b) => (b.balance > a.balance ? 1 : b.balance < a.balance ? -1 : 0));
+  if (known.length < 2 || known.some((entry) => entry.balance >= cost)) return null;
+  const [fuller, other] = known;
+  const first = fuller.balance < cost - MIN_SPLIT_LEG ? fuller.balance : cost - MIN_SPLIT_LEG;
+  const rest = cost - first;
+  if (first < MIN_SPLIT_LEG || rest > other.balance) return null;
+  return [
+    { chainId: fuller.chainId, amount: first },
+    { chainId: other.chainId, amount: rest },
+  ];
 }
 
 function OnItsWay({ payment }: { payment: Payment | null }) {
@@ -529,8 +583,9 @@ function OnItsWay({ payment }: { payment: Payment | null }) {
 }
 
 function Done({ order, amount }: { order: Order; amount: string }) {
-  const leg = order.legs[order.legs.length - 1];
-  const settlement = order.path === "crosschain" ? order.claim?.explorerUrl : order.payment?.explorerUrl;
+  const legs = currentLegs(order);
+  const crosschain = order.path === "crosschain" || order.path === "split";
+  const settlement = crosschain ? order.claim?.explorerUrl : order.payment?.explorerUrl;
   return (
     <div className="grid justify-items-center gap-3 pt-4 text-center" role="status">
       <span className="grid size-12 place-items-center rounded-full bg-white text-black shadow-[0_0_0_8px_rgba(255,255,255,0.06)]">
@@ -539,9 +594,7 @@ function Done({ order, amount }: { order: Order; amount: string }) {
       <p className="text-2xl font-normal tracking-[-0.02em] embedded:text-xl">Payment confirmed</p>
       <p className="text-[14.5px] leading-[1.7] text-muted-foreground">
         {order.shop.name} received {amount} USDT on Whitechain.
-        {leg && order.path === "crosschain"
-          ? ` You paid ${trimAmount(formatUnits(BigInt(leg.amount), 6))} USDC on ${chainName(leg.chainId)}.`
-          : ""}
+        {legs.length > 0 && crosschain ? ` You paid ${describeLegs(legs)}.` : ""}
       </p>
       <div className="flex flex-wrap justify-center gap-x-5 gap-y-2">
         {settlement && <ExplorerLink href={settlement} />}
@@ -554,17 +607,33 @@ function Done({ order, amount }: { order: Order; amount: string }) {
 }
 
 function Returned({ order }: { order: Order }) {
-  const leg = order.legs[order.legs.length - 1];
+  const legs = currentLegs(order);
+  // In a split, a part whose lock never landed was never taken, so only the locked parts came back.
+  const locked = legs.filter((leg) => leg.lockTx);
+  const outcome =
+    legs.length === 0
+      ? "your payment went back to you."
+      : locked.length === 0
+        ? "nothing left your wallet."
+        : `your ${describeLegs(locked)} went back to your wallet.` +
+          (locked.length < legs.length ? " The rest never left it." : "");
   return (
     <div className="grid justify-items-center gap-3 pt-4 text-center" role="status">
       <p className="text-2xl font-normal tracking-[-0.02em] embedded:text-xl">Your money is back</p>
       <p className="text-[14.5px] leading-[1.7] text-muted-foreground">
-        The shop couldn&apos;t be paid in time, so{" "}
-        {leg
-          ? `your ${trimAmount(formatUnits(BigInt(leg.amount), 6))} USDC went back to your wallet on ${chainName(leg.chainId)}.`
-          : "your payment went back to you."}
+        The shop couldn&apos;t be paid in time, so {outcome}
       </p>
-      {leg?.refundTx && <ExplorerLink href={explorerTx(leg.chainId, leg.refundTx)} />}
+      <div className="flex flex-wrap justify-center gap-x-5 gap-y-1">
+        {legs
+          .filter((leg) => leg.refundTx)
+          .map((leg) => (
+            <ExplorerLink
+              key={leg.lockId}
+              href={explorerTx(leg.chainId, leg.refundTx as string)}
+              label={legs.length > 1 ? chainName(leg.chainId) : undefined}
+            />
+          ))}
+      </div>
     </div>
   );
 }
@@ -658,4 +727,60 @@ function WalletWait({
       )}
     </div>
   );
+}
+
+/** A cross-chain note may only move this wallet's USDC into our SourceLock on its own chain. */
+function noteFits(note: Quote["toSign"][number], chainId: number, address: Address): boolean {
+  const chain = customerChain(chainId);
+  if (!chain) return false;
+  const message = note.typedData.message;
+  return (
+    note.chainId === chainId &&
+    Number(note.typedData.domain.chainId) === chainId &&
+    note.typedData.domain.verifyingContract.toLowerCase() === chain.usdc.toLowerCase() &&
+    message.to?.toLowerCase() === chain.sourceLock.toLowerCase() &&
+    message.from?.toLowerCase() === address.toLowerCase() &&
+    message.nonce === note.lockId
+  );
+}
+
+/** Every way to pay this order, with what it costs and what the wallet holds there. */
+function paymentOptions(units: bigint | null, balances: Balances | null, address: Address | null): SourceOption[] {
+  if (units === null) return [];
+  const mine = balances && balances.owner === address ? balances.units : {};
+  const usdt: SourceOption = {
+    source: { kind: "usdt" },
+    token: "USDT",
+    chain: chainName(shopChain.id),
+    cost: units,
+    balance: mine.usdt ?? null,
+  };
+  const usdc = customerChains.map(
+    (chain): SourceOption => ({
+      source: { kind: "usdc", chainId: chain.id },
+      token: "USDC",
+      chain: chainName(chain.id),
+      cost: withProviderFee(units),
+      balance: mine[`usdc:${chain.id}`] ?? null,
+      note: "incl. 0.3% provider fee",
+    }),
+  );
+  const parts = planSplit(
+    withProviderFee(units),
+    customerChains.map((chain) => ({ chainId: chain.id, balance: mine[`usdc:${chain.id}`] ?? null })),
+  );
+  const split: SourceOption[] = parts
+    ? [
+        {
+          source: { kind: "split", parts },
+          token: "USDC",
+          chain: parts.map((part) => chainName(part.chainId)).join(" + "),
+          cost: withProviderFee(units),
+          balance: parts.reduce((sum, part) => sum + (mine[`usdc:${part.chainId}`] ?? BigInt(0)), BigInt(0)),
+          note: "incl. 0.3% provider fee",
+          detail: parts.map((part) => `${formatUsdc(part.amount)} on ${chainName(part.chainId)}`).join(" + "),
+        },
+      ]
+    : [];
+  return [usdt, ...usdc, ...split];
 }

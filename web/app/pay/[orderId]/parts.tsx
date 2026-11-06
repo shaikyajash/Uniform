@@ -183,11 +183,12 @@ export function Problem({ children }: { children: ReactNode }) {
   );
 }
 
-export function ExplorerLink({ href }: { href: string }) {
+/** `label`: which chain, when there are several links (a split's locks). */
+export function ExplorerLink({ href, label }: { href: string; label?: string }) {
   return (
     <TextButton asChild>
       <a href={href} target="_blank" rel="noreferrer">
-        View on explorer <ArrowUpRight />
+        {label ? `${label} explorer` : "View on explorer"} <ArrowUpRight />
       </a>
     </TextButton>
   );

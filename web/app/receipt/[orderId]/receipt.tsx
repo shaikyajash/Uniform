@@ -1,12 +1,12 @@
 "use client";
 
 import { useEffect, useState, type ReactNode } from "react";
-import { formatUnits } from "viem";
 import { ArrowUpRight } from "lucide-react";
 import { CardContent, CardHeader } from "@/components/ui/card";
 import { Separator } from "@/components/ui/separator";
 import { chainName, explorerTx, trimAmount } from "@/lib/chain";
-import { explain, getOrder, type Order, type OrderStatus } from "@/lib/desk";
+import { currentLegs, explain, getOrder, type Order, type OrderStatus } from "@/lib/desk";
+import { describeLegs } from "@/app/pay/[orderId]/progress";
 import { CopyText, FinePrint, PayCardSkeleton, PayShell, Problem } from "@/app/pay/[orderId]/parts";
 
 /** Statuses that never change again: stop refreshing. */
@@ -57,7 +57,7 @@ export function Receipt({ orderId }: { orderId: string }) {
   if (!order) return problem ? <PayShell><CardContent><Problem>{problem}</Problem></CardContent></PayShell> : <PayCardSkeleton />;
 
   const amount = trimAmount(order.amount);
-  const leg = order.legs[order.legs.length - 1];
+  const legs = currentLegs(order);
   const paid = order.status === "paid" || order.status === "partially_refunded" || order.status === "refunded";
 
   return (
@@ -99,8 +99,8 @@ export function Receipt({ orderId }: { orderId: string }) {
               </Row>
             )}
             <Row label="Route">
-              {order.path === "crosschain" && leg
-                ? `${trimAmount(formatUnits(BigInt(leg.amount), 6))} USDC on ${chainName(leg.chainId)} → USDT on Whitechain`
+              {(order.path === "crosschain" || order.path === "split") && legs.length > 0
+                ? `${describeLegs(legs)} → USDT on Whitechain`
                 : order.path === "direct"
                   ? "USDT on Whitechain"
                   : "Not chosen yet"}
