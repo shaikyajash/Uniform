@@ -124,6 +124,9 @@ pub struct OrderView {
     destination_lock_id: Option<String>,
     /// Cross-chain: the Relayer's latest attempt to claim the merchant's lock with the secret.
     claim: Option<PaymentView>,
+    /// The fee a cross-chain quote for this order would carry now: the cheapest provider who can
+    /// cover it, in basis points. `None` when no provider can; only Path A is quoted then.
+    provider_fee_bps: Option<u16>,
 }
 
 /// One customer lock. `lockId` is the only id to trust: SourceLock's `lockIdFor` of what was signed.
@@ -208,6 +211,7 @@ pub async fn read(State(state): State<AppState>, Path(id): Path<String>) -> Resu
     let path = row.path.map(|path| path.parse::<PayPath>()).transpose().map_err(ApiError::internal)?;
     let payment = latest_job(&state, &id, &["direct_pay", "source_lock"]).await?;
     let claim = latest_job(&state, &id, &["destination_claim"]).await?;
+    let provider_fee_bps = super::offers::choose(&state, &id, amount, super::now()).await.ok().map(|c| c.fee_bps);
     let legs: Vec<LegView> = sqlx::query_as(
         "SELECT chain_id, token, amount::text AS amount, lock_id, expiry, status, lock_tx, claim_tx, refund_tx
          FROM legs
@@ -234,6 +238,7 @@ pub async fn read(State(state): State<AppState>, Path(id): Path<String>) -> Resu
         legs,
         destination_lock_id: row.destination_lock_id,
         claim,
+        provider_fee_bps,
     }))
 }
 

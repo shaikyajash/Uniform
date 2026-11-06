@@ -65,17 +65,6 @@ async fn serve(pool: PgPool) -> Result<(), String> {
     let max_order_text = env::var("RELAYER_MAX_ORDER_USDT").unwrap_or_else(|_| DEFAULT_MAX_ORDER_USDT.to_owned());
     let max_order = Amount::from_decimal(&max_order_text, USDT_DECIMALS)
         .map_err(|_| format!("RELAYER_MAX_ORDER_USDT must be a number of USDT, got {max_order_text:?}"))?;
-    let provider = match env::var("PROVIDER_ADDRESS") {
-        Ok(text) if !text.trim().is_empty() => Some(
-            text.trim()
-                .parse()
-                .map_err(|_| format!("PROVIDER_ADDRESS must be Bob's 0x address, got {text:?}"))?,
-        ),
-        _ => {
-            println!("order-desk: PROVIDER_ADDRESS is not set; only Path A (USDT on Whitechain) is offered");
-            None
-        }
-    };
     let sweep = refund_sweep()?;
     println!("order-desk: refunds unfilled locks {}s after expiry, checking every {}s", sweep.grace_seconds, sweep.every.as_secs());
     tokio::spawn(refunds::run(pool.clone(), sweep));
@@ -85,7 +74,8 @@ async fn serve(pool: PgPool) -> Result<(), String> {
         pay_base_url,
         internal_token,
         max_order,
-        provider,
+        offers: Arc::default(),
+        quoting: Arc::default(),
         prices: Arc::new(prices::Prices::coingecko()),
     });
     // 0.0.0.0, not 127.0.0.1: a host like Railway reaches the server from outside the container.

@@ -6,6 +6,7 @@ pub mod direct;
 pub mod events;
 pub mod legs;
 pub mod login;
+pub mod offers;
 pub mod orders;
 pub mod quote;
 pub mod refunds;
@@ -16,7 +17,6 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
-use alloy::primitives::Address;
 use axum::{
     Router,
     extract::FromRef,
@@ -38,9 +38,11 @@ pub struct AppState {
     pub internal_token: String,
     /// The largest order, in USDT base units: the Relayer's `RELAYER_MAX_ORDER_USDT`.
     pub max_order: Amount,
-    /// Bob, who fills cross-chain payments (`PROVIDER_ADDRESS`): the receiver of every source lock.
-    /// `None` turns the cross-chain path off.
-    pub provider: Option<Address>,
+    /// Providers' offers for cross-chain payments, as the Matchmaker last sent them. With none,
+    /// only Path A (USDT on Whitechain) is quoted.
+    pub offers: Arc<offers::OfferBook>,
+    /// Held from choosing a provider to storing the quote, one cross-chain quote at a time.
+    pub quoting: Arc<tokio::sync::Mutex<()>>,
     /// USD prices of tokens paid through a Calibur batch (WETH, WBTC, ...).
     pub prices: Arc<crate::prices::Prices>,
 }
@@ -71,6 +73,7 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/auth/verify", post(login::verify))
         .route("/v1/auth/logout", post(login::logout))
         .route("/internal/events", post(events::report))
+        .route("/internal/offers", post(offers::receive))
         .with_state(state)
 }
 
@@ -136,7 +139,7 @@ pub mod test_support {
 
     const CHAINS_JSON: &str = include_str!("../../../../shared/chains.json");
     pub const INTERNAL_TOKEN: &str = "test-internal-token-0123456789";
-    /// Bob in tests.
+    /// The provider in tests: the only offer, at chains.json's default fee.
     pub const PROVIDER: alloy::primitives::Address = alloy::primitives::address!("b0b0000000000000000000000000000000000001");
 
     pub struct TestApp {
@@ -173,7 +176,17 @@ pub mod test_support {
             pay_base_url: "https://pay.example/".into(),
             internal_token: INTERNAL_TOKEN.into(),
             max_order: common::amount::Amount::from(100_000_000u64),
-            provider: Some(PROVIDER),
+            offers: {
+                let book = super::offers::OfferBook::default();
+                book.replace(vec![common::offers::Offer {
+                    provider: PROVIDER,
+                    fee_bps: 30,
+                    max_per_order: common::amount::Amount::from(100_000_000u64),
+                    available: common::amount::Amount::from(1_000_000_000u64),
+                }]);
+                Arc::new(book)
+            },
+            quoting: Arc::default(),
             prices: Arc::new(crate::prices::Prices::fixed(&[("bitcoin", 100_000_000_000), ("ethereum", 4_000_000_000)])),
         };
         TestApp { app: router(state), pool, key }
