@@ -53,6 +53,11 @@ pub async fn create(
     if amount == Amount::default() {
         return Err(ApiError::bad_request("bad_amount", "amount must be above zero"));
     }
+    // The Relayer refuses to pay gas above this, so such an order could never be paid.
+    if amount > state.max_order {
+        let limit = state.max_order.to_decimal(USDT_DECIMALS);
+        return Err(ApiError::bad_request("amount_too_large", format!("amount must be at most {limit} USDT")));
+    }
     let reference = body.reference.trim();
     if reference.is_empty() || reference.len() > MAX_REFERENCE_LENGTH {
         return Err(ApiError::bad_request("bad_reference", "reference must be 1 to 200 characters"));
@@ -244,6 +249,7 @@ mod tests {
         for (body, code) in [
             (json!({ "amount": "0", "reference": "r" }), "bad_amount"),
             (json!({ "amount": "12.0000001", "reference": "r" }), "bad_amount"),
+            (json!({ "amount": "100.000001", "reference": "r" }), "amount_too_large"),
             (json!({ "amount": 12, "reference": "r" }), "bad_json"),
             (json!({ "amount": "12", "reference": "  " }), "bad_reference"),
             (json!({ "amount": "12", "reference": "r", "successUrl": "javascript:alert(1)" }), "bad_success_url"),

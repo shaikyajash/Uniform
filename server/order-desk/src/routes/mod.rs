@@ -15,7 +15,7 @@ use axum::{
     extract::FromRef,
     routing::{get, post},
 };
-use common::chains::Chains;
+use common::{amount::Amount, chains::Chains};
 use sqlx::PgPool;
 
 #[derive(Clone)]
@@ -27,6 +27,8 @@ pub struct AppState {
     pub pay_base_url: String,
     /// Shared secret the Matchmaker sends on `/internal/events` (`INTERNAL_EVENTS_TOKEN`).
     pub internal_token: String,
+    /// The largest order, in USDT base units: the Relayer's `RELAYER_MAX_ORDER_USDT`.
+    pub max_order: Amount,
 }
 
 impl FromRef<AppState> for PgPool {
@@ -111,6 +113,7 @@ pub mod test_support {
             chains: Arc::new(Chains::from_json(CHAINS_JSON).unwrap()),
             pay_base_url: "https://pay.example/".into(),
             internal_token: INTERNAL_TOKEN.into(),
+            max_order: common::amount::Amount::from(100_000_000u64),
         };
         TestApp { app: router(state), pool, key }
     }
