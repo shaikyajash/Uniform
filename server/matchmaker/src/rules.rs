@@ -36,32 +36,49 @@ pub struct SourceLockView {
     pub expiry: u64,
 }
 
-/// The token a source lock holds. Only these two can be locked (SourceLock's allowed tokens).
+/// The token a source lock holds, as Bob values it. Tokens chains.json does not list for the
+/// chain are skipped before this.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LockedToken {
     Usdc,
     Eurc,
+    /// A token with a `priceId` in chains.json (WETH, WBTC, ...), with its decimals.
+    Priced { decimals: u8 },
 }
 
-/// What a lock is worth to Bob in USDC: USDC at face value; EURC at `eurc_micro_usd` (one EURC in
-/// micro-dollars) less `buffer_bps`, rounded down. The buffer covers the price moving before Bob
-/// converts the EURC. All three tokens have 6 decimals. `None` if the value cannot be computed.
+impl LockedToken {
+    /// Whether the lock's value needs a market price.
+    pub fn is_priced(self) -> bool {
+        self != LockedToken::Usdc
+    }
+
+    fn decimals(self) -> u8 {
+        match self {
+            LockedToken::Usdc | LockedToken::Eurc => 6,
+            LockedToken::Priced { decimals } => decimals,
+        }
+    }
+}
+
+/// What a lock is worth to Bob in USDC (6 decimals): USDC at face value; any other token at
+/// `micro_usd` (one whole token in micro-dollars) less `buffer_bps`, in the token's own decimals,
+/// rounded down: `amount × micro_usd × (10000 − buffer) / (10^decimals × 10000)`. The buffer covers
+/// the price moving before Bob converts the token. `None` if the value cannot be computed.
 pub fn usdc_value(
     token: LockedToken,
     amount: U256,
-    eurc_micro_usd: u64,
+    micro_usd: u64,
     buffer_bps: u16,
 ) -> Option<U256> {
-    match token {
-        LockedToken::Usdc => Some(amount),
-        LockedToken::Eurc => {
-            let keep = 10_000u64.checked_sub(u64::from(buffer_bps))?;
-            let scaled = amount
-                .checked_mul(U256::from(eurc_micro_usd))?
-                .checked_mul(U256::from(keep))?;
-            Some(scaled / U256::from(10_000_000_000u64))
-        }
+    if token == LockedToken::Usdc {
+        return Some(amount);
     }
+    let keep = 10_000u64.checked_sub(u64::from(buffer_bps))?;
+    let scaled = amount
+        .checked_mul(U256::from(micro_usd))?
+        .checked_mul(U256::from(keep))?;
+    let one = U256::from(10u64).checked_pow(U256::from(token.decimals()))?;
+    Some(scaled / one.checked_mul(U256::from(10_000u64))?)
 }
 
 /// What the Order Desk says about the order.
@@ -275,6 +292,13 @@ mod tests {
         }
     }
 
+    fn order_for(amount: u64) -> OrderView {
+        OrderView {
+            amount: U256::from(amount),
+            ..order()
+        }
+    }
+
     fn decide(lock: SourceLockView, order: OrderView) -> Result<FillPlan, Skip> {
         fill_decision(&lock, &order, &provider(), false, NOW, NOW, timing())
     }
@@ -350,6 +374,93 @@ mod tests {
             usdc_value(LockedToken::Eurc, U256::from(1u64), 1_120_000, 10_001),
             None
         );
+    }
+
+    const WBTC: LockedToken = LockedToken::Priced { decimals: 8 };
+    const WETH: LockedToken = LockedToken::Priced { decimals: 18 };
+
+    #[test]
+    fn wbtc_is_valued_in_its_eight_decimals_less_the_buffer_rounded_down() {
+        // 0.001 WBTC at 97,000 USD, less 1%: 96.03 USDC.
+        assert_eq!(
+            usdc_value(WBTC, U256::from(100_000u64), 97_000_000_000, 100),
+            Some(U256::from(96_030_000u64))
+        );
+        // One satoshi at 97,123.456789 USD is 971.23456789 micro-USD; less 1%, 961.522... → 961.
+        assert_eq!(
+            usdc_value(WBTC, U256::from(1u64), 97_123_456_789, 100),
+            Some(U256::from(961u64))
+        );
+        assert_eq!(
+            usdc_value(WBTC, U256::from(100_000u64), 97_000_000_000, 0),
+            Some(U256::from(97_000_000u64))
+        );
+    }
+
+    #[test]
+    fn weth_is_valued_in_its_eighteen_decimals_less_the_buffer_rounded_down() {
+        // 0.005 WETH at 3,000 USD, less 1%: 14.85 USDC.
+        let half_cent_eth = U256::from(5_000_000_000_000_000u64);
+        assert_eq!(
+            usdc_value(WETH, half_cent_eth, 3_000_000_000, 100),
+            Some(U256::from(14_850_000u64))
+        );
+        // Dust worth less than a micro-dollar is worth nothing.
+        assert_eq!(
+            usdc_value(WETH, U256::from(333_333_333u64), 3_000_000_000, 0),
+            Some(U256::ZERO)
+        );
+        // The smallest amount worth a micro-dollar after the buffer, and one wei less.
+        let one_micro = U256::from(336_700_337u64);
+        assert_eq!(
+            usdc_value(WETH, one_micro, 3_000_000_000, 100),
+            Some(U256::from(1u64))
+        );
+        assert_eq!(
+            usdc_value(WETH, one_micro - U256::from(1u64), 3_000_000_000, 100),
+            Some(U256::ZERO)
+        );
+        assert_eq!(usdc_value(WETH, U256::MAX, 3_000_000_000, 100), None);
+    }
+
+    #[test]
+    fn the_order_desk_quote_for_a_priced_token_always_fills() {
+        // Order Desk: ask = ceil(usd6 × 10^dec × 10000 / (price × (10000 − 150))). Bob's own
+        // buffer is smaller, so the ask covers the order even after the price falls a little.
+        for (token, decimals, price) in [
+            (WBTC, 8u32, 97_123_456_789u64),
+            (WETH, 18, 3_012_345_678),
+            (WETH, 18, 1),
+        ] {
+            for order in [1u64, 999_999, 12_000_000, 19_999_999] {
+                let needed = required_usdc(U256::from(order), 30).unwrap();
+                let ask = (needed * U256::from(10u64).pow(U256::from(decimals))
+                    * U256::from(10_000u64))
+                .div_ceil(U256::from(price) * U256::from(10_000u64 - 150));
+                let value = usdc_value(token, ask, price, 100).unwrap();
+                assert!(value >= needed, "{token:?} price {price} order {order}");
+                // Even at the quote's own buffer it is enough.
+                assert!(usdc_value(token, ask, price, 150).unwrap() >= needed);
+
+                let mut l = lock();
+                l.usdc_value = value;
+                let mut o = order_for(order);
+                o.status = OrderStatus::Paying;
+                assert!(decide(l, o).is_ok(), "{token:?} order {order}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_priced_lock_just_short_after_the_buffer_is_not_filled() {
+        // 12.036 USDC needed. 0.000124 WBTC at 97,000 less 1% is 11.90772: short.
+        let value = usdc_value(WBTC, U256::from(12_400u64), 97_000_000_000, 100).unwrap();
+        let mut l = lock();
+        l.usdc_value = value;
+        assert!(matches!(
+            decide(l, order()),
+            Err(Skip::NotEnoughLocked { .. })
+        ));
     }
 
     #[test]
