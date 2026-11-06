@@ -3,9 +3,8 @@
 // A cross-chain payment's three steps, as the customer lives through them. Each step shows done,
 // working or waiting, and a transaction link once there is one.
 
-import { formatUnits } from "viem";
 import { Check, Loader2 } from "lucide-react";
-import { chainName, explorerTx, trimAmount } from "@/lib/chain";
+import { chainName, explorerTx, formatTokenAmount, legToken } from "@/lib/chain";
 import { currentLegs, type Leg, type Order } from "@/lib/desk";
 import { cn } from "@/lib/utils";
 import { ExplorerLink } from "./parts";
@@ -14,9 +13,12 @@ type State = "done" | "working" | "waiting";
 
 const RANK: Record<string, number> = { paying: 0, source_locked: 1, destination_locked: 2, paid: 3 };
 
-/** "6.00 USDC on Base" for one leg; "6.00 on Base and 4.03 USDC on Ethereum Sepolia" for a split. */
+/** "6.00 USDC on Base" (or "0.0034 WETH on Base") for one leg; "6.00 USDC on Base and 4.03 USDC on Ethereum Sepolia" for a split. */
 export function describeLegs(legs: Leg[]): string {
-  const parts = legs.map((leg) => `${trimAmount(formatUnits(BigInt(leg.amount), 6))} USDC on ${chainName(leg.chainId)}`);
+  const parts = legs.map((leg) => {
+    const token = legToken(leg.chainId, leg.token);
+    return `${formatTokenAmount(BigInt(leg.amount), token.decimals)} ${token.symbol} on ${chainName(leg.chainId)}`;
+  });
   if (parts.length === 1) return parts[0];
   return `${parts.slice(0, -1).join(", ")} and ${parts[parts.length - 1]}`;
 }
@@ -39,7 +41,7 @@ export function Progress({ order, amount }: { order: Order; amount: string }) {
     links?: { label: string; href: string }[];
   }[] = [
     {
-      title: legs.length > 0 ? `Lock ${describeLegs(legs)}` : "Lock your USDC",
+      title: legs.length > 0 ? `Lock ${describeLegs(legs)}` : "Lock your payment",
       detail:
         rank > 0
           ? split
@@ -49,7 +51,7 @@ export function Progress({ order, amount }: { order: Order; amount: string }) {
             ? `${lockedCount} of ${legs.length} locked. The provider waits for all of them.`
             : order.payment?.status === "sent"
               ? `Waiting for ${chain} to confirm…`
-              : "Sending your signed note…",
+              : "Sending your signed payment…",
       state: rank > 0 ? "done" : "working",
       link: !split && lockTx && leg ? explorerTx(leg.chainId, lockTx) : null,
       links: split

@@ -2,24 +2,32 @@
 
 // "Pay with": one row per way to pay, with what it costs and what the wallet holds there. A row
 // the wallet can't cover is still shown (the customer may top up), but can't be picked. A split
-// row (A8) takes part of the USDC from each chain when no one chain holds enough.
+// row (A8) takes part of the USDC from each chain when no one chain holds enough. A priced token
+// (WETH, WBTC) shows an estimate ("≈") at the market price; its quote sets the exact amount.
 
-import { formatUnits } from "viem";
-import { trimAmount } from "@/lib/chain";
+import { formatTokenAmount } from "@/lib/chain";
 import { cn } from "@/lib/utils";
 import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group";
 
 /** One chain's part of a split payment, in 6-decimal base units. */
 export type SplitPart = { chainId: number; amount: bigint };
 
-export type Source = { kind: "usdt" } | { kind: "usdc"; chainId: number } | { kind: "split"; parts: SplitPart[] };
+export type Source =
+  | { kind: "usdt" }
+  | { kind: "usdc"; chainId: number }
+  | { kind: "split"; parts: SplitPart[] }
+  | { kind: "token"; chainId: number; symbol: string };
 
 export type SourceOption = {
   source: Source;
-  token: "USDT" | "USDC";
+  token: string;
   chain: string;
-  /** What this way costs, in 6-decimal base units. */
+  /** What this way costs, in `decimals` base units. */
   cost: bigint;
+  /** The token's decimals: 6 for USDT and USDC. */
+  decimals: number;
+  /** The cost is an estimate at the market price (a priced token). */
+  approx?: boolean;
   /** What the wallet holds there; `null` while it is being read. */
   balance: bigint | null;
   note?: string;
@@ -28,8 +36,13 @@ export type SourceOption = {
 };
 
 export const encodeSource = (source: Source) =>
-  source.kind === "usdt" ? "usdt" : source.kind === "usdc" ? `usdc:${source.chainId}` : "split";
-const show = (units: bigint) => trimAmount(formatUnits(units, 6));
+  source.kind === "usdt"
+    ? "usdt"
+    : source.kind === "usdc"
+      ? `usdc:${source.chainId}`
+      : source.kind === "token"
+        ? `token:${source.chainId}:${source.symbol}`
+        : "split";
 
 export function SourcePicker({
   options,
@@ -75,9 +88,12 @@ export function SourcePicker({
                 </span>
               </span>
               <span className="grid justify-items-end gap-0.5 text-right">
-                <span className="font-mono text-[13px] text-foreground">{show(option.cost)}</span>
+                <span className="font-mono text-[13px] text-foreground">
+                  {option.approx ? "≈" : ""}
+                  {formatTokenAmount(option.cost, option.decimals)}
+                </span>
                 <span className={cn("font-mono text-[10.5px] tracking-[0.04em]", short ? "text-warn" : "text-faint")}>
-                  {option.balance === null ? "reading balance…" : `balance ${show(option.balance)}`}
+                  {option.balance === null ? "reading balance…" : `balance ${formatTokenAmount(option.balance, option.decimals)}`}
                 </span>
               </span>
             </label>
@@ -86,6 +102,11 @@ export function SourcePicker({
       </RadioGroup>
       {options.some((option) => option.note) && (
         <p className="font-mono text-[10px] tracking-[0.06em] text-faint">USDC prices include the provider&apos;s 0.3% fee.</p>
+      )}
+      {options.some((option) => option.approx) && (
+        <p className="font-mono text-[10px] tracking-[0.06em] text-faint">
+          ≈ At the market price, fee included. The exact amount is set when you pay.
+        </p>
       )}
     </div>
   );
