@@ -33,8 +33,8 @@ use crate::{
     store::{Fill, PendingLog, Store},
 };
 
-/// How far back the first run starts (about 3 hours of Base blocks), so locks made before
-/// start-up are still seen.
+/// How far back the first run starts, so locks made before start-up are still seen (on Base
+/// Sepolia under an hour; on Ethereum Sepolia about 20 hours).
 const FIRST_RUN_LOOKBACK: u64 = 6_000;
 /// A parked log whose handling fails permanently this many times is dropped and logged loudly.
 /// Network and Order Desk outages are not counted: those logs are retried until they clear.
@@ -387,6 +387,26 @@ impl Worker {
             shipped.balance
         );
         for (&chain_id, &lock_address) in &self.source_locks {
+            let code = self
+                .provider(chain_id)?
+                .get_code_at(lock_address)
+                .await
+                .map_err(err)?;
+            if code.is_empty() {
+                return Err(format!(
+                    "chains.json sourceLock {lock_address} on chain {chain_id} has no code: deploy it or set it to \"\""
+                ));
+            }
+            let watched = self.watched(chain_id)?;
+            eprintln!(
+                "matchmaker: chain {chain_id} reads up to {}; filler gas floor {} wei",
+                if watched.use_safe_tag {
+                    "the safe block".to_string()
+                } else {
+                    format!("{} confirmations", watched.confirmations)
+                },
+                self.config.min_filler_gas_wei.get(&chain_id).copied().unwrap_or(0)
+            );
             let lock = SourceLock::new(lock_address, self.provider(chain_id)?);
             let usdc = lock.usdc().call().await.map_err(err)?;
             let alt = lock.altToken().call().await.map_err(err)?;
@@ -469,13 +489,17 @@ impl Worker {
     /// The last block to read on a chain: the "safe" block on rollups, otherwise head minus the
     /// confirmations in chains.json.
     async fn readable_head(&self, watched: &Watched) -> Result<Option<u64>> {
-        if watched.use_safe_tag
-            && let Ok(Some(block)) = watched
+        if watched.use_safe_tag {
+            // Never fall back to a few confirmations on a rollup: skip this pass instead.
+            return match watched
                 .provider
                 .get_block_by_number(BlockNumberOrTag::Safe)
                 .await
-        {
-            return Ok(Some(block.header.number));
+            {
+                Ok(Some(block)) => Ok(Some(block.header.number)),
+                Ok(None) => Err(format!("chain {}: no safe block", watched.chain_id)),
+                Err(e) => Err(format!("chain {}: safe block: {}", watched.chain_id, err(e))),
+            };
         }
         let head = watched.provider.get_block_number().await.map_err(err)?;
         Ok(head.checked_sub(watched.confirmations))
@@ -808,7 +832,13 @@ impl Worker {
             .get_balance(self.filler)
             .await
             .map_err(err)?;
-        if gas < U256::from(self.config.min_filler_gas_wei) {
+        let min_gas = self
+            .config
+            .min_filler_gas_wei
+            .get(&chain_id)
+            .copied()
+            .unwrap_or(u128::MAX);
+        if gas < U256::from(min_gas) {
             return Err(format!(
                 "filler has too little gas on chain {chain_id} to redeem later ({gas} wei); top it up"
             ));

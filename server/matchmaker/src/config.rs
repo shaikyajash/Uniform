@@ -1,6 +1,6 @@
 //! Settings from the environment and `shared/chains.json`.
 
-use std::{env, str::FromStr};
+use std::{collections::HashMap, env, str::FromStr};
 
 use alloy::primitives::B256;
 use common::chains::Chains;
@@ -21,8 +21,10 @@ pub struct Config {
     /// Largest block range read in one `eth_getLogs` call.
     pub max_block_range: u64,
     /// Skip filling when the filler holds less than this on the source chain, so it can always
-    /// afford the source redeem.
-    pub min_filler_gas_wei: u128,
+    /// afford the source redeem. Per customer chain: `MIN_FILLER_GAS_WEI_<chainId>`, else
+    /// `MIN_FILLER_GAS_WEI` on rollups (default 0.0001 ETH) and 0.002 ETH on other chains, where a
+    /// redeem costs far more.
+    pub min_filler_gas_wei: HashMap<u64, u128>,
     /// Where one EURC's USD price is read (CoinGecko's reply shape).
     pub eurc_price_url: String,
     /// EURC locks are valued this far below the price, so a price move before Bob converts the
@@ -67,7 +69,7 @@ impl Config {
             db_path: env::var("DB_PATH").unwrap_or_else(|_| "matchmaker.db".into()),
             poll_seconds: number("POLL_SECONDS", 4)?,
             max_block_range: number("MAX_BLOCK_RANGE", 1000)?,
-            min_filler_gas_wei: number("MIN_FILLER_GAS_WEI", 100_000_000_000_000u128)?,
+            min_filler_gas_wei: HashMap::new(),
             eurc_price_url: env::var("EURC_PRICE_URL").unwrap_or_else(|_| {
                 "https://api.coingecko.com/api/v3/simple/price?ids=euro-coin&vs_currencies=usd&include_last_updated_at=true"
                     .into()
@@ -76,6 +78,17 @@ impl Config {
             safe_tag_chains: chain_list("SAFE_TAG_CHAINS", &[84532])?,
             chains,
         };
+        let mut config = config;
+        let rollup_gas = number("MIN_FILLER_GAS_WEI", 100_000_000_000_000u128)?;
+        for chain in config.chains.customer_chains() {
+            let default = if config.safe_tag_chains.contains(&chain.chain_id) {
+                rollup_gas
+            } else {
+                2_000_000_000_000_000
+            };
+            let min = number(&format!("MIN_FILLER_GAS_WEI_{}", chain.chain_id), default)?;
+            config.min_filler_gas_wei.insert(chain.chain_id, min);
+        }
         config.check()?;
         Ok(config)
     }
@@ -116,6 +129,20 @@ impl Config {
         }
         if !self.eurc_price_url.starts_with("https://") {
             return Err("EURC_PRICE_URL must use https".into());
+        }
+        let customers: Vec<u64> = self
+            .chains
+            .customer_chains()
+            .map(|c| c.chain_id)
+            .collect();
+        if let Some(id) = self
+            .safe_tag_chains
+            .iter()
+            .find(|id| !customers.contains(id))
+        {
+            return Err(format!(
+                "SAFE_TAG_CHAINS lists {id}, which is not a customer chain in chains.json"
+            ));
         }
         let t = self.timing;
         if t.min_gap < 300 {
