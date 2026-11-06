@@ -27,7 +27,11 @@ interface IERC3009 {
 /// Customers lock gaslessly with an EIP-3009 authorization whose nonce is the lock id:
 ///     lockId = keccak256(abi.encode(LOCK_TAG, chainid, this, params, payer, tokenIn, amountIn))
 /// so a submitter cannot change the receiver, hashlock, expiry or amount, and each authorization
-/// works once. Only USDC is accepted for now; swaps from other tokens are added separately.
+/// works once. An authorization may live at most MAX_AUTH_WINDOW and must end at least
+/// MIN_TIME_AFTER_AUTH before the lock expires, so a late submission still leaves enough time for
+/// the destination side. Only USDC is accepted for now; swaps from other tokens are added separately.
+/// Anyone can open a lock with any orderId, so off-chain watchers must trust only the exact lock id
+/// they expect (recomputed with lockIdFor from the quote), never an orderId or hashlock match.
 contract SourceLock {
     using SafeERC20 for IERC20;
 
@@ -61,6 +65,7 @@ contract SourceLock {
     uint256 public constant MIN_LOCK_TIME = 5 minutes;
     uint256 public constant MAX_LOCK_TIME = 3 hours;
     uint256 public constant MAX_AUTH_WINDOW = 1 hours;
+    uint256 public constant MIN_TIME_AFTER_AUTH = 15 minutes;
 
     IERC20 public immutable usdc;
 
@@ -82,12 +87,14 @@ contract SourceLock {
     error ZeroAmount();
     error AmountTooLarge(uint256 amount);
     error ZeroReceiver();
+    error InvalidReceiver(address receiver);
     error ZeroHashlock();
     error ExpiryOutOfRange(uint64 expiry);
     error UnsupportedToken(address token);
     error SwapNotSupported();
     error BelowMinimum(uint256 amount, uint256 minUsdcOut);
-    error AuthorizationWindowTooLong(uint256 validBefore, uint256 latestAllowed);
+    error AuthorizationWindowTooLong(uint256 validAfter, uint256 validBefore);
+    error AuthorizationTooLate(uint256 validBefore, uint64 expiry);
     error LockExists(bytes32 lockId);
     error NotOpen(bytes32 lockId);
     error LockExpired(bytes32 lockId);
@@ -123,9 +130,8 @@ contract SourceLock {
     ) external returns (bytes32 lockId) {
         if (tokenIn != address(usdc)) revert UnsupportedToken(tokenIn);
         if (swapData.length != 0) revert SwapNotSupported();
-        if (validBefore > block.timestamp + MAX_AUTH_WINDOW) {
-            revert AuthorizationWindowTooLong(validBefore, block.timestamp + MAX_AUTH_WINDOW);
-        }
+        if (validBefore > validAfter + MAX_AUTH_WINDOW) revert AuthorizationWindowTooLong(validAfter, validBefore);
+        if (validBefore + MIN_TIME_AFTER_AUTH > p.expiry) revert AuthorizationTooLate(validBefore, p.expiry);
         lockId = lockIdFor(p, payer, tokenIn, amountIn);
         _open(lockId, p, payer, amountIn);
         IERC3009(address(usdc))
@@ -165,6 +171,7 @@ contract SourceLock {
         if (amount > type(uint96).max) revert AmountTooLarge(amount);
         if (amount < p.minUsdcOut) revert BelowMinimum(amount, p.minUsdcOut);
         if (p.receiver == address(0)) revert ZeroReceiver();
+        if (p.receiver == address(this) || p.receiver == address(usdc)) revert InvalidReceiver(p.receiver);
         if (p.hashlock == bytes32(0)) revert ZeroHashlock();
         if (p.expiry < block.timestamp + MIN_LOCK_TIME || p.expiry > block.timestamp + MAX_LOCK_TIME) {
             revert ExpiryOutOfRange(p.expiry);
