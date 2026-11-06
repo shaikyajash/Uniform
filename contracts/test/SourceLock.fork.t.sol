@@ -49,7 +49,7 @@ contract SourceLockForkTest is Sign3009 {
         });
         bytes32 nonce = lock.lockIdFor(p, customer, address(USDC), 12e6);
         Auth memory a = signReceive(
-            address(USDC), customerKey, address(lock), 12e6, block.timestamp - 1, block.timestamp + 600, nonce
+            address(USDC), customerKey, address(lock), 12e6, block.timestamp - 1, block.timestamp + 300, nonce
         );
         bytes32 id = lock.lockWithAuthorization(
             p, customer, address(USDC), 12e6, a.validAfter, a.validBefore, a.v, a.r, a.s, ""

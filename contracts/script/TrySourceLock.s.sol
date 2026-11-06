@@ -38,7 +38,7 @@ contract TrySourceLock is Script {
             outToken: address(0)
         });
         uint256 validAfter = block.timestamp - 60;
-        uint256 validBefore = block.timestamp + 600;
+        uint256 validBefore = block.timestamp + 300;
         bytes32 nonce = sourceLock.lockIdFor(p, customer, address(USDC), amount);
         bytes32 digest = keccak256(
             abi.encodePacked(

@@ -38,7 +38,7 @@ contract SourceLockTest is Sign3009 {
     function _sign(SourceLock.LockParams memory p, uint256 amount) internal view returns (Auth memory) {
         bytes32 nonce = lock.lockIdFor(p, customer, address(usdc), amount);
         return signReceive(
-            address(usdc), customerKey, address(lock), amount, block.timestamp - 1, block.timestamp + 10 minutes, nonce
+            address(usdc), customerKey, address(lock), amount, block.timestamp - 1, block.timestamp + 5 minutes, nonce
         );
     }
 
@@ -131,16 +131,20 @@ contract SourceLockTest is Sign3009 {
     }
 
     function test_rejectsExpiryOutOfRange() public {
-        SourceLock.LockParams memory p = _params(12e6);
+        usdc.mint(bob, 10e6);
+        vm.prank(bob);
+        usdc.approve(address(lock), 10e6);
+
+        SourceLock.LockParams memory p = _params(1e6);
         p.expiry = uint64(block.timestamp + 1 minutes);
-        Auth memory a = _sign(p, 12e6);
         vm.expectRevert(abi.encodeWithSelector(SourceLock.ExpiryOutOfRange.selector, p.expiry));
-        _lock(p, 12e6, a);
+        vm.prank(bob);
+        lock.lockFromProvider(p, 1e6);
 
         p.expiry = uint64(block.timestamp + 4 hours);
-        a = _sign(p, 12e6);
         vm.expectRevert(abi.encodeWithSelector(SourceLock.ExpiryOutOfRange.selector, p.expiry));
-        _lock(p, 12e6, a);
+        vm.prank(bob);
+        lock.lockFromProvider(p, 1e6);
     }
 
     function test_rejectsAmountBelowMinimum() public {
@@ -165,16 +169,127 @@ contract SourceLockTest is Sign3009 {
 
     function test_rejectsLongAuthorizationWindow() public {
         SourceLock.LockParams memory p = _params(12e6);
+        p.expiry = uint64(block.timestamp + 3 hours);
         bytes32 nonce = lock.lockIdFor(p, customer, address(usdc), 12e6);
         Auth memory a = signReceive(
             address(usdc), customerKey, address(lock), 12e6, block.timestamp - 1, block.timestamp + 2 hours, nonce
         );
         vm.expectRevert(
-            abi.encodeWithSelector(
-                SourceLock.AuthorizationWindowTooLong.selector, a.validBefore, block.timestamp + 1 hours
-            )
+            abi.encodeWithSelector(SourceLock.AuthorizationWindowTooLong.selector, a.validAfter, a.validBefore)
         );
         _lock(p, 12e6, a);
+    }
+
+    function test_rejectsAuthorizationEndingTooCloseToExpiry() public {
+        SourceLock.LockParams memory p = _params(12e6);
+        bytes32 nonce = lock.lockIdFor(p, customer, address(usdc), 12e6);
+        Auth memory a = signReceive(
+            address(usdc), customerKey, address(lock), 12e6, block.timestamp - 1, block.timestamp + 6 minutes, nonce
+        );
+        vm.expectRevert(abi.encodeWithSelector(SourceLock.AuthorizationTooLate.selector, a.validBefore, p.expiry));
+        _lock(p, 12e6, a);
+    }
+
+    function test_lateSubmissionStillLeavesTimeForTheDestination() public {
+        SourceLock.LockParams memory p = _params(12e6);
+        Auth memory a = _sign(p, 12e6);
+        vm.warp(a.validBefore - 1);
+        bytes32 id = _lock(p, 12e6, a);
+        (,,,,,, bytes32 orderId) = lock.locks(id);
+        assertEq(orderId, p.orderId);
+        assertGe(p.expiry - block.timestamp, lock.MIN_TIME_AFTER_AUTH());
+    }
+
+    function test_rejectsReceiverThatWouldStrandFunds() public {
+        SourceLock.LockParams memory p = _params(12e6);
+        p.receiver = address(lock);
+        Auth memory a = _sign(p, 12e6);
+        vm.expectRevert(abi.encodeWithSelector(SourceLock.InvalidReceiver.selector, address(lock)));
+        _lock(p, 12e6, a);
+
+        p.receiver = address(usdc);
+        a = _sign(p, 12e6);
+        vm.expectRevert(abi.encodeWithSelector(SourceLock.InvalidReceiver.selector, address(usdc)));
+        _lock(p, 12e6, a);
+    }
+
+    function test_rejectsZeroReceiverHashlockAndAmount() public {
+        SourceLock.LockParams memory p = _params(0);
+        p.receiver = address(0);
+        Auth memory a = _sign(p, 12e6);
+        vm.expectRevert(SourceLock.ZeroReceiver.selector);
+        _lock(p, 12e6, a);
+
+        p = _params(0);
+        p.hashlock = bytes32(0);
+        a = _sign(p, 12e6);
+        vm.expectRevert(SourceLock.ZeroHashlock.selector);
+        _lock(p, 12e6, a);
+
+        p = _params(0);
+        a = _sign(p, 0);
+        vm.expectRevert(SourceLock.ZeroAmount.selector);
+        _lock(p, 0, a);
+    }
+
+    function test_acceptsUsdcAsOutToken() public {
+        SourceLock.LockParams memory p = _params(12e6);
+        p.outToken = address(usdc);
+        bytes32 id = _lock(p, 12e6, _sign(p, 12e6));
+        lock.claim(id, secret);
+        assertEq(usdc.balanceOf(bob), 12e6);
+    }
+
+    function test_submitterCannotChangeAmount() public {
+        SourceLock.LockParams memory p = _params(5e6);
+        Auth memory a = _sign(p, 12e6);
+        vm.expectRevert("invalid signature");
+        _lock(p, 6e6, a);
+    }
+
+    function test_signatureForAnotherLockContractFails() public {
+        SourceLock other = new SourceLock(IERC20(address(usdc)));
+        SourceLock.LockParams memory p = _params(12e6);
+        Auth memory a = _sign(p, 12e6);
+        vm.expectRevert("invalid signature");
+        other.lockWithAuthorization(p, customer, address(usdc), 12e6, a.validAfter, a.validBefore, a.v, a.r, a.s, "");
+    }
+
+    function test_eventsCarryTheLockDetails() public {
+        SourceLock.LockParams memory p = _params(12e6);
+        Auth memory a = _sign(p, 12e6);
+        bytes32 id = lock.lockIdFor(p, customer, address(usdc), 12e6);
+        vm.expectEmit(address(lock));
+        emit SourceLock.Locked(id, p.orderId, customer, bob, 12e6, hashlock, p.expiry);
+        _lock(p, 12e6, a);
+
+        vm.expectEmit(address(lock));
+        emit SourceLock.Claimed(id, secret);
+        lock.claim(id, secret);
+    }
+
+    function test_anyoneCanRefundAfterExpiry() public {
+        SourceLock.LockParams memory p = _params(12e6);
+        bytes32 id = _lock(p, 12e6, _sign(p, 12e6));
+        vm.warp(p.expiry);
+        vm.expectEmit(address(lock));
+        emit SourceLock.Refunded(id);
+        vm.prank(makeAddr("stranger"));
+        lock.refund(id);
+        assertEq(usdc.balanceOf(customer), 50e6);
+    }
+
+    function test_providerLockRefundsToProvider() public {
+        usdc.mint(bob, 4e6);
+        SourceLock.LockParams memory p = _params(4e6);
+        p.receiver = customer;
+        vm.startPrank(bob);
+        usdc.approve(address(lock), 4e6);
+        bytes32 id = lock.lockFromProvider(p, 4e6);
+        vm.stopPrank();
+        vm.warp(p.expiry);
+        lock.refund(id);
+        assertEq(usdc.balanceOf(bob), 4e6);
     }
 
     function test_lockFromProvider() public {
