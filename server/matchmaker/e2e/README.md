@@ -13,7 +13,7 @@ cargo build -p matchmaker            # in server/
 nohup ./run_matchmaker.sh > .state/matchmaker.log 2>&1 &
 ./lock.sh order-1 secret-1           # the customer locks 1.003 USDC for Bob; prints the source lock id
 TOKEN=0x808456652fdb597867f38412077A9182bf77359F AMOUNT=905000 ./lock.sh order-2 secret-2   # or EURC
-CHAIN=ethereum ./lock.sh order-3 secret-3   # or from Ethereum Sepolia (filled after 12 blocks)
+CHAIN=ethereum ./lock.sh order-3 secret-3   # or from Ethereum Sepolia (filled after 3 blocks)
 ```
 
 Then:

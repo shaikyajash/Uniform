@@ -7,6 +7,9 @@ use common::chains::Chains;
 
 use crate::rules::{Provider, Timing};
 
+/// Ethereum itself (mainnet and Sepolia), as opposed to the cheaper rollups.
+const ETHEREUM_CHAINS: [u64; 2] = [1, 11_155_111];
+
 pub struct Config {
     pub chains: Chains,
     pub order_desk_url: String,
@@ -21,19 +24,22 @@ pub struct Config {
     /// Largest block range read in one `eth_getLogs` call.
     pub max_block_range: u64,
     /// Skip filling when the filler holds less than this on the source chain, so it can always
-    /// afford the source redeem. Per customer chain: `MIN_FILLER_GAS_WEI_<chainId>`, else
-    /// `MIN_FILLER_GAS_WEI` on rollups (default 0.0001 ETH) and 0.002 ETH on other chains, where a
-    /// redeem costs far more.
+    /// afford the source redeem. Per customer chain: `MIN_FILLER_GAS_WEI_<chainId>`, else 0.002
+    /// ETH on Ethereum (mainnet, Sepolia), where a redeem costs far more, and `MIN_FILLER_GAS_WEI`
+    /// (default 0.0001 ETH) elsewhere.
     pub min_filler_gas_wei: HashMap<u64, u128>,
     /// Where one EURC's USD price is read (CoinGecko's reply shape).
     pub eurc_price_url: String,
     /// EURC locks are valued this far below the price, so a price move before Bob converts the
     /// EURC cannot leave him short (100 = 1%).
     pub eurc_price_buffer_bps: u16,
-    /// Customer chains read up to their "safe" block (rollups such as Base, where it trails the
-    /// head by seconds). Every other chain waits its `confirmations` from chains.json: on Ethereum
-    /// "safe" trails by about 9 minutes, too long for a 20-minute lock.
+    /// Customer chains listed here read up to their "safe" block: the strongest guard against a
+    /// reorg, but on Base it trails the head by 50 s to 2 min. Default: none, so fills are fast.
+    /// On Ethereum "safe" trails by about 9 minutes, too long for a 20-minute lock.
     pub safe_tag_chains: Vec<u64>,
+    /// Blocks to wait before trusting a log, per chain: `CONFIRMATIONS_<chainId>`, else
+    /// `confirmations` in chains.json.
+    pub confirmations: HashMap<u64, u64>,
 }
 
 impl Config {
@@ -75,16 +81,24 @@ impl Config {
                     .into()
             }),
             eurc_price_buffer_bps: number("EURC_PRICE_BUFFER_BPS", 100)?,
-            safe_tag_chains: chain_list("SAFE_TAG_CHAINS", &[84532])?,
+            safe_tag_chains: chain_list("SAFE_TAG_CHAINS", &[])?,
+            confirmations: HashMap::new(),
             chains,
         };
         let mut config = config;
+        for chain in config.chains.by_name.values() {
+            let wait = number(
+                &format!("CONFIRMATIONS_{}", chain.chain_id),
+                chain.confirmations,
+            )?;
+            config.confirmations.insert(chain.chain_id, wait);
+        }
         let rollup_gas = number("MIN_FILLER_GAS_WEI", 100_000_000_000_000u128)?;
         for chain in config.chains.customer_chains() {
-            let default = if config.safe_tag_chains.contains(&chain.chain_id) {
-                rollup_gas
-            } else {
+            let default = if ETHEREUM_CHAINS.contains(&chain.chain_id) {
                 2_000_000_000_000_000
+            } else {
+                rollup_gas
             };
             let min = number(&format!("MIN_FILLER_GAS_WEI_{}", chain.chain_id), default)?;
             config.min_filler_gas_wei.insert(chain.chain_id, min);

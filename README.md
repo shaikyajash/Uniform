@@ -24,6 +24,34 @@ Contracts are Solidity (Foundry), the server is Rust (one Cargo workspace in `se
 | `shared/` | Chain config, ABIs, shared types (changed only by agreement) | A+B |
 | `docs/` | SPEC.md, AI_USAGE.md | A+B |
 
+## Matchmaker: fill speed vs. reorg safety
+
+Before Bob pays a shop, the Matchmaker waits until the customer's source lock is unlikely to be
+undone by a reorg. A longer wait is safer for Bob; a shorter one makes payments feel instant.
+**The defaults are tuned for a fast demo:**
+
+| Chain | Default wait | About | Set with |
+|---|---|---|---|
+| Base Sepolia | 10 blocks | 2 s | `CONFIRMATIONS_84532` |
+| Ethereum Sepolia | 3 blocks | 36 s | `CONFIRMATIONS_11155111` |
+| Whitechain Sepolia | 1 block | 1 s | `CONFIRMATIONS_1874` |
+
+The defaults come from `confirmations` in `shared/chains.json`; the environment overrides them.
+
+**Safer settings (production):** set `SAFE_TAG_CHAINS=84532` so Base is read only up to its
+`safe` block (adds 50 s to 2 min per fill), and raise `CONFIRMATIONS_11155111` to 12 or more
+(about 2.5 min). Do not put Ethereum in `SAFE_TAG_CHAINS`: its `safe` block trails by about 9
+minutes, longer than a source lock leaves to fill.
+
+**The risk with the fast defaults:** if a reorg drops a customer's lock after Bob filled it, Bob
+loses that order's USDT, at most his strategy's `STRATEGY_MAX_PER_ORDER`. Keep that limit small
+while running fast.
+
+Other Matchmaker settings: `POLL_SECONDS` (default 2), `MAX_BLOCK_RANGE` (default 1000),
+`EURC_PRICE_BUFFER_BPS` (default 100 = 1%), and `MIN_FILLER_GAS_WEI` /
+`MIN_FILLER_GAS_WEI_<chainId>` (gas the filler must hold on a source chain before it fills;
+defaults 0.0001 ETH, 0.002 ETH on Ethereum).
+
 ## Status
 
 Work in progress. Setup, architecture and current limitations are documented here as they are built.
