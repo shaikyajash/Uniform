@@ -250,7 +250,11 @@ impl Worker {
                 Watched {
                     chain_id,
                     provider,
-                    confirmations,
+                    confirmations: config
+                        .confirmations
+                        .get(&chain_id)
+                        .copied()
+                        .unwrap_or(confirmations),
                     use_safe_tag: role == Role::Customer
                         && config.safe_tag_chains.contains(&chain_id),
                     contracts,

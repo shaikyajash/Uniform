@@ -47,7 +47,7 @@
     "contracts": {
       "sourceLock": "0x02dF2659B5B4956EAFEe3293584C2aaefC114871"
     },
-    "confirmations": 2
+    "confirmations": 10
   },
   "ethereumSepolia": {
     "chainId": 11155111,
@@ -76,7 +76,7 @@
     "contracts": {
       "sourceLock": "0x3aCDE874Eeb36dD28507B5b1FF29219Ba262F5d9"
     },
-    "confirmations": 12
+    "confirmations": 3
   },
   "timeoutsSeconds": {
     "sourceLock": 1200,
