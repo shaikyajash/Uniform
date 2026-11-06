@@ -4,4 +4,5 @@ pub mod amount;
 pub mod chains;
 pub mod events;
 pub mod jobs;
+pub mod locks;
 pub mod status;
