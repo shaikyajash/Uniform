@@ -1,7 +1,9 @@
 "use client";
 
 import { useEffect, useState, type ReactNode } from "react";
-import { ArrowUpRight } from "lucide-react";
+import { ArrowLeft, ArrowUpRight } from "lucide-react";
+import Link from "next/link";
+import { useEmbedded } from "@/app/_ui/embedded";
 import { CardContent, CardHeader } from "@/components/ui/card";
 import { Separator } from "@/components/ui/separator";
 import { chainName, explorerTx, trimAmount } from "@/lib/chain";
@@ -29,6 +31,12 @@ const STATUS_TEXT: Record<OrderStatus, string> = {
 export function Receipt({ orderId }: { orderId: string }) {
   const [order, setOrder] = useState<Order | null>(null);
   const [problem, setProblem] = useState<string | null>(null);
+  const embedded = useEmbedded();
+
+  // Opened inside the checkout card: ask the widget to keep the card open while it is read.
+  useEffect(() => {
+    if (embedded) window.parent.postMessage({ type: "uniform:stay" }, "*");
+  }, [embedded]);
 
   useEffect(() => {
     let stop = false;
@@ -64,6 +72,14 @@ export function Receipt({ orderId }: { orderId: string }) {
     <PayShell>
       <div className="flex flex-col gap-5">
         <CardHeader className="gap-4">
+          {embedded && (
+            <Link
+              href={`/pay/${order.orderId}`}
+              className="inline-flex w-fit items-center gap-1.5 pt-1 pb-1 font-mono text-[10.5px] tracking-[0.08em] text-muted-foreground uppercase hover:text-foreground"
+            >
+              <ArrowLeft className="size-3.5" aria-hidden="true" /> Back
+            </Link>
+          )}
           <div className="flex justify-between gap-3 font-mono text-[10.5px] tracking-[0.08em] text-label">
             <span>RECEIPT</span>
             <span>ORDER {order.reference}</span>

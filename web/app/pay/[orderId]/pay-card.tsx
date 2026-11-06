@@ -570,6 +570,7 @@ function OnItsWay({ payment }: { payment: Payment | null }) {
 }
 
 function Done({ order, amount }: { order: Order; amount: string }) {
+  const embedded = useEmbedded();
   const legs = currentLegs(order);
   const crosschain = order.path === "crosschain" || order.path === "split";
   const settlement = crosschain ? order.claim?.explorerUrl : order.payment?.explorerUrl;
@@ -588,6 +589,9 @@ function Done({ order, amount }: { order: Order; amount: string }) {
         <TextButton asChild>
           <a href={`/receipt/${order.orderId}`}>Receipt</a>
         </TextButton>
+        {embedded && (
+          <TextButton onClick={() => window.parent.postMessage({ type: "uniform:close" }, "*")}>Close</TextButton>
+        )}
       </div>
     </div>
   );
