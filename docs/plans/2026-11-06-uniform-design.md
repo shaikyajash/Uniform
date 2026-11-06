@@ -36,20 +36,20 @@ Every address lives in `shared/chains.json`.
 ### Path B: cross chain (an HTLC, a hash time-locked contract)
 
 ```
-1. Source lock         Mei → Customer Lock (Base)      12 USDC held for Bob       (Locked)
+1. Source lock         Mei → Source Lock (Base)      12 USDC held for Bob       (Locked)
 2. Destination lock    Bob → Shop Lock (Whitechain)    12 USDT held for the shop  (Filled)
 3. Destination redeem  Mei reveals the secret          shop gets 12 USDT          (Settled)
 4. Source redeem       Bob reuses the public secret    Bob gets 12 USDC           (Claimed)
 Timeout: each lock refunds whoever locked it. The destination lock (10 min) expires before the source lock (20 min).
 ```
 
-- EURC and ETH are swapped to USDC on Uniswap v4 inside the Customer Lock (A6), so Bob always receives USDC.
+- EURC and ETH are swapped to USDC on Uniswap v4 inside the Source Lock (A6), so Bob always receives USDC.
 - Bob's USDT reaches the Shop Lock through 1inch Aqua: the Payout Pool `pull`s it from Bob's shipped strategy.
 - Why nobody can cheat: Bob cannot redeem without the secret, and the secret is first used on the Shop Lock, which can only pay the shop. Mei reveals only after her browser has checked the Shop Lock itself.
 
 ### Path C: split (two source chains, all or nothing)
 
-The customer locks part on Base and part on Ethereum Sepolia under the same hashlock. The Matchmaker fills only when every leg is locked and the total covers the order. One secret redeems every leg.
+The source locks part on Base and part on Ethereum Sepolia under the same hashlock. The Matchmaker fills only when every leg is locked and the total covers the order. One secret redeems every leg.
 
 ## 4. The secret
 
@@ -67,7 +67,7 @@ The customer locks part on Base and part on Ethereum Sepolia under the same hash
 |---|---|---|---|
 | Aqua (official 1inch code) | Whitechain | Holds Bob's strategy and lets the Payout Pool pull from it | A1 ✅ `0x02dF…4871` |
 | DirectPay | Whitechain | Path A payments and refunds | A2 ✅ `0x9DF1…aE9` |
-| CustomerLock | Base, Ethereum Sepolia | Source lock: lock, source redeem, refund, lock for refunds | A3, A6, A7 |
+| SourceLock | Base, Ethereum Sepolia | Source lock: lock, source redeem, refund, lock for refunds | A3, A6, A7 |
 | PayoutPool (AquaApp) | Whitechain | Pulls Bob's USDT into a Shop Lock under Bob's rules | A4 |
 | ShopLock | Whitechain | Destination lock: destination redeem (emits `Settled`), refund to Bob | A4, A9 |
 
@@ -113,7 +113,7 @@ paid → partially_refunded → refunded
 
 | Item | Demo | Real product |
 |---|---|---|
-| Customer Lock (source) | 20 min | 2 h |
+| Source Lock (Base or Ethereum Sepolia) | 20 min | 2 h |
 | Shop Lock (destination) | 10 min | 1 h |
 | Matchmaker fill cutoff | at least 15 min left on the source lock | at least 90 min |
 | Quote | 2 min | 2 min |
@@ -121,7 +121,7 @@ paid → partially_refunded → refunded
 
 ## 8. Security rules
 
-- Every EIP-3009 nonce commits to all the parameters (DirectPay: order, merchant, amount, payer; CustomerLock: the whole LockParams, payer, token and amount), plus a tag, the chain id and the contract. The submitter cannot change anything, nobody can squat another customer's id, and each signature works once.
+- Every EIP-3009 nonce commits to all the parameters (DirectPay: order, merchant, amount, payer; SourceLock: the whole LockParams, payer, token and amount), plus a tag, the chain id and the contract. The submitter cannot change anything, nobody can squat another customer's id, and each signature works once.
 - Contracts record state before moving tokens.
 - The Gas Payer simulates every transaction, checks `authorizationState` and balances first, and submits only for registered shops and issued quotes.
 - Only 65-byte EOA signatures are supported (no ERC-1271 smart wallets).
@@ -135,7 +135,7 @@ paid → partially_refunded → refunded
 | A1 | Aqua on Whitechain | WBT | ✅ |
 | B0 | Privy check | S1 | ✅ |
 | A2 | DirectPay | S1 | ✅ live pay and refund |
-| **A3** | **CustomerLock, USDC only, Base Sepolia** | S1 | **next**, see [the A3 plan](2026-11-06-a3-customer-lock.md) |
+| **A3** | **SourceLock, USDC only, Base Sepolia** | S1 | **next**, see [the A3 plan](2026-11-06-a3-source-lock.md) |
 | A4 | PayoutPool and ShopLock | A1 | to do |
 | A5 | Matchmaker v1 | A3, A4 | to do (M2) |
 | A6 | Uniswap swap and pools | A3 | to do |
