@@ -53,10 +53,12 @@ pub struct Note {
 /// The EIP-712 JSON the pay page passes to the wallet. Numbers are decimal text and addresses
 /// lowercase hex, the JSON form wallets accept (checked with Privy in B0).
 pub fn typed_data(token: &Token, chain_id: u64, note: &Note) -> Value {
+    // Only tokens with EIP-3009 notes come here; chains.json gives each of them its domain.
+    let (name, version) = token.eip712.as_ref().map_or(("", ""), |d| (d.name.as_str(), d.version.as_str()));
     json!({
         "domain": {
-            "name": token.eip712.name,
-            "version": token.eip712.version,
+            "name": name,
+            "version": version,
             "chainId": chain_id,
             "verifyingContract": format!("{:#x}", token.address),
         },

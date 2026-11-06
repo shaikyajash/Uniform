@@ -38,8 +38,13 @@ pub enum Job {
         valid_before: u64,
         /// `lockIdFor(params, payer, token, amount)`: the note's nonce. The Relayer recomputes it.
         lock_id: B256,
-        /// 65 bytes: r, s, v.
+        /// 65 bytes: r, s, v. Over the EIP-3009 note, or over the Calibur batch when `batch` is set.
         signature: Bytes,
+        /// For a token without EIP-3009: the lock goes through the customer's Calibur account
+        /// (`customer.execute(batch, signature)`) instead of `lockWithAuthorization`. Then
+        /// `valid_after` and `valid_before` are 0 and the batch's deadline applies.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        batch: Option<crate::calibur::Batch>,
     },
     /// Path B, step 3: `DestinationLock.claim(lockId, secret)` on the shop chain. The secret pays
     /// the shop, so the Relayer sends it only to a lock that pays `merchant` at least `min_amount`.
@@ -236,6 +241,7 @@ mod tests {
                 valid_before: 1_793_914_240,
                 lock_id: B256::repeat_byte(0x11),
                 signature: Bytes::from(vec![7u8; 65]),
+                batch: None,
             },
             Job::DestinationClaim {
                 lock_id: B256::repeat_byte(0x22),

@@ -119,6 +119,7 @@ pub async fn submit(
             valid_before: u64::try_from(quote.valid_before).map_err(ApiError::internal)?,
             lock_id: leg.lock_id,
             signature,
+            batch: None,
         });
     }
     let hashlock = legs[0].params.hashlock;
