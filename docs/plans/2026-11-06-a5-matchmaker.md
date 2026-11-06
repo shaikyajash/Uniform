@@ -94,4 +94,15 @@ The contracts are already deployed on both forks. A mock Order Desk serves the o
 ### Task 5: Separate audit agent and verify agent
 The audit agent hunts for exploits and failure modes: replay, fake events, reorgs, RPC errors, double fills, and stuck funds. The verify agent checks the code against this plan and the SPEC rules line by line, and re-checks every audit fix.
 
-### Task 6: Live on Base Sepolia and Whitechain (the user funds the filler wallet), then a PR to `dev` after asking
+### Task 6: Live on Base Sepolia and Whitechain — passed (M2)
+A 0.99 USDT order settled across the real testnets, with the Matchmaker running against the public RPCs and a stand-in Order Desk:
+
+| Step | Chain | Transaction |
+|---|---|---|
+| Bob ships a 1 USDT strategy on Aqua | Whitechain | [0xac5a930b…](https://explorer.testnet.whitechain.io/tx/0xac5a930bd05a05433c30e8eba03b66730dcf0ce50b29eaae3e31bd76cc8dd94e) |
+| Customer locks 0.99297 USDC for Bob (signature only) | Base Sepolia | [0x4f8baaaf…](https://sepolia.basescan.org/tx/0x4f8baaaffbd7979cd885c8a0630ce61b732dcc54161ce7f2cd3ba03f214cd939) |
+| **Matchmaker fills** the destination lock from Bob's strategy | Whitechain | [0xd2961282…](https://explorer.testnet.whitechain.io/tx/0xd29612828c52d6a7bf5865f201cdc0696516ddb1d1e5ddec39570ce4ec72d3ff) |
+| Customer reveals the secret: the shop gets 0.99 USDT (`Settled`) | Whitechain | [0xaea41865…](https://explorer.testnet.whitechain.io/tx/0xaea4186570335fc3e72eff00afdbd9fd94adadef817fdcc9f89ab7e103b97339) |
+| **Matchmaker redeems** the source lock: Bob gets 0.99297 USDC | Base Sepolia | [0x2de5c351…](https://sepolia.basescan.org/tx/0x2de5c3518350c7057314cf292e0f5413a759f7e648bc92f9f7304a008c508ff6) |
+
+Every event was reported to the Order Desk: Locked, Filled, Settled, Claimed. A first lock was made by mistake with the wrong receiver ([0xa0fc84a7…](https://sepolia.basescan.org/tx/0xa0fc84a73166afc364ffed94251755c0b7f847c9c971499a3dfd18c9b1b7a5b2)); the Matchmaker correctly ignored it, and it was refunded to the customer in full after expiry ([0x1ff83c33…](https://sepolia.basescan.org/tx/0x1ff83c332b78ed30c9cd98798a7409cbd133e9f1a6e5575ae2325131f1c4ce65)).
