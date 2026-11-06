@@ -8,6 +8,8 @@ use serde_json::{Value, json};
 
 /// `DirectPay.PAY_TAG`.
 const PAY_TAG: &str = "uniform.directpay.pay.v1";
+/// `DirectPay.REFUND_TAG`.
+const REFUND_TAG: &str = "uniform.directpay.refund.v1";
 
 /// Same as the contract's `paymentIdFor(orderId, merchant, amount, payer)`. It is also the note's
 /// nonce, so a signature works only for this order, shop, amount and payer, and only once.
@@ -21,6 +23,20 @@ pub fn payment_id_for(
 ) -> B256 {
     let encoded = (keccak256(PAY_TAG), U256::from(chain_id), direct_pay, order_id, merchant, amount.0, payer)
         .abi_encode();
+    keccak256(encoded)
+}
+
+/// Same as the contract's `refundNonceFor(paymentId, amount, refundedBefore)`: the nonce of the
+/// shop's refund note. It commits to what was refunded before, so each note works for one refund.
+pub fn refund_nonce_for(
+    chain_id: u64,
+    direct_pay: Address,
+    payment_id: B256,
+    amount: Amount,
+    refunded_before: Amount,
+) -> B256 {
+    let encoded =
+        (keccak256(REFUND_TAG), U256::from(chain_id), direct_pay, payment_id, amount.0, refunded_before.0).abi_encode();
     keccak256(encoded)
 }
 
@@ -98,6 +114,19 @@ mod tests {
             address!("a917000000000000000000000000000000000001"),
         );
         assert_eq!(id, b256!("dc266d741edec5cc5091738a75851f76e55aebadeaf22a15c8d52e35373afdc7"));
+    }
+
+    /// Read from the deployed DirectPay on Whitechain on Fri Nov 6 (`refundNonceFor` with these inputs).
+    #[test]
+    fn refund_nonce_matches_the_deployed_contract() {
+        let nonce = refund_nonce_for(
+            1874,
+            DIRECT_PAY,
+            b256!("dc266d741edec5cc5091738a75851f76e55aebadeaf22a15c8d52e35373afdc7"),
+            Amount::from(5_000_000u64),
+            Amount::from(2_000_000u64),
+        );
+        assert_eq!(nonce, b256!("5ea3cc3f7c590fb05c55c1553aac6b94f799dde5f48cee529ea4b45ddec7d817"));
     }
 
     sol! {
