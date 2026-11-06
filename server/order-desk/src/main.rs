@@ -20,6 +20,7 @@ const DEFAULT_PORT: u16 = 4000;
 const DEFAULT_PAY_BASE_URL: &str = "http://localhost:3000";
 /// Relative to `server/`, where `cargo run` starts.
 const DEFAULT_CHAINS_JSON: &str = "../shared/chains.json";
+const MIN_INTERNAL_TOKEN_LENGTH: usize = 32;
 
 #[tokio::main]
 async fn main() {
@@ -49,7 +50,14 @@ async fn serve(pool: PgPool) -> Result<(), String> {
     let pay_base_url = env::var("PAY_BASE_URL").unwrap_or_else(|_| DEFAULT_PAY_BASE_URL.to_owned());
     let chains_path = env::var("CHAINS_JSON").unwrap_or_else(|_| DEFAULT_CHAINS_JSON.to_owned());
     let chains = Chains::load(&chains_path).map_err(|error| error.to_string())?;
-    let app = routes::router(routes::AppState { pool, chains: Arc::new(chains), pay_base_url });
+    let internal_token = env::var("INTERNAL_EVENTS_TOKEN").unwrap_or_default();
+    if internal_token.len() < MIN_INTERNAL_TOKEN_LENGTH {
+        return Err(format!(
+            "set INTERNAL_EVENTS_TOKEN to a random secret of at least {MIN_INTERNAL_TOKEN_LENGTH} characters \
+             (the Matchmaker sends it), e.g. openssl rand -hex 32"
+        ));
+    }
+    let app = routes::router(routes::AppState { pool, chains: Arc::new(chains), pay_base_url, internal_token });
     // 0.0.0.0, not 127.0.0.1: a host like Railway reaches the server from outside the container.
     let listener = tokio::net::TcpListener::bind(("0.0.0.0", port))
         .await

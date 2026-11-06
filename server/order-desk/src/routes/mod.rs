@@ -1,5 +1,6 @@
 //! The HTTP API: shared state and the route table.
 
+pub mod events;
 pub mod orders;
 pub mod quote;
 
@@ -23,6 +24,8 @@ pub struct AppState {
     pub chains: Arc<Chains>,
     /// Where the pay page lives; `payUrl` is this plus `/pay/{orderId}`.
     pub pay_base_url: String,
+    /// Shared secret the Matchmaker sends on `/internal/events` (`INTERNAL_EVENTS_TOKEN`).
+    pub internal_token: String,
 }
 
 impl FromRef<AppState> for PgPool {
@@ -36,6 +39,7 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/orders", post(orders::create))
         .route("/v1/orders/{id}", get(orders::read))
         .route("/v1/orders/{id}/quote", post(quote::quote))
+        .route("/internal/events", post(events::report))
         .with_state(state)
 }
 
@@ -70,6 +74,7 @@ pub mod test_support {
     use crate::auth::new_api_key;
 
     const CHAINS_JSON: &str = include_str!("../../../../shared/chains.json");
+    pub const INTERNAL_TOKEN: &str = "test-internal-token-0123456789";
 
     pub struct TestApp {
         pub app: Router,
@@ -103,6 +108,7 @@ pub mod test_support {
             pool: pool.clone(),
             chains: Arc::new(Chains::from_json(CHAINS_JSON).unwrap()),
             pay_base_url: "https://pay.example/".into(),
+            internal_token: INTERNAL_TOKEN.into(),
         };
         TestApp { app: router(state), pool, key }
     }
