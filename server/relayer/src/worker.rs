@@ -275,6 +275,17 @@ impl Taken<'_> {
     ) -> Step<Outcome> {
         match chain.receipt(ours.hash).await {
             Err(error) => self.retry(&error.to_string()).await,
+            // A Calibur batch "succeeds" even when it did nothing: if the wallet's nonce moved, its
+            // 7702 authorization is skipped and the call lands on a plain account. Only the lock
+            // itself on chain says the job is done.
+            Ok(Some(mined)) if mined.success && call.is_batch_lock() => match chain.done(call).await {
+                Ok(true) => self.confirm(chain, call, merchant_id, limits, mined, ours.hash).await,
+                Ok(false) => {
+                    self.record_reverted(chain, merchant_id, limits, mined).await?;
+                    self.after_revert(chain, call).await
+                }
+                Err(error) => self.retry(&error.to_string()).await,
+            },
             Ok(Some(mined)) if mined.success => self.confirm(chain, call, merchant_id, limits, mined, ours.hash).await,
             Ok(Some(mined)) => {
                 self.record_reverted(chain, merchant_id, limits, mined).await?;
