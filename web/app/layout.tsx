@@ -5,7 +5,7 @@ import "./globals.css";
 
 const geist = Geist({ variable: "--font-geist", subsets: ["latin"] });
 const geistMono = Geist_Mono({ variable: "--font-geist-mono", subsets: ["latin"] });
-const display = Google_Sans({ variable: "--font-display", subsets: ["latin"], weight: "400" });
+const display = Google_Sans({ variable: "--font-google-sans", subsets: ["latin"], weight: "400" });
 
 export const metadata: Metadata = {
   title: "Uniform",

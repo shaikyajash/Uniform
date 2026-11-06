@@ -1,13 +1,39 @@
-/* The whole app: black, hairline borders, white text. Fonts are loaded in layout.tsx. */
+@import "tailwindcss";
+@import "tw-animate-css";
+@import "shadcn/tailwind.css";
+
+/* The whole app is dark: black, hairline borders, white text. Fonts are loaded in layout.tsx.
+   The names below are shadcn's, so its components pick up the same colours as our own CSS. */
 :root {
-  --bg: #050506;
+  --background: #050506;
+  --foreground: #f2f2f3;
+  --card: #0c0c0e;
+  --card-foreground: #f2f2f3;
+  --popover: #0c0c0e;
+  --popover-foreground: #f2f2f3;
+  /* The white pill. */
+  --primary: #ffffff;
+  --primary-foreground: #000000;
+  --secondary: #111114;
+  --secondary-foreground: #f2f2f3;
+  /* shadcn: a quiet background, not text. */
+  --muted: #0a0a0c;
+  --muted-foreground: #9a9aa2;
+  --accent: #16161a;
+  --accent-foreground: #f2f2f3;
+  --destructive: #f87171;
+  --border: rgba(255, 255, 255, 0.08);
+  --input: rgba(255, 255, 255, 0.14);
+  --ring: rgba(255, 255, 255, 0.35);
+  --radius: 0.625rem;
+
+  /* Ours, used by the CSS modules and as extra Tailwind colours. */
   --panel: #0c0c0e;
   --panel-2: #111114;
   --hair: rgba(255, 255, 255, 0.08);
   --hair-strong: rgba(255, 255, 255, 0.14);
-  --text: #f2f2f3;
-  --muted: #9a9aa2;
   --faint: #5d5d66;
+  --label: #c9c9cf;
   --ok: #4ade80;
   --warn: #fbbf24;
   --bad: #f87171;
@@ -22,26 +48,70 @@
   }
 }
 
-* {
-  box-sizing: border-box;
-  margin: 0;
-  padding: 0;
+@theme inline {
+  --font-sans: var(--font-geist), system-ui, sans-serif;
+  --font-mono: var(--font-geist-mono), ui-monospace, monospace;
+  --font-display: var(--font-google-sans), system-ui, sans-serif;
+  /* The home page's buttons and hero copy use the system font. */
+  --font-system: system-ui, -apple-system, "Segoe UI", sans-serif;
+  --font-heading: var(--font-google-sans), system-ui, sans-serif;
+
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-card: var(--card);
+  --color-card-foreground: var(--card-foreground);
+  --color-popover: var(--popover);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-primary: var(--primary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-secondary: var(--secondary);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-muted: var(--muted);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-accent: var(--accent);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-destructive: var(--destructive);
+  --color-border: var(--border);
+  --color-input: var(--input);
+  --color-ring: var(--ring);
+  --color-panel: var(--panel);
+  --color-panel-2: var(--panel-2);
+  --color-hair: var(--hair);
+  --color-hair-strong: var(--hair-strong);
+  --color-faint: var(--faint);
+  --color-label: var(--label);
+  --color-ok: var(--ok);
+  --color-warn: var(--warn);
+  --color-bad: var(--bad);
+
+  --radius-sm: calc(var(--radius) * 0.6);
+  --radius-md: calc(var(--radius) * 0.8);
+  --radius-lg: var(--radius);
+  --radius-xl: calc(var(--radius) * 1.4);
+  --radius-2xl: calc(var(--radius) * 1.8);
 }
 
-html,
-body {
-  min-height: 100%;
-  background: var(--bg);
-  color: var(--text);
-  font-family: var(--font-geist), system-ui, sans-serif;
-  -webkit-font-smoothing: antialiased;
-}
+@layer base {
+  * {
+    @apply border-border outline-ring/50;
+  }
 
-a {
-  color: inherit;
-  text-decoration: none;
-}
+  html,
+  body {
+    min-height: 100%;
+  }
 
-button {
-  font: inherit;
+  body {
+    @apply bg-background text-foreground font-sans antialiased;
+  }
+
+  a {
+    color: inherit;
+    text-decoration: none;
+  }
+
+  button:not(:disabled),
+  [role="button"]:not(:disabled) {
+    cursor: pointer;
+  }
 }
