@@ -78,7 +78,7 @@ contract PayoutPoolTest is Test {
         assertEq(usdt.balanceOf(address(lock)), 12e6);
         assertEq(usdt.balanceOf(bob), 88e6);
         assertEq(_allowance(), 38e6);
-        assertEq(id, lock.lockIdFor(SRC_CHAIN, keccak256("src-1")));
+        assertEq(id, lock.lockIdFor(SRC_CHAIN, keccak256("src-1"), bob));
     }
 
     function test_onlyTheFillerCanFill() public {
@@ -255,10 +255,91 @@ contract PayoutPoolTest is Test {
     }
 
     function test_fillEmitsFilled() public {
-        bytes32 id = lock.lockIdFor(SRC_CHAIN, keccak256("src-1"));
+        bytes32 id = lock.lockIdFor(SRC_CHAIN, keccak256("src-1"), bob);
         vm.expectEmit(address(pool));
         emit PayoutPool.Filled(keccak256("order-1002"), bob, strategyHash, 12e6, id);
         _fill(keccak256("src-1"), 12e6);
+    }
+
+    function test_someoneElsesLockCannotBlockBobsFill() public {
+        address mallory = makeAddr("mallory");
+        PayoutPool.Strategy memory m = PayoutPool.Strategy({
+            maker: mallory, token: address(usdt), filler: mallory, maxPerOrder: 1, feeBps: 0, salt: bytes32("squat")
+        });
+        _ship(m, 1);
+        vm.prank(mallory);
+        pool.fill(
+            m,
+            PayoutPool.Fill({
+                orderId: keccak256("order-1002"),
+                merchant: mallory,
+                amount: 1,
+                hashlock: keccak256("junk"),
+                expiry: uint64(block.timestamp + 10 minutes),
+                srcChainId: SRC_CHAIN,
+                srcLockId: keccak256("src-1")
+            })
+        );
+
+        bytes32 id = _fill(keccak256("src-1"), 12e6);
+        assertEq(id, lock.lockIdFor(SRC_CHAIN, keccak256("src-1"), bob));
+        lock.claim(id, secret);
+        assertEq(usdt.balanceOf(shop), 12e6);
+    }
+
+    function test_expiryBoundariesAreAccepted() public {
+        PayoutPool.Fill memory f = PayoutPool.Fill({
+            orderId: keccak256("order-1002"),
+            merchant: shop,
+            amount: 1e6,
+            hashlock: hashlock,
+            expiry: uint64(block.timestamp + 5 minutes),
+            srcChainId: SRC_CHAIN,
+            srcLockId: keccak256("src-min")
+        });
+        vm.startPrank(filler);
+        pool.fill(strategy, f);
+        f.expiry = uint64(block.timestamp + 2 hours);
+        f.srcLockId = keccak256("src-max");
+        pool.fill(strategy, f);
+        vm.stopPrank();
+    }
+
+    function test_rejectsPoolAsMerchantAndOversizedValues() public {
+        PayoutPool.Fill memory f = PayoutPool.Fill({
+            orderId: keccak256("order-1002"),
+            merchant: address(pool),
+            amount: 1e6,
+            hashlock: hashlock,
+            expiry: uint64(block.timestamp + 10 minutes),
+            srcChainId: SRC_CHAIN,
+            srcLockId: keccak256("src-1")
+        });
+        vm.startPrank(filler);
+        vm.expectRevert(abi.encodeWithSelector(DestinationLock.InvalidMerchant.selector, address(pool)));
+        pool.fill(strategy, f);
+
+        f.merchant = shop;
+        f.srcChainId = uint256(type(uint64).max) + 1;
+        vm.expectRevert(abi.encodeWithSelector(DestinationLock.ChainIdTooLarge.selector, f.srcChainId));
+        pool.fill(strategy, f);
+        vm.stopPrank();
+
+        strategy.maxPerOrder = type(uint128).max;
+        f.srcChainId = SRC_CHAIN;
+        f.amount = uint256(type(uint96).max) + 1;
+        vm.prank(filler);
+        vm.expectRevert(abi.encodeWithSelector(DestinationLock.AmountTooLarge.selector, f.amount));
+        pool.fill(strategy, f);
+    }
+
+    function test_fillRevertsWithoutALockWhenBobsWalletIsShort() public {
+        vm.prank(bob);
+        usdt.transfer(makeAddr("elsewhere"), 95e6);
+        vm.expectRevert();
+        _fill(keccak256("src-1"), 12e6);
+        (,, DestinationLock.State state,,,,,,,) = lock.locks(lock.lockIdFor(SRC_CHAIN, keccak256("src-1"), bob));
+        assertEq(uint8(state), uint8(DestinationLock.State.None));
     }
 
     function testFuzz_onlyTheSecretOpensTheLock(bytes32 guess) public {
