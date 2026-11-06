@@ -1,0 +1,236 @@
+/* "Let your money earn for you": a printed statement and three plain facts. Typography and
+   hairlines only: no glow, no gradients, no icons. */
+
+.grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1.1fr) minmax(0, 1fr);
+  gap: 72px;
+  margin-top: 56px;
+  align-items: start;
+}
+
+/* ----- The statement ----- */
+
+.statement {
+  margin: 0;
+  border-top: 1px solid rgba(242, 242, 243, 0.6);
+  border-bottom: 1px solid rgba(242, 242, 243, 0.6);
+  font-family: var(--font-geist-mono), ui-monospace, monospace;
+  font-variant-numeric: tabular-nums;
+}
+
+.stHead {
+  display: flex;
+  justify-content: space-between;
+  padding: 12px 0;
+  border-bottom: 1px solid var(--hair-strong);
+  font-size: 10px;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: rgba(242, 242, 243, 0.45);
+}
+
+.rows {
+  list-style: none;
+  margin: 0;
+  padding: 8px 0;
+}
+
+.row {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  padding: 9px 0;
+  font-size: 13px;
+  opacity: 0;
+  transform: translateY(3px);
+  transition: opacity 0.25s ease, transform 0.25s ease;
+}
+
+.rowOn {
+  opacity: 1;
+  transform: none;
+}
+
+/* The line just printed carries a caret, like a printer head. */
+.rowLast .value::after {
+  content: "";
+  display: inline-block;
+  width: 7px;
+  height: 13px;
+  margin-left: 6px;
+  vertical-align: -2px;
+  background: #f2f2f3;
+  animation: caret 1s steps(1) infinite;
+}
+
+@keyframes caret {
+  50% {
+    opacity: 0;
+  }
+}
+
+.label {
+  color: rgba(242, 242, 243, 0.7);
+  white-space: nowrap;
+}
+
+.note {
+  margin-left: 10px;
+  font-style: normal;
+  color: rgba(242, 242, 243, 0.4);
+}
+
+.note::before {
+  content: "· ";
+}
+
+/* Dots from the label to the amount. */
+.leader {
+  flex: 1;
+  min-width: 16px;
+  border-bottom: 1px dotted rgba(242, 242, 243, 0.22);
+  transform: translateY(-4px);
+}
+
+.value {
+  white-space: nowrap;
+  color: #f2f2f3;
+}
+
+.head .label {
+  color: #f2f2f3;
+}
+
+.out .label,
+.out .value {
+  color: rgba(242, 242, 243, 0.5);
+}
+
+/* A claimed line sits under its order, indented, as its answer. */
+.in {
+  padding-left: 18px;
+}
+
+.in .label::before {
+  content: "↳ ";
+  color: rgba(242, 242, 243, 0.35);
+}
+
+.head + .out {
+  margin-top: 10px;
+  padding-top: 18px;
+  border-top: 1px solid var(--hair);
+}
+
+.total {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  padding: 14px 0;
+  border-top: 1px solid var(--hair-strong);
+  font-size: 10px;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: rgba(242, 242, 243, 0.45);
+}
+
+.totalValue {
+  font-size: 22px;
+  letter-spacing: -0.01em;
+  text-transform: none;
+  color: #f2f2f3;
+}
+
+/* ----- The facts and the way in ----- */
+
+.side {
+  display: grid;
+  gap: 40px;
+}
+
+.facts {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.fact {
+  display: grid;
+  grid-template-columns: 40px 1fr;
+  padding: 20px 0;
+  border-top: 1px solid var(--hair);
+}
+
+.fact:last-child {
+  border-bottom: 1px solid var(--hair);
+}
+
+.factN {
+  font-family: var(--font-geist-mono), ui-monospace, monospace;
+  font-size: 11px;
+  color: rgba(242, 242, 243, 0.35);
+  padding-top: 4px;
+}
+
+.factTitle {
+  margin: 0 0 6px;
+  font-size: 19px;
+  letter-spacing: -0.015em;
+  color: #f2f2f3;
+}
+
+.factText {
+  margin: 0;
+  font-size: 14.5px;
+  line-height: 1.6;
+  color: rgba(242, 242, 243, 0.55);
+}
+
+.cta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 18px;
+}
+
+/* The fee, as the statement's last line. */
+.feeNote {
+  padding: 12px 0;
+  border-top: 1px solid var(--hair-strong);
+  font-size: 10.5px;
+  letter-spacing: 0.08em;
+  color: rgba(242, 242, 243, 0.4);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .row {
+    transition: none;
+  }
+
+  .rowLast .value::after {
+    display: none;
+  }
+}
+
+@media (max-width: 1000px) {
+  .grid {
+    grid-template-columns: 1fr;
+    gap: 48px;
+  }
+}
+
+@media (max-width: 560px) {
+  .row {
+    font-size: 11.5px;
+    gap: 6px;
+  }
+
+  .note {
+    display: none;
+  }
+
+  .in {
+    padding-left: 10px;
+  }
+}
