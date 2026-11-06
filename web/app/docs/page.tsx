@@ -35,6 +35,9 @@ const SECTIONS = [
   { id: "testing", label: "Testing" },
 ];
 
+/** The samples name this site's own address, read from the request, so the page renders per request. */
+export const instant = false;
+
 /** `/docs`: how a developer adds Uniform to a store, with every sample in eight languages. */
 export default async function DocsPage() {
   const list = await headers();
