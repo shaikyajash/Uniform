@@ -57,8 +57,13 @@ pub async fn queue_refunds(pool: &PgPool, now: i64, grace_seconds: i64) -> Resul
          FROM legs l JOIN orders o ON o.id = l.order_id
          WHERE l.status IN ('pending', 'locked')
            AND l.expiry + $2 <= $1
-           -- Only while the shop has not been paid: after that the lock is Bob's to claim.
-           AND o.status IN ('paying', 'source_locked', 'destination_locked')
+           -- Only while the shop has not been paid: after that the locks of the quote that paid
+           -- are Bob's to claim. Any other status may still have an open lock (for example a lock
+           -- whose Locked event was never reported). A lock from an earlier quote of a paid order
+           -- is not Bob's, so it is refunded too.
+           AND (o.status NOT IN ('paid', 'partially_refunded', 'refunded')
+                OR l.quote_id <> (SELECT latest.quote_id FROM legs latest WHERE latest.order_id = o.id
+                                  ORDER BY latest.id DESC LIMIT 1))
            -- A lock we know is on chain: reported, or our own lock transaction succeeded.
            AND (l.status = 'locked' OR EXISTS (
                  SELECT 1 FROM relayer_jobs j
@@ -200,5 +205,69 @@ mod tests {
         // The claim ran out unmined: now the customer is refunded.
         sqlx::query("UPDATE relayer_jobs SET status = 'failed' WHERE kind = 'destination_claim'").execute(&pool).await.unwrap();
         assert_eq!(queue_refunds(&pool, late, GRACE_SECONDS).await.unwrap(), 1);
+    }
+
+    #[sqlx::test]
+    async fn every_lock_of_a_split_is_refunded_even_after_the_order_is_returned(pool: PgPool) {
+        use crate::routes::legs::tests::{sign_all, split_quoted, submit_all};
+        let test = test_app(pool).await;
+        let alice = PrivateKeySigner::random();
+        let (id, quote) = split_quoted(&test, &alice).await;
+        assert_eq!(call(&test.app, submit_all(&id, &quote, &sign_all(&alice, &quote))).await.0, StatusCode::ACCEPTED);
+        sqlx::query("UPDATE relayer_jobs SET status = 'confirmed', tx_hash = args->>'lockId'")
+            .execute(&test.pool)
+            .await
+            .unwrap();
+        let expiry: i64 = sqlx::query_scalar("SELECT max(expiry) FROM legs").fetch_one(&test.pool).await.unwrap();
+        // Both refunds at once, one per chain.
+        assert_eq!(queue_refunds(&test.pool, expiry + GRACE_SECONDS, GRACE_SECONDS).await.unwrap(), 2);
+
+        // The first refund returned the order before the second was sent; the second failed and
+        // is written again.
+        sqlx::query("UPDATE orders SET status = 'returned'").execute(&test.pool).await.unwrap();
+        sqlx::query("UPDATE legs SET status = 'returned' WHERE chain_id = 84532").execute(&test.pool).await.unwrap();
+        sqlx::query("UPDATE relayer_jobs SET status = 'failed', updated_at = 0 WHERE kind = 'source_refund' AND chain_id = 11155111")
+            .execute(&test.pool)
+            .await
+            .unwrap();
+        let later = expiry + GRACE_SECONDS + RETRY_AFTER_SECONDS;
+        assert_eq!(queue_refunds(&test.pool, later, GRACE_SECONDS).await.unwrap(), 1);
+        let jobs = refund_jobs(&test.pool).await;
+        assert_eq!(jobs.len(), 3);
+    }
+
+    #[sqlx::test]
+    async fn a_lock_from_an_earlier_quote_is_refunded_even_after_a_new_quote_paid(pool: PgPool) {
+        let (pool, expiry, old_lock) = locked(pool).await;
+        sqlx::query("UPDATE relayer_jobs SET status = 'confirmed', tx_hash = args->>'lockId'").execute(&pool).await.unwrap();
+        // The customer paid with a second quote, whose lock Bob claims.
+        sqlx::query(
+            "INSERT INTO quotes (id, order_id, path, payer, typed_data, nonce, valid_after, valid_before, expires_at, created_at)
+             SELECT 'q_second', order_id, path, payer, typed_data, nonce, valid_after, valid_before, expires_at, created_at
+             FROM quotes",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO legs (order_id, quote_id, chain_id, token, amount, payer, lock_id, expiry, status, created_at)
+             SELECT order_id, 'q_second', chain_id, token, amount, payer, $1, expiry, 'locked', created_at FROM legs",
+        )
+        .bind(format!("0x{}", "ab".repeat(32)))
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query("UPDATE orders SET status = 'paid'").execute(&pool).await.unwrap();
+        assert_eq!(queue_refunds(&pool, expiry + GRACE_SECONDS, GRACE_SECONDS).await.unwrap(), 1);
+        let jobs = refund_jobs(&pool).await;
+        assert_eq!(jobs[0]["lockId"].as_str(), Some(old_lock.as_str()));
+    }
+
+    #[sqlx::test]
+    async fn a_paid_order_gets_no_refund_jobs(pool: PgPool) {
+        let (pool, expiry, _) = locked(pool).await;
+        sqlx::query("UPDATE relayer_jobs SET status = 'confirmed', tx_hash = args->>'lockId'").execute(&pool).await.unwrap();
+        sqlx::query("UPDATE orders SET status = 'paid'").execute(&pool).await.unwrap();
+        assert_eq!(queue_refunds(&pool, expiry + GRACE_SECONDS, GRACE_SECONDS).await.unwrap(), 0);
     }
 }

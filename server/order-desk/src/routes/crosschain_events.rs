@@ -187,7 +187,8 @@ pub async fn claimed(tx: &mut PgConnection, chain_id: u64, tx_hash: B256, lock_i
     if updated.rows_affected() == 0 { skip("not an open lock of ours") } else { Ok(Applied::LegOnly("leg claimed by Bob")) }
 }
 
-/// `Refunded` on a customer chain (SourceLock): the customer has their tokens back. On the shop
+/// `Refunded` on a customer chain (SourceLock): the customer has their tokens back, and the order
+/// is `returned` once none of its locks is still open. On the shop
 /// chain it is Bob's own USDT going back to him, which changes nothing here.
 pub async fn refunded(
     tx: &mut PgConnection,
@@ -199,18 +200,43 @@ pub async fn refunded(
     if chain_id == state.chains.shop_chain().chain_id {
         return skip("a destination lock went back to Bob");
     }
-    let order_id: Option<String> = sqlx::query_scalar(
+    let chain_id = i64::try_from(chain_id).map_err(ApiError::internal)?;
+    let order_id: Option<String> =
+        sqlx::query_scalar("SELECT order_id FROM legs WHERE chain_id = $1 AND lock_id = $2")
+            .bind(chain_id)
+            .bind(lock_id.to_string())
+            .fetch_optional(&mut *tx)
+            .await?;
+    let Some(order_id) = order_id else { return skip("not an open lock of ours") };
+    // The order row first (`order_status` locks it): two refunds of one split order then run one
+    // after the other, and the second sees the first's leg as returned.
+    let status = order_status(tx, &order_id).await?;
+    let updated = sqlx::query(
         "UPDATE legs SET status = 'returned', refund_tx = $3
-         WHERE chain_id = $1 AND lock_id = $2 AND status IN ('pending', 'locked')
-         RETURNING order_id",
+         WHERE chain_id = $1 AND lock_id = $2 AND status IN ('pending', 'locked')",
     )
-    .bind(i64::try_from(chain_id).map_err(ApiError::internal)?)
+    .bind(chain_id)
     .bind(lock_id.to_string())
     .bind(tx_hash.to_string())
-    .fetch_optional(&mut *tx)
+    .execute(&mut *tx)
     .await?;
-    let Some(order_id) = order_id else { return skip("not an open lock of ours") };
-    let status = order_status(tx, &order_id).await?;
+    if updated.rows_affected() == 0 {
+        return skip("not an open lock of ours");
+    }
+    // Open: reported locked, or not yet reported but our lock job for it succeeded.
+    let still_open: bool = sqlx::query_scalar(
+        "SELECT EXISTS (
+             SELECT 1 FROM legs l WHERE l.order_id = $1
+               AND (l.status = 'locked' OR (l.status = 'pending' AND EXISTS (
+                    SELECT 1 FROM relayer_jobs j WHERE j.order_id = l.order_id AND j.kind = 'source_lock'
+                      AND j.status = 'confirmed' AND j.args->>'lockId' = l.lock_id))))",
+    )
+    .bind(&order_id)
+    .fetch_one(&mut *tx)
+    .await?;
+    if still_open {
+        return Ok(Applied::LegOnly("leg returned; another lock of the order is still open"));
+    }
     let steps: &[OrderStatus] = match status {
         OrderStatus::SourceLocked | OrderStatus::DestinationLocked => &[OrderStatus::Returned],
         OrderStatus::Paying => &[OrderStatus::SourceLocked, OrderStatus::Returned],
@@ -394,5 +420,51 @@ mod tests {
         let receipt = report(&test, 84532, json!({ "type": "Refunded", "lockId": lock_id })).await;
         assert_eq!(receipt["orderStatus"], "returned", "{receipt}");
         assert_eq!(state(&test, &order).await, ("returned".into(), "returned".into()));
+    }
+
+    #[sqlx::test]
+    async fn a_split_order_waits_for_every_lock_and_returns_only_after_every_refund(pool: PgPool) {
+        use crate::routes::legs::tests::{sign_all, split_quoted, submit_all};
+        let test = test_app(pool).await;
+        let alice = PrivateKeySigner::random();
+        let (id, quote) = split_quoted(&test, &alice).await;
+        assert_eq!(call(&test.app, submit_all(&id, &quote, &sign_all(&alice, &quote))).await.0, StatusCode::ACCEPTED);
+        let base = quote["toSign"][0]["lockId"].as_str().unwrap();
+        let ethereum = quote["toSign"][1]["lockId"].as_str().unwrap();
+        let order_status = |pool: sqlx::PgPool| async move {
+            sqlx::query_scalar::<_, String>("SELECT status FROM orders").fetch_one(&pool).await.unwrap()
+        };
+
+        report(&test, 84532, locked(&id, base, "6000000")).await;
+        assert_eq!(order_status(test.pool.clone()).await, "paying");
+        report(
+            &test,
+            11155111,
+            json!({ "type": "Locked", "lockId": ethereum, "orderId": id,
+                    "token": "0x1c7d4b196cb0c7b01d743fbc6116a902379c7238", "amount": "6036000" }),
+        )
+        .await;
+        assert_eq!(order_status(test.pool.clone()).await, "source_locked");
+
+        report(&test, 84532, json!({ "type": "Refunded", "lockId": base })).await;
+        assert_eq!(order_status(test.pool.clone()).await, "source_locked");
+        report(&test, 11155111, json!({ "type": "Refunded", "lockId": ethereum })).await;
+        assert_eq!(order_status(test.pool.clone()).await, "returned");
+    }
+
+    #[sqlx::test]
+    async fn a_split_whose_other_lock_never_opened_ends_returned_after_its_refund(pool: PgPool) {
+        use crate::routes::legs::tests::{sign_all, split_quoted, submit_all};
+        let test = test_app(pool).await;
+        let alice = PrivateKeySigner::random();
+        let (id, quote) = split_quoted(&test, &alice).await;
+        assert_eq!(call(&test.app, submit_all(&id, &quote, &sign_all(&alice, &quote))).await.0, StatusCode::ACCEPTED);
+        let base = quote["toSign"][0]["lockId"].as_str().unwrap();
+        // The Ethereum lock was refused; only Base locked, and the order stayed `paying`.
+        sqlx::query("UPDATE relayer_jobs SET status = 'failed' WHERE chain_id = 11155111").execute(&test.pool).await.unwrap();
+        report(&test, 84532, locked(&id, base, "6000000")).await;
+        report(&test, 84532, json!({ "type": "Refunded", "lockId": base })).await;
+        let status: String = sqlx::query_scalar("SELECT status FROM orders").fetch_one(&test.pool).await.unwrap();
+        assert_eq!(status, "returned");
     }
 }

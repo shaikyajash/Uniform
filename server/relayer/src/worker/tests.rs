@@ -733,3 +733,93 @@ async fn a_claim_is_sent_even_when_the_shop_has_spent_its_gas_budget(pool: PgPoo
     assert_eq!(outcome(&pool, &chain, NOW + RECEIPT_POLL_SECONDS).await, Some(Outcome::Confirmed(hash)));
     assert_eq!(statuses(&pool, job).await, ("confirmed".into(), "paid".into()));
 }
+
+#[sqlx::test(migrations = "../order-desk/migrations")]
+async fn a_refund_leaves_the_order_while_another_lock_of_it_is_still_open(pool: PgPool) {
+    let job = add_order_and_job(&pool, 1, AMOUNT, "source_locked", &Job::SourceRefund { lock_id: note(1) }).await;
+    add_leg(&pool, 1, note(1), "locked").await;
+    sqlx::query(
+        "INSERT INTO legs (order_id, quote_id, chain_id, token, amount, payer, lock_id, expiry, status, created_at)
+         VALUES ($1, 'q_test', 11155111, $2, 1, $2, $3, 1, 'locked', 1)",
+    )
+    .bind(order_id(1))
+    .bind(format!("{SHOP:#x}"))
+    .bind(note(2).to_string())
+    .execute(&pool)
+    .await
+    .unwrap();
+    let chain = FakeChain::new();
+    let hash = sent(&pool, &chain, NOW).await;
+    chain.mine(hash, false);
+    assert_eq!(outcome(&pool, &chain, NOW + RECEIPT_POLL_SECONDS).await, Some(Outcome::Confirmed(hash)));
+    assert_eq!(statuses(&pool, job).await, ("confirmed".into(), "source_locked".into()));
+}
+
+#[sqlx::test(migrations = "../order-desk/migrations")]
+async fn a_refused_lock_leaves_a_split_order_paying_while_its_other_lock_is_open(pool: PgPool) {
+    let job = add_order_and_job(&pool, 1, AMOUNT, "paying", &lock_job(1, 6_036_000)).await;
+    // The split's other lock is already on chain.
+    add_leg(&pool, 1, note(9), "locked").await;
+    let chain = FakeChain::new();
+    chain.with(|state| state.dry_run = Some(ChainError::Revert("authorization is not yet valid".into())));
+    assert!(failed(outcome(&pool, &chain, NOW).await));
+    assert_eq!(statuses(&pool, job).await, ("failed".into(), "paying".into()));
+}
+
+#[sqlx::test(migrations = "../order-desk/migrations")]
+async fn a_refused_lock_leaves_a_split_order_paying_while_its_other_lock_is_being_sent(pool: PgPool) {
+    let job = add_order_and_job(&pool, 1, AMOUNT, "paying", &lock_job(1, 6_036_000)).await;
+    sqlx::query(
+        "INSERT INTO relayer_jobs (order_id, merchant_id, chain_id, kind, args, created_at, updated_at)
+         SELECT order_id, merchant_id, 11155111, kind, args, created_at, updated_at FROM relayer_jobs WHERE id = $1",
+    )
+    .bind(job)
+    .execute(&pool)
+    .await
+    .unwrap();
+    let chain = FakeChain::new();
+    chain.with(|state| state.dry_run = Some(ChainError::Revert("authorization is not yet valid".into())));
+    assert!(failed(outcome(&pool, &chain, NOW).await));
+    assert_eq!(statuses(&pool, job).await, ("failed".into(), "paying".into()));
+}
+
+#[sqlx::test(migrations = "../order-desk/migrations")]
+async fn a_split_lock_under_the_limit_is_refused_when_its_order_is_over_it(pool: PgPool) {
+    // A 150 USDT order (the limit is 100) split so each lock is under 100.
+    let job = add_order_and_job(&pool, 1, 150_000_000, "paying", &lock_job(1, 75_225_000)).await;
+    let chain = FakeChain::new();
+    assert!(failed(outcome(&pool, &chain, NOW).await));
+    assert_eq!(statuses(&pool, job).await, ("failed".into(), "quoted".into()));
+}
+
+#[sqlx::test(migrations = "../order-desk/migrations")]
+async fn a_refund_waits_for_a_lock_that_is_mined_but_not_yet_reported(pool: PgPool) {
+    let job = add_order_and_job(&pool, 1, AMOUNT, "source_locked", &Job::SourceRefund { lock_id: note(1) }).await;
+    add_leg(&pool, 1, note(1), "locked").await;
+    // The split's other lock: our lock job succeeded, its Locked event is not in yet.
+    sqlx::query(
+        "INSERT INTO legs (order_id, quote_id, chain_id, token, amount, payer, lock_id, expiry, status, created_at)
+         VALUES ($1, 'q_test', 11155111, $2, 1, $2, $3, 1, 'pending', 1)",
+    )
+    .bind(order_id(1))
+    .bind(format!("{SHOP:#x}"))
+    .bind(note(2).to_string())
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO relayer_jobs (order_id, merchant_id, chain_id, kind, args, status, tx_hash, created_at, updated_at)
+         SELECT order_id, merchant_id, 11155111, 'source_lock', jsonb_build_object('lockId', $2::text), 'confirmed', $2, 1, 1
+         FROM relayer_jobs WHERE id = $1",
+    )
+    .bind(job)
+    .bind(note(2).to_string())
+    .execute(&pool)
+    .await
+    .unwrap();
+    let chain = FakeChain::new();
+    let hash = sent(&pool, &chain, NOW).await;
+    chain.mine(hash, false);
+    assert_eq!(outcome(&pool, &chain, NOW + RECEIPT_POLL_SECONDS).await, Some(Outcome::Confirmed(hash)));
+    assert_eq!(statuses(&pool, job).await, ("confirmed".into(), "source_locked".into()));
+}

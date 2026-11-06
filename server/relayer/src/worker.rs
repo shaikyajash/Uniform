@@ -222,6 +222,17 @@ impl Taken<'_> {
         if call.amount_for_limit().is_some_and(|amount| amount > limits.max_order.0) {
             return Ok(Some("order is above the Relayer's limit"));
         }
+        // A split order's locks are each smaller than the order: the limit is on the whole order.
+        if matches!(call, Call::SourceLock(_)) {
+            let amount: Option<String> = sqlx::query_scalar("SELECT amount::text FROM orders WHERE id = $1")
+                .bind(self.order_id)
+                .fetch_optional(self.pool)
+                .await?;
+            let amount: Option<Amount> = amount.and_then(|amount| amount.parse().ok());
+            if amount.is_none_or(|amount| amount.0 > limits.max_order.0) {
+                return Ok(Some("order is above the Relayer's limit"));
+            }
+        }
         if call.deadline().is_some_and(|deadline| deadline < self.now + MIN_NOTE_LIFE_SECONDS) {
             return Ok(Some("the signed note or the lock runs out too soon"));
         }
@@ -422,8 +433,8 @@ impl Taken<'_> {
     /// nothing more. `paid` is written here and by the Order Desk's `Settled`, so whatever reacts
     /// to a paid order (the shop's webhook) must watch the order's status, not one of the two.
     /// - A destination claim: the shop has the USDT, so the order is `paid`.
-    /// - A source refund: the customer has their tokens back, so the leg and the order are
-    ///   `returned`, unless the shop was paid.
+    /// - A source refund: the customer has their tokens back, so the leg is `returned`, and so is
+    ///   the order once none of its locks is still open, unless the shop was paid.
     async fn apply_to_order(&self, tx: &mut PgConnection, call: &Call, chain_id: u64, hash: B256) -> Step<()> {
         match call {
             Call::DestinationClaim(_) => {
@@ -437,6 +448,12 @@ impl Taken<'_> {
                 .await?;
             }
             Call::SourceRefund { lock_id } => {
+                // The order row first: two refunds of one split order then run one after the
+                // other, and the second sees the first's leg as returned.
+                sqlx::query("SELECT 1 FROM orders WHERE id = $1 FOR UPDATE")
+                    .bind(self.order_id)
+                    .execute(&mut *tx)
+                    .await?;
                 let order_id: Option<String> = sqlx::query_scalar(
                     "UPDATE legs SET status = 'returned', refund_tx = $3
                      WHERE chain_id = $1 AND lock_id = $2 AND status IN ('pending', 'locked')
@@ -448,9 +465,16 @@ impl Taken<'_> {
                 .fetch_optional(&mut *tx)
                 .await?;
                 if let Some(order_id) = order_id {
+                    // Open: reported locked, or not yet reported but our lock job for it succeeded.
                     sqlx::query(
                         "UPDATE orders SET status = 'returned'
-                         WHERE id = $1 AND status IN ('paying', 'source_locked', 'destination_locked')",
+                         WHERE id = $1 AND status IN ('paying', 'source_locked', 'destination_locked')
+                           AND NOT EXISTS (
+                               SELECT 1 FROM legs l WHERE l.order_id = $1
+                                 AND (l.status = 'locked' OR (l.status = 'pending' AND EXISTS (
+                                      SELECT 1 FROM relayer_jobs j WHERE j.order_id = l.order_id
+                                        AND j.kind = 'source_lock' AND j.status = 'confirmed'
+                                        AND j.args->>'lockId' = l.lock_id))))",
                     )
                     .bind(order_id)
                     .execute(&mut *tx)
@@ -512,8 +536,9 @@ impl Taken<'_> {
         Ok(())
     }
 
-    /// Ends the job. `reopen_order` hands the order back to `quoted` (only from `paying`); pass it
-    /// only when the note can no longer pay.
+    /// Ends the job. `reopen_order` hands the order back to `quoted` (only from `paying`, and only
+    /// when no other lock of the order is open or being sent); pass it only when the note can no
+    /// longer pay.
     async fn fail(&self, reason: &str, reopen_order: bool) -> Step<Outcome> {
         let mut tx = self.pool.begin().await?;
         let result = sqlx::query(
@@ -528,10 +553,24 @@ impl Taken<'_> {
         .await;
         held(result)?;
         if reopen_order {
-            sqlx::query("UPDATE orders SET status = 'quoted' WHERE id = $1 AND status = 'paying'")
+            // The order row first: when two lock jobs of a split order fail at once, the second
+            // waits for the first and sees its job failed, so the order is reopened.
+            sqlx::query("SELECT 1 FROM orders WHERE id = $1 FOR UPDATE")
                 .bind(self.order_id)
                 .execute(&mut *tx)
                 .await?;
+            // Not while another lock of the order is open or on its way (a split payment): that
+            // money must come back first. The order then ends `returned` with its refund.
+            sqlx::query(
+                "UPDATE orders SET status = 'quoted' WHERE id = $1 AND status = 'paying'
+                 AND NOT EXISTS (SELECT 1 FROM legs WHERE order_id = $1 AND status = 'locked')
+                 AND NOT EXISTS (SELECT 1 FROM relayer_jobs
+                                 WHERE order_id = $1 AND kind = 'source_lock' AND id <> $2 AND status <> 'failed')",
+            )
+            .bind(self.order_id)
+            .bind(self.id)
+            .execute(&mut *tx)
+            .await?;
         }
         tx.commit().await?;
         Ok(Outcome::Failed(reason.to_owned()))

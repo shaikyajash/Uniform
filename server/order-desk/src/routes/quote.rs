@@ -3,8 +3,14 @@
 //! - `{payer}`: Path A, USDT on Whitechain through DirectPay.
 //! - `{payer, hashlock, chainId?}`: the cross-chain path. The customer locks USDC on `chainId`
 //!   (default: the one customer chain with a SourceLock) for Bob, under the hashlock of a secret
-//!   only the pay page knows. The pay page picks the path from balances it reads itself; the
-//!   Order Desk connects to no chain, and the Relayer checks the balance before it spends gas.
+//!   only the pay page knows.
+//! - `{payer, hashlock, legs: [{chainId, amount?}, ...]}`: the split path. The customer locks part
+//!   of the USDC on each chain, all under one hashlock; Bob fills only once every lock is in. The
+//!   amounts are USDC and must add up to the order plus Bob's fee; one may be left out to take the
+//!   rest.
+//!
+//! The pay page picks the path from balances it reads itself; the Order Desk connects to no chain,
+//! and the Relayer checks the balance before it spends gas.
 
 use alloy::{
     hex,
@@ -32,6 +38,10 @@ use crate::{
 
 const USDT: &str = "USDT";
 const USDC: &str = "USDC";
+/// SourceLock takes only USDC and EURC, both with 6 decimals (checked against chains.json).
+const USDC_DECIMALS: u8 = 6;
+/// The least a split leg may lock (0.1 USDC), so a split cannot make the Relayer pay gas for dust.
+const MIN_SPLIT_LEG: u64 = 100_000;
 /// `validAfter` = now - 60, so a customer whose clock runs a little behind can still sign (SPEC).
 const CLOCK_SLACK_SECONDS: i64 = 60;
 /// Path A: `validBefore` = now + 600 (SPEC). DirectPay rejects anything more than 1 hour ahead.
@@ -50,6 +60,16 @@ pub struct QuoteRequest {
     hashlock: Option<String>,
     /// Cross-chain only: the chain the customer pays from.
     chain_id: Option<u64>,
+    /// Split only: the chains the customer pays from, and how much USDC on each.
+    legs: Option<Vec<LegRequest>>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LegRequest {
+    chain_id: u64,
+    /// USDC, as a decimal string. Left out on at most one leg, which then takes the rest.
+    amount: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -61,7 +81,8 @@ pub struct QuoteView {
     /// What the customer pays in total, and Bob's part of it (zero on Path A).
     total: String,
     fee: String,
-    /// One note per chain the customer pays from: exactly one on Paths A and B.
+    /// One note per chain the customer pays from: exactly one on Paths A and B, one per leg on a
+    /// split. Each is signed on its own chain.
     to_sign: Vec<ToSign>,
 }
 
@@ -86,6 +107,20 @@ pub struct PlannedLeg {
     pub amount: Amount,
     pub params: SourceLockParams,
     pub lock_id: B256,
+    /// Split quotes only: the note that opens this lock. A single-lock quote keeps its note in
+    /// `quotes.typed_data`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub typed_data: Option<Value>,
+}
+
+/// The source locks a quote plans: one object for a cross-chain quote, a list for a split.
+pub fn planned_legs(leg: Value, quote_typed_data: &Value) -> Result<Vec<PlannedLeg>, serde_json::Error> {
+    if leg.is_array() {
+        return serde_json::from_value(leg);
+    }
+    let mut one: PlannedLeg = serde_json::from_value(leg)?;
+    one.typed_data.get_or_insert_with(|| quote_typed_data.clone());
+    Ok(vec![one])
 }
 
 #[derive(sqlx::FromRow)]
@@ -107,16 +142,22 @@ struct Quoting {
     now: i64,
 }
 
-/// One quote, ready to store and return.
-struct Priced {
-    path: PayPath,
+/// One note for the customer to sign.
+struct Planned {
     note: Note,
     typed_data: Value,
     to_sign: ToSign,
+    leg: Option<PlannedLeg>,
+}
+
+/// One quote, ready to store and return.
+struct Priced {
+    path: PayPath,
+    /// At least one; the first is stored in `quotes.typed_data` and `quotes.nonce`.
+    notes: Vec<Planned>,
     total: String,
     fee: String,
     hashlock: Option<B256>,
-    leg: Option<PlannedLeg>,
 }
 
 pub async fn quote(
@@ -161,9 +202,14 @@ pub async fn quote(
         order_expires_at: order.expires_at,
         now,
     };
-    let priced = match hashlock {
-        None => direct(&state, &quoting)?,
-        Some(hashlock) => crosschain(&state, &quoting, hashlock, body.chain_id)?,
+    let priced = match (hashlock, body.legs) {
+        (None, None) => direct(&state, &quoting)?,
+        (None, Some(_)) => return Err(ApiError::bad_request("bad_legs", "a split needs a hashlock")),
+        (Some(hashlock), None) => crosschain(&state, &quoting, hashlock, body.chain_id)?,
+        (Some(_), Some(_)) if body.chain_id.is_some() => {
+            return Err(ApiError::bad_request("bad_legs", "send either chainId or legs, not both"));
+        }
+        (Some(hashlock), Some(legs)) => split(&state, &quoting, hashlock, &legs)?,
     };
     store_and_reply(&state, &quoting, priced).await
 }
@@ -193,40 +239,130 @@ fn direct(state: &AppState, quoting: &Quoting) -> Result<Priced, ApiError> {
     let total = quoting.amount.to_decimal(usdt.decimals);
     Ok(Priced {
         path: PayPath::Direct,
-        to_sign: ToSign {
-            chain_id: chain.chain_id,
-            token: USDT,
-            amount: total.clone(),
-            typed_data: typed_data.clone(),
-            lock_id: None,
-        },
-        typed_data,
-        note,
+        notes: vec![Planned {
+            to_sign: ToSign {
+                chain_id: chain.chain_id,
+                token: USDT,
+                amount: total.clone(),
+                typed_data: typed_data.clone(),
+                lock_id: None,
+            },
+            typed_data,
+            note,
+            leg: None,
+        }],
         total,
         fee: Amount::default().to_decimal(usdt.decimals),
         hashlock: None,
-        leg: None,
     })
 }
 
 /// Path B: a USDC note that opens a SourceLock for Bob, for the order plus his fee.
 fn crosschain(state: &AppState, quoting: &Quoting, hashlock: B256, chain_id: Option<u64>) -> Result<Priced, ApiError> {
-    let provider = state.provider.ok_or_else(|| {
-        ApiError::conflict("crosschain_unavailable", "paying from another chain is not set up on this server")
-    })?;
+    let provider = provider(state)?;
     let chain = source_chain(state, chain_id)?;
+    let amount = total_with_fee(state, quoting)?;
+    let expiry = lock_expiry(state, quoting)?;
+    let mut planned = plan_lock(quoting, hashlock, provider, chain, amount, expiry)?;
+    // A single-lock quote keeps its note in `quotes.typed_data`.
+    if let Some(leg) = planned.leg.as_mut() {
+        leg.typed_data = None;
+    }
+    Ok(Priced {
+        path: PayPath::CrossChain,
+        notes: vec![planned],
+        total: amount.to_decimal(USDC_DECIMALS),
+        fee: Amount(amount.0 - quoting.amount.0).to_decimal(USDC_DECIMALS),
+        hashlock: Some(hashlock),
+    })
+}
+
+/// Path C: one USDC note per chain, each opening a SourceLock for Bob under the same hashlock and
+/// expiry. Together they hold the order plus Bob's fee.
+fn split(state: &AppState, quoting: &Quoting, hashlock: B256, legs: &[LegRequest]) -> Result<Priced, ApiError> {
+    let provider = provider(state)?;
+    let bad = |message: String| ApiError::bad_request("bad_legs", message);
+    if legs.len() < 2 {
+        return Err(bad("a split needs at least two legs; for one chain send chainId".into()));
+    }
+    let total = total_with_fee(state, quoting)?;
+    let mut chains = Vec::with_capacity(legs.len());
+    let mut given = alloy::primitives::U256::ZERO;
+    let mut open_leg = None;
+    for (index, leg) in legs.iter().enumerate() {
+        let chain = source_chain(state, Some(leg.chain_id))?;
+        if chains.iter().any(|(c, _): &(&Chain, _)| c.chain_id == chain.chain_id) {
+            return Err(bad(format!("chain {} is listed twice", chain.chain_id)));
+        }
+        let amount = match &leg.amount {
+            None if open_leg.is_some() => return Err(bad("only one leg may leave out its amount".into())),
+            None => {
+                open_leg = Some(index);
+                None
+            }
+            Some(text) => {
+                let amount = Amount::from_decimal(text, USDC_DECIMALS)
+                    .map_err(|_| bad(format!("leg amount {text:?} is not a USDC amount")))?;
+                if amount.0 < alloy::primitives::U256::from(MIN_SPLIT_LEG) {
+                    return Err(bad("every leg must lock at least 0.1 USDC".into()));
+                }
+                given = given.checked_add(amount.0).ok_or_else(|| bad("leg amounts are too large".into()))?;
+                Some(amount)
+            }
+        };
+        chains.push((chain, amount));
+    }
+    let short = |given| {
+        bad(format!(
+            "the legs add up to {} USDC but the order plus Bob's fee is {}",
+            Amount(given).to_decimal(USDC_DECIMALS),
+            total.to_decimal(USDC_DECIMALS)
+        ))
+    };
+    match open_leg {
+        Some(index) => {
+            let rest = total
+                .0
+                .checked_sub(given)
+                .filter(|rest| *rest >= alloy::primitives::U256::from(MIN_SPLIT_LEG))
+                .ok_or_else(|| short(given))?;
+            chains[index].1 = Some(Amount(rest));
+        }
+        None if given != total.0 => return Err(short(given)),
+        None => {}
+    }
+
+    let expiry = lock_expiry(state, quoting)?;
+    let notes = chains
+        .into_iter()
+        .map(|(chain, amount)| plan_lock(quoting, hashlock, provider, chain, amount.unwrap_or_default(), expiry))
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(Priced {
+        path: PayPath::Split,
+        notes,
+        total: total.to_decimal(USDC_DECIMALS),
+        fee: Amount(total.0 - quoting.amount.0).to_decimal(USDC_DECIMALS),
+        hashlock: Some(hashlock),
+    })
+}
+
+/// A note that opens a SourceLock on `chain` for Bob, holding `amount` USDC until `expiry`.
+fn plan_lock(
+    quoting: &Quoting,
+    hashlock: B256,
+    provider: Address,
+    chain: &Chain,
+    amount: Amount,
+    expiry: u64,
+) -> Result<Planned, ApiError> {
     let source_lock = chain.contracts.source_lock.ok_or_else(|| ApiError::internal("checked by source_chain"))?;
     let usdc = token(chain, USDC)?;
-    let fee_bps = state.chains.provider_fee_bps;
-    let amount = with_provider_fee(quoting.amount, fee_bps)
-        .ok_or_else(|| ApiError::bad_request("bad_amount", "the order amount is too large"))?;
-    let lock_seconds = i64::try_from(state.chains.timeouts_seconds.source_lock).map_err(ApiError::internal)?;
     let params = SourceLockParams {
         order_id: quoting.order_bytes,
         receiver: provider,
         min_usdc_out: amount,
         hashlock,
-        expiry: u64::try_from(quoting.now + lock_seconds).map_err(ApiError::internal)?,
+        expiry,
         out_token: Address::ZERO,
     };
     let lock_id = source_lock_id(chain.chain_id, source_lock, &params, quoting.payer, usdc.address, amount);
@@ -239,31 +375,57 @@ fn crosschain(state: &AppState, quoting: &Quoting, hashlock: B256, chain_id: Opt
         nonce: lock_id,
     };
     let typed_data = direct_pay::typed_data(usdc, chain.chain_id, &note);
-    let total = amount.to_decimal(usdc.decimals);
-    let fee = Amount(amount.0 - quoting.amount.0).to_decimal(usdc.decimals);
-    Ok(Priced {
-        path: PayPath::CrossChain,
+    Ok(Planned {
         to_sign: ToSign {
             chain_id: chain.chain_id,
             token: USDC,
-            amount: total.clone(),
+            amount: amount.to_decimal(usdc.decimals),
             typed_data: typed_data.clone(),
             lock_id: Some(lock_id),
         },
+        leg: Some(PlannedLeg {
+            chain_id: chain.chain_id,
+            token: usdc.address,
+            amount,
+            params,
+            lock_id,
+            typed_data: Some(typed_data.clone()),
+        }),
         typed_data,
         note,
-        total,
-        fee,
-        hashlock: Some(hashlock),
-        leg: Some(PlannedLeg { chain_id: chain.chain_id, token: usdc.address, amount, params, lock_id }),
     })
+}
+
+fn provider(state: &AppState) -> Result<Address, ApiError> {
+    state.provider.ok_or_else(|| {
+        ApiError::conflict("crosschain_unavailable", "paying from another chain is not set up on this server")
+    })
+}
+
+/// The USDC the customer locks in all: the order plus Bob's fee, rounded up.
+fn total_with_fee(state: &AppState, quoting: &Quoting) -> Result<Amount, ApiError> {
+    with_provider_fee(quoting.amount, state.chains.provider_fee_bps)
+        .ok_or_else(|| ApiError::bad_request("bad_amount", "the order amount is too large"))
+}
+
+fn lock_expiry(state: &AppState, quoting: &Quoting) -> Result<u64, ApiError> {
+    let lock_seconds = i64::try_from(state.chains.timeouts_seconds.source_lock).map_err(ApiError::internal)?;
+    u64::try_from(quoting.now + lock_seconds).map_err(ApiError::internal)
 }
 
 async fn store_and_reply(state: &AppState, quoting: &Quoting, priced: Priced) -> Result<Json<QuoteView>, ApiError> {
     let quote_id = format!("q_{}", hex::encode(&random::bytes32()[..16]));
     let timeout = i64::try_from(state.chains.timeouts_seconds.quote).map_err(ApiError::internal)?;
     let expires_at = (quoting.now + timeout).min(quoting.order_expires_at);
-    let leg = priced.leg.as_ref().map(serde_json::to_value).transpose().map_err(ApiError::internal)?;
+    let planned_legs: Vec<&PlannedLeg> = priced.notes.iter().filter_map(|n| n.leg.as_ref()).collect();
+    let leg = match planned_legs.as_slice() {
+        [] => None,
+        [one] if priced.path != PayPath::Split => Some(serde_json::to_value(one)),
+        many => Some(serde_json::to_value(many)),
+    }
+    .transpose()
+    .map_err(ApiError::internal)?;
+    let first = &priced.notes[0];
 
     // Only from a status that may be quoted, checked again inside the update so two quotes racing
     // on one order cannot both pass, and a quote cannot slip in while a payment is being sent.
@@ -296,10 +458,10 @@ async fn store_and_reply(state: &AppState, quoting: &Quoting, priced: Priced) ->
     .bind(&quoting.order_id)
     .bind(priced.path.as_str())
     .bind(format!("{:#x}", quoting.payer))
-    .bind(&priced.typed_data)
-    .bind(priced.note.nonce.to_string())
-    .bind(priced.note.valid_after)
-    .bind(priced.note.valid_before)
+    .bind(&first.typed_data)
+    .bind(first.note.nonce.to_string())
+    .bind(first.note.valid_after)
+    .bind(first.note.valid_before)
     .bind(expires_at)
     .bind(quoting.now)
     .bind(leg)
@@ -313,7 +475,7 @@ async fn store_and_reply(state: &AppState, quoting: &Quoting, priced: Priced) ->
         expires_at,
         total: priced.total,
         fee: priced.fee,
-        to_sign: vec![priced.to_sign],
+        to_sign: priced.notes.into_iter().map(|n| n.to_sign).collect(),
     }))
 }
 
@@ -554,5 +716,58 @@ mod tests {
         let unknown = format!("0x{}", "cd".repeat(32));
         let (status, _) = call(&test.app, quote(&unknown, json!({ "payer": PAYER }))).await;
         assert_eq!(status, StatusCode::NOT_FOUND);
+    }
+
+    fn split_body(legs: Value) -> Value {
+        json!({ "payer": PAYER, "hashlock": B256::repeat_byte(0x77), "legs": legs })
+    }
+
+    #[sqlx::test]
+    async fn a_split_quote_is_one_lock_note_per_chain_adding_up_to_the_order_plus_fee(pool: PgPool) {
+        let test = test_app(pool).await;
+        let id = new_order(&test).await;
+        let body = split_body(json!([{ "chainId": 84532, "amount": "6" }, { "chainId": 11155111 }]));
+        let (status, reply) = call(&test.app, quote(&id, body)).await;
+        assert_eq!(status, StatusCode::OK, "{reply}");
+        assert_eq!(reply["path"], "split");
+        assert_eq!((reply["total"].as_str(), reply["fee"].as_str()), (Some("12.036000"), Some("0.036000")));
+        let notes = reply["toSign"].as_array().unwrap();
+        assert_eq!(notes.len(), 2);
+        assert_eq!((notes[0]["chainId"].as_u64(), notes[0]["amount"].as_str()), (Some(84532), Some("6.000000")));
+        assert_eq!((notes[1]["chainId"].as_u64(), notes[1]["amount"].as_str()), (Some(11155111), Some("6.036000")));
+        assert_ne!(notes[0]["lockId"], notes[1]["lockId"]);
+        for note in notes {
+            let typed = &note["typedData"];
+            assert_eq!(typed["domain"]["chainId"], note["chainId"]);
+            assert_eq!(typed["message"]["nonce"], note["lockId"]);
+        }
+        assert_eq!(notes[0]["typedData"]["message"]["validBefore"], notes[1]["typedData"]["message"]["validBefore"]);
+    }
+
+    #[sqlx::test]
+    async fn a_split_quote_refuses_legs_that_do_not_make_one_payment(pool: PgPool) {
+        let test = test_app(pool).await;
+        let id = new_order(&test).await;
+        let refused = [
+            split_body(json!([{ "chainId": 84532 }])),
+            split_body(json!([{ "chainId": 84532, "amount": "6" }, { "chainId": 84532 }])),
+            split_body(json!([{ "chainId": 84532, "amount": "6" }, { "chainId": 11155111, "amount": "6" }])),
+            split_body(json!([{ "chainId": 84532, "amount": "6" }, { "chainId": 11155111, "amount": "7" }])),
+            split_body(json!([{ "chainId": 84532 }, { "chainId": 11155111 }])),
+            split_body(json!([{ "chainId": 84532, "amount": "12.036" }, { "chainId": 11155111 }])),
+            split_body(json!([{ "chainId": 84532, "amount": "0" }, { "chainId": 11155111 }])),
+            split_body(json!([{ "chainId": 84532, "amount": "0.099999" }, { "chainId": 11155111 }])),
+            split_body(json!([{ "chainId": 84532, "amount": "11.99" }, { "chainId": 11155111 }])),
+            split_body(json!([{ "chainId": 84532, "amount": "six" }, { "chainId": 11155111 }])),
+            json!({ "payer": PAYER, "legs": [{ "chainId": 84532, "amount": "6" }, { "chainId": 11155111 }] }),
+            json!({ "payer": PAYER, "hashlock": B256::repeat_byte(0x77), "chainId": 84532,
+                    "legs": [{ "chainId": 84532, "amount": "6" }, { "chainId": 11155111 }] }),
+        ];
+        for body in refused {
+            let (status, reply) = call(&test.app, quote(&id, body.clone())).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{body} -> {reply}");
+        }
+        let (status, reply) = call(&test.app, quote(&id, split_body(json!([{ "chainId": 1874, "amount": "6" }, { "chainId": 84532 }])))).await;
+        assert_eq!((status, reply["error"]["code"].as_str()), (StatusCode::BAD_REQUEST, Some("bad_chain")));
     }
 }
