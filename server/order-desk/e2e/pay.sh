@@ -2,8 +2,8 @@
 # pay.sh <USDT amount> <secret label> [nofill|split|split-missing]: one cross-chain payment
 # through the real API.
 # Default: one lock on Base. Waits for Bob's fill, reveals the secret, waits for paid and Bob's claim.
-# nofill (an order over Bob's limit): waits for the lock, moves the clocks past the lock's expiry,
-#   and waits for the Relayer's refund.
+# nofill: the provider withdraws Aqua's approval right after the quote, so nobody fills; waits for
+#   the lock, moves the clocks past the lock's expiry, and waits for the Relayer's refund.
 # split: 1 USDC on Base and the rest on Ethereum Sepolia; then as the default, with both claims.
 # split-missing: as split, but the customer has no USDC on Ethereum, so that lock never opens.
 #   Bob must not fill; the Base lock is refunded after expiry.
@@ -19,6 +19,8 @@ ETH_USDC=0x1c7D4B196Cb0C7B01d743Fbc6116a902379C7238
 USDC=0x036CbD53842c5426634e7929541eC2318f3dCF7e
 USDT=0xcedfB56113143d55b2358b8CFbB0dEB5Ad2f55a7
 SHOP=0x15d34AAf54267DB7D7c367839AAf71A00a2C6A65
+PROVIDER=0x70997970C51812dc3A010C7d01b50e0d17dc79C8
+AQUA=0x02dF2659B5B4956EAFEe3293584C2aaefC114871
 CUSTOMER_KEY=$(cat ../../matchmaker/e2e/.state/customer.key)
 CUSTOMER=$(cast wallet address "$CUSTOMER_KEY")
 SECRET=$(cast keccak "$2")
@@ -52,6 +54,14 @@ fi
 curl -s -X POST "$DESK/v1/orders/$ORDER/quote" -H 'content-type: application/json' \
   -d "{\"payer\":\"$CUSTOMER\",\"hashlock\":\"$HASHLOCK\",$PLAN}" > "$STATE/quote.json"
 QUOTE=$(json "d['quoteId']" < "$STATE/quote.json")
+provider_approves() {
+  cast rpc anvil_impersonateAccount $PROVIDER --rpc-url $WC >/dev/null
+  cast send $USDT "approve(address,uint256)" $AQUA "$1" --from $PROVIDER --unlocked --rpc-url $WC >/dev/null
+}
+if [ "$MODE" = nofill ]; then
+  approved=$(cast call $USDT "allowance(address,address)(uint256)" $PROVIDER $AQUA --rpc-url $WC | awk '{print $1}')
+  provider_approves 0
+fi
 NOTES=$(json "len(d['toSign'])" < "$STATE/quote.json")
 echo "quote: $(json "d['total']" < "$STATE/quote.json") USDC in $NOTES lock(s): $(json "' + '.join(n['amount'] + ' on ' + str(n['chainId']) for n in d['toSign'])" < "$STATE/quote.json")"
 SIGNATURES=""
@@ -94,6 +104,7 @@ if [ "$MODE" = nofill ]; then
   wait_for returned 180
   customer_after=$(cast call $USDC "balanceOf(address)(uint256)" $CUSTOMER --rpc-url $BASE | awk '{print $1}')
   echo "returned: customer USDC $customer_before -> $customer_after"
+  provider_approves "$approved"
   expect "$customer_after" "$customer_before" "the customer has all their USDC back"
   echo PASS
   exit 0
