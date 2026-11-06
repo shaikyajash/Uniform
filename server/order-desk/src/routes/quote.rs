@@ -30,7 +30,10 @@ use common::{
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use super::{AppState, normalize_order_id, now};
+use super::{
+    AppState, normalize_order_id, now,
+    offers::{self, Chosen},
+};
 use crate::{
     direct_pay::{self, Note},
     error::ApiError,
@@ -186,6 +189,8 @@ struct Priced {
     total: String,
     fee: String,
     hashlock: Option<B256>,
+    /// The provider a cross-chain quote went to; `None` on Path A.
+    provider: Option<Chosen>,
 }
 
 pub async fn quote(
@@ -230,6 +235,11 @@ pub async fn quote(
         order_expires_at: order.expires_at,
         now,
     };
+    // One cross-chain quote at a time, from choosing its provider to storing it.
+    let _turn = match hashlock {
+        Some(_) => Some(state.quoting.lock().await),
+        None => None,
+    };
     let paid_with = body.token.as_deref().filter(|symbol| *symbol != USDC);
     if let Some(symbol) = paid_with {
         let Some(hashlock) = hashlock else {
@@ -248,17 +258,23 @@ pub async fn quote(
         let price = state.prices.micro_usd(price_id).await.map_err(|error| {
             ApiError::conflict("price_unavailable", format!("no price for {symbol} right now ({error}); try again"))
         })?;
-        let priced = token_lock(&state, &quoting, hashlock, chain, symbol, token, price)?;
+        let chosen = offers::choose(&state, &quoting.order_id, quoting.amount, now).await?;
+        let priced = token_lock(&state, &quoting, hashlock, chosen, chain, symbol, token, price)?;
         return store_and_reply(&state, &quoting, priced).await;
     }
     let priced = match (hashlock, body.legs) {
         (None, None) => direct(&state, &quoting)?,
         (None, Some(_)) => return Err(ApiError::bad_request("bad_legs", "a split needs a hashlock")),
-        (Some(hashlock), None) => crosschain(&state, &quoting, hashlock, body.chain_id)?,
         (Some(_), Some(_)) if body.chain_id.is_some() => {
             return Err(ApiError::bad_request("bad_legs", "send either chainId or legs, not both"));
         }
-        (Some(hashlock), Some(legs)) => split(&state, &quoting, hashlock, &legs)?,
+        (Some(hashlock), legs) => {
+            let chosen = offers::choose(&state, &quoting.order_id, quoting.amount, now).await?;
+            match legs {
+                None => crosschain(&state, &quoting, hashlock, chosen, body.chain_id)?,
+                Some(legs) => split(&state, &quoting, hashlock, chosen, &legs)?,
+            }
+        }
     };
     store_and_reply(&state, &quoting, priced).await
 }
@@ -307,16 +323,22 @@ fn direct(state: &AppState, quoting: &Quoting) -> Result<Priced, ApiError> {
         total,
         fee: Amount::default().to_decimal(usdt.decimals),
         hashlock: None,
+        provider: None,
     })
 }
 
-/// Path B: a USDC note that opens a SourceLock for Bob, for the order plus his fee.
-fn crosschain(state: &AppState, quoting: &Quoting, hashlock: B256, chain_id: Option<u64>) -> Result<Priced, ApiError> {
-    let provider = provider(state)?;
+/// Path B: a USDC note that opens a SourceLock for the chosen provider, for the order plus their fee.
+fn crosschain(
+    state: &AppState,
+    quoting: &Quoting,
+    hashlock: B256,
+    chosen: Chosen,
+    chain_id: Option<u64>,
+) -> Result<Priced, ApiError> {
     let chain = source_chain(state, chain_id)?;
-    let amount = total_with_fee(state, quoting)?;
+    let amount = total_with_fee(quoting, chosen)?;
     let expiry = lock_expiry(state, quoting)?;
-    let mut planned = plan_lock(quoting, hashlock, provider, chain, amount, expiry)?;
+    let mut planned = plan_lock(quoting, hashlock, chosen.provider, chain, amount, expiry)?;
     // A single-lock quote keeps its note in `quotes.typed_data`.
     if let Some(leg) = planned.leg.as_mut() {
         leg.typed_data = None;
@@ -327,31 +349,34 @@ fn crosschain(state: &AppState, quoting: &Quoting, hashlock: B256, chain_id: Opt
         total: amount.to_decimal(USDC_DECIMALS),
         fee: Amount(amount.0 - quoting.amount.0).to_decimal(USDC_DECIMALS),
         hashlock: Some(hashlock),
+        provider: Some(chosen),
     })
 }
 
-/// Path B with any listed ERC-20: a Calibur batch (approve + lock) that opens a SourceLock for Bob
-/// holding enough of the token, at its market price, to cover the order plus his fee.
+/// Path B with any listed ERC-20: a Calibur batch (approve + lock) that opens a SourceLock for the
+/// chosen provider holding enough of the token, at its market price, to cover the order plus their
+/// fee.
+#[allow(clippy::too_many_arguments)]
 fn token_lock(
     state: &AppState,
     quoting: &Quoting,
     hashlock: B256,
+    chosen: Chosen,
     chain: &Chain,
     symbol: &str,
     token: &Token,
     price_micro_usd: u64,
 ) -> Result<Priced, ApiError> {
-    let provider = provider(state)?;
     let source_lock = chain.contracts.source_lock.ok_or_else(|| ApiError::internal("checked by source_chain"))?;
     let calibur_address = chain.contracts.calibur.ok_or_else(|| {
         ApiError::conflict("bad_token", format!("chain {} cannot take tokens without EIP-3009 yet", chain.chain_id))
     })?;
-    let usd = total_with_fee(state, quoting)?;
+    let usd = total_with_fee(quoting, chosen)?;
     let amount = token_amount(usd, token.decimals, price_micro_usd)
         .ok_or_else(|| ApiError::bad_request("bad_amount", "the order amount is too large"))?;
     let params = SourceLockParams {
         order_id: quoting.order_bytes,
-        receiver: provider,
+        receiver: chosen.provider,
         min_usdc_out: usd,
         hashlock,
         expiry: lock_expiry(state, quoting)?,
@@ -402,6 +427,7 @@ fn token_lock(
         total,
         fee: Amount(usd.0 - quoting.amount.0).to_decimal(USDC_DECIMALS),
         hashlock: Some(hashlock),
+        provider: Some(chosen),
     })
 }
 
@@ -418,15 +444,20 @@ pub fn token_amount(usd: Amount, decimals: u8, price_micro_usd: u64) -> Option<A
     (amount > U256::ZERO).then_some(Amount(amount))
 }
 
-/// Path C: one USDC note per chain, each opening a SourceLock for Bob under the same hashlock and
-/// expiry. Together they hold the order plus Bob's fee.
-fn split(state: &AppState, quoting: &Quoting, hashlock: B256, legs: &[LegRequest]) -> Result<Priced, ApiError> {
-    let provider = provider(state)?;
+/// Path C: one USDC note per chain, each opening a SourceLock for the chosen provider under the
+/// same hashlock and expiry. Together they hold the order plus the provider's fee.
+fn split(
+    state: &AppState,
+    quoting: &Quoting,
+    hashlock: B256,
+    chosen: Chosen,
+    legs: &[LegRequest],
+) -> Result<Priced, ApiError> {
     let bad = |message: String| ApiError::bad_request("bad_legs", message);
     if legs.len() < 2 {
         return Err(bad("a split needs at least two legs; for one chain send chainId".into()));
     }
-    let total = total_with_fee(state, quoting)?;
+    let total = total_with_fee(quoting, chosen)?;
     let mut chains = Vec::with_capacity(legs.len());
     let mut given = alloy::primitives::U256::ZERO;
     let mut open_leg = None;
@@ -455,7 +486,7 @@ fn split(state: &AppState, quoting: &Quoting, hashlock: B256, legs: &[LegRequest
     }
     let short = |given| {
         bad(format!(
-            "the legs add up to {} USDC but the order plus Bob's fee is {}",
+            "the legs add up to {} USDC but the order plus the provider's fee is {}",
             Amount(given).to_decimal(USDC_DECIMALS),
             total.to_decimal(USDC_DECIMALS)
         ))
@@ -476,7 +507,7 @@ fn split(state: &AppState, quoting: &Quoting, hashlock: B256, legs: &[LegRequest
     let expiry = lock_expiry(state, quoting)?;
     let notes = chains
         .into_iter()
-        .map(|(chain, amount)| plan_lock(quoting, hashlock, provider, chain, amount.unwrap_or_default(), expiry))
+        .map(|(chain, amount)| plan_lock(quoting, hashlock, chosen.provider, chain, amount.unwrap_or_default(), expiry))
         .collect::<Result<Vec<_>, _>>()?;
     Ok(Priced {
         path: PayPath::Split,
@@ -484,10 +515,11 @@ fn split(state: &AppState, quoting: &Quoting, hashlock: B256, legs: &[LegRequest
         total: total.to_decimal(USDC_DECIMALS),
         fee: Amount(total.0 - quoting.amount.0).to_decimal(USDC_DECIMALS),
         hashlock: Some(hashlock),
+        provider: Some(chosen),
     })
 }
 
-/// A note that opens a SourceLock on `chain` for Bob, holding `amount` USDC until `expiry`.
+/// A note that opens a SourceLock on `chain` for `provider`, holding `amount` USDC until `expiry`.
 fn plan_lock(
     quoting: &Quoting,
     hashlock: B256,
@@ -542,15 +574,9 @@ fn plan_lock(
     })
 }
 
-fn provider(state: &AppState) -> Result<Address, ApiError> {
-    state.provider.ok_or_else(|| {
-        ApiError::conflict("crosschain_unavailable", "paying from another chain is not set up on this server")
-    })
-}
-
-/// The USDC the customer locks in all: the order plus Bob's fee, rounded up.
-fn total_with_fee(state: &AppState, quoting: &Quoting) -> Result<Amount, ApiError> {
-    with_provider_fee(quoting.amount, state.chains.provider_fee_bps)
+/// The USDC the customer locks in all: the order plus the chosen provider's fee, rounded up.
+fn total_with_fee(quoting: &Quoting, chosen: Chosen) -> Result<Amount, ApiError> {
+    with_provider_fee(quoting.amount, chosen.fee_bps)
         .ok_or_else(|| ApiError::bad_request("bad_amount", "the order amount is too large"))
 }
 
@@ -582,7 +608,8 @@ async fn store_and_reply(state: &AppState, quoting: &Quoting, priced: Priced) ->
         .collect();
     let mut tx = state.pool.begin().await?;
     let updated = sqlx::query(
-        "UPDATE orders SET status = 'quoted', path = $2, payer = $3, hashlock = $4
+        "UPDATE orders SET status = 'quoted', path = $2, payer = $3, hashlock = $4, provider = $6,
+                           provider_fee_bps = $7
          WHERE id = $1 AND status = ANY($5)",
     )
     .bind(&quoting.order_id)
@@ -590,6 +617,8 @@ async fn store_and_reply(state: &AppState, quoting: &Quoting, priced: Priced) ->
     .bind(format!("{:#x}", quoting.payer))
     .bind(priced.hashlock.map(|hashlock| hashlock.to_string()))
     .bind(&from_statuses)
+    .bind(priced.provider.map(|chosen| format!("{:#x}", chosen.provider)))
+    .bind(priced.provider.map(|chosen| i32::from(chosen.fee_bps)))
     .execute(&mut *tx)
     .await?;
     if updated.rows_affected() == 0 {
@@ -597,8 +626,8 @@ async fn store_and_reply(state: &AppState, quoting: &Quoting, priced: Priced) ->
     }
     sqlx::query(
         "INSERT INTO quotes (id, order_id, path, payer, typed_data, nonce, valid_after, valid_before, expires_at,
-                             created_at, leg)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)",
+                             created_at, leg, provider_fee_bps)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)",
     )
     .bind(&quote_id)
     .bind(&quoting.order_id)
@@ -611,6 +640,7 @@ async fn store_and_reply(state: &AppState, quoting: &Quoting, priced: Priced) ->
     .bind(expires_at)
     .bind(quoting.now)
     .bind(leg)
+    .bind(priced.provider.map(|chosen| i32::from(chosen.fee_bps)))
     .execute(&mut *tx)
     .await?;
     tx.commit().await?;
@@ -765,6 +795,94 @@ mod tests {
     }
 
     const HASHLOCK: &str = "0x4242424242424242424242424242424242424242424242424242424242424242";
+
+    fn offers(offers: Value) -> Request<Body> {
+        Request::post("/internal/offers")
+            .header(header::CONTENT_TYPE, "application/json")
+            .header(header::AUTHORIZATION, format!("Bearer {}", crate::routes::test_support::INTERNAL_TOKEN))
+            .body(Body::from(json!({ "offers": offers }).to_string()))
+            .unwrap()
+    }
+
+    fn offer(provider: &str, fee_bps: u16, available: &str) -> Value {
+        json!({ "provider": provider, "feeBps": fee_bps, "maxPerOrder": "100000000", "available": available })
+    }
+
+    const ASHA: &str = "0x00000000000000000000000000000000000000a1";
+    const BEN: &str = "0x00000000000000000000000000000000000000b2";
+
+    async fn provider_of(test: &TestApp, id: &str) -> (Option<String>, Option<i32>) {
+        sqlx::query_as("SELECT provider, provider_fee_bps FROM orders WHERE id = $1")
+            .bind(id)
+            .fetch_one(&test.pool)
+            .await
+            .unwrap()
+    }
+
+    #[sqlx::test]
+    async fn the_cheapest_provider_who_can_cover_the_order_gets_it(pool: PgPool) {
+        let test = test_app(pool).await;
+        let (status, _) = call(&test.app, offers(json!([offer(ASHA, 30, "50000000"), offer(BEN, 10, "20000000")]))).await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+
+        // 12 USDT at Ben's 0.1%.
+        let id = new_order(&test).await;
+        let (status, reply) = call(&test.app, quote(&id, json!({ "payer": PAYER, "hashlock": HASHLOCK, "chainId": 84532 }))).await;
+        assert_eq!(status, StatusCode::OK, "{reply}");
+        assert_eq!((reply["total"].as_str(), reply["fee"].as_str()), (Some("12.012000"), Some("0.012000")));
+        assert_eq!(provider_of(&test, &id).await, (Some(BEN.into()), Some(10)));
+        // The order says what fee a quote would carry now: Ben still has 20 USDT, but 12 of it is
+        // promised to this very order, which is not counted against itself.
+        let read = Request::get(format!("/v1/orders/{id}")).body(Body::empty()).unwrap();
+        let (_, order) = call(&test.app, read).await;
+        assert_eq!(order["providerFeeBps"], 10);
+
+        // Ben has 8 USDT left free while that order is being paid, so the next one goes to Asha.
+        let next = new_order(&test).await;
+        let (status, reply) = call(&test.app, quote(&next, json!({ "payer": PAYER, "hashlock": HASHLOCK, "chainId": 84532 }))).await;
+        assert_eq!(status, StatusCode::OK, "{reply}");
+        assert_eq!(reply["fee"], "0.036000");
+        assert_eq!(provider_of(&test, &next).await, (Some(ASHA.into()), Some(30)));
+
+        // Quoting the first order again does not count its own earlier quote against Ben.
+        let (_, reply) = call(&test.app, quote(&id, json!({ "payer": PAYER, "hashlock": HASHLOCK, "chainId": 84532 }))).await;
+        assert_eq!(reply["fee"], "0.012000");
+
+        // Path A has no provider.
+        let (status, _) = call(&test.app, quote(&id, json!({ "payer": PAYER }))).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(provider_of(&test, &id).await, (None, None));
+    }
+
+    #[sqlx::test]
+    async fn without_a_provider_who_can_cover_it_only_path_a_is_quoted(pool: PgPool) {
+        let test = test_app(pool).await;
+        let id = new_order(&test).await;
+        let ask = || quote(&id, json!({ "payer": PAYER, "hashlock": HASHLOCK, "chainId": 84532 }));
+
+        call(&test.app, offers(json!([offer(ASHA, 30, "5000000")]))).await;
+        let (status, reply) = call(&test.app, ask()).await;
+        assert_eq!((status, reply["error"]["code"].as_str()), (StatusCode::CONFLICT, Some("not_enough_liquidity")));
+
+        // A fee outside chains.json's range is dropped.
+        call(&test.app, offers(json!([offer(ASHA, 5, "50000000"), offer(BEN, 500, "50000000")]))).await;
+        let (status, reply) = call(&test.app, ask()).await;
+        assert_eq!((status, reply["error"]["code"].as_str()), (StatusCode::CONFLICT, Some("crosschain_unavailable")));
+
+        let (status, reply) = call(&test.app, quote(&id, json!({ "payer": PAYER }))).await;
+        assert_eq!(status, StatusCode::OK, "{reply}");
+    }
+
+    #[sqlx::test]
+    async fn only_the_matchmaker_may_send_offers(pool: PgPool) {
+        let test = test_app(pool).await;
+        let request = Request::post("/internal/offers")
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(json!({ "offers": [] }).to_string()))
+            .unwrap();
+        let (status, _) = call(&test.app, request).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+    }
 
     #[sqlx::test]
     async fn a_hashlock_makes_a_usdc_note_that_opens_a_source_lock_for_bob(pool: PgPool) {

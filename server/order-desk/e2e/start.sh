@@ -38,14 +38,14 @@ done
 rm -f "$STATE/matchmaker.db" "$STATE/webhooks.jsonl" "$STATE/webhook.secret"
 sleep 1
 
-DATABASE_URL=$DB PORT=$PORT INTERNAL_EVENTS_TOKEN=$(cat "$STATE/token") PROVIDER_ADDRESS=$BOB \
+DATABASE_URL=$DB PORT=$PORT INTERNAL_EVENTS_TOKEN=$(cat "$STATE/token") \
   nohup ./target/debug/order-desk serve > "$STATE/order-desk.log" 2>&1 &
 echo $! > "$STATE/order-desk.pid"
 DATABASE_URL=$DB RELAYER_PRIVATE_KEY=$(cat "$STATE/relayer.key") RPC_84532=$BASE RPC_11155111=$ETH RPC_1874=$WC \
   nohup ./target/debug/relayer > "$STATE/relayer.log" 2>&1 &
 echo $! > "$STATE/relayer.pid"
 CHAINS_PATH=../shared/chains.json ORDER_DESK_URL=http://127.0.0.1:$PORT INTERNAL_EVENTS_TOKEN=$(cat "$STATE/token") \
-  FILLER_PRIVATE_KEY=0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80 BOB_ADDRESS=$BOB \
+  FILLER_PRIVATE_KEY=0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80 STRATEGY_MAKER=$BOB \
   STRATEGY_SALT=0x00000000000000000000000000000000000000000000000000000000000e2e01 STRATEGY_MAX_PER_ORDER=2000000 \
   RPC_84532=$BASE RPC_11155111=$ETH RPC_1874=$WC DB_PATH="$STATE/matchmaker.db" POLL_SECONDS=2 \
   nohup ./target/debug/matchmaker > "$STATE/matchmaker.log" 2>&1 &
