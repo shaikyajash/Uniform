@@ -182,7 +182,7 @@ mod tests {
         }
     }
 
-    const LOCK: Address = address!("61Ec0B49C65f83b9CFd8996A56AE0929091E7858");
+    const LOCK: Address = address!("02dF2659B5B4956EAFEe3293584C2aaefC114871");
 
     #[test]
     fn locked_is_reported_and_acted_on() {
