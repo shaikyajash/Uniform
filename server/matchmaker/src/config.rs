@@ -17,7 +17,9 @@ pub struct Config {
     /// The Matchmaker's own key: pays gas on every chain and is the strategy's filler.
     pub filler_key: String,
     pub provider: Provider,
-    pub strategy_salt: B256,
+    /// One more strategy to fill from, besides those found on chain: the one shipped by hand with
+    /// this salt (and `STRATEGY_MAX_PER_ORDER`). Optional; the Earn page ships with its own salts.
+    pub strategy_salt: Option<B256>,
     pub timing: Timing,
     pub db_path: String,
     pub poll_seconds: u64,
@@ -53,7 +55,12 @@ impl Config {
         let timeouts = chains.timeouts_seconds;
         let provider = Provider {
             address: parse("BOB_ADDRESS")?,
-            max_per_order: parse("STRATEGY_MAX_PER_ORDER")?,
+            // Only for the strategy named by STRATEGY_SALT. 100 USDT: the Earn page's (and the
+            // Relayer's) order limit.
+            max_per_order: match env::var("STRATEGY_MAX_PER_ORDER") {
+                Ok(_) => parse("STRATEGY_MAX_PER_ORDER")?,
+                Err(_) => alloy::primitives::U256::from(100_000_000u64),
+            },
             fee_bps: env::var("STRATEGY_FEE_BPS")
                 .map(|v| {
                     v.parse()
@@ -68,7 +75,10 @@ impl Config {
             internal_token: required("INTERNAL_EVENTS_TOKEN")?,
             filler_key: required("FILLER_PRIVATE_KEY")?,
             provider,
-            strategy_salt: parse("STRATEGY_SALT")?,
+            strategy_salt: match env::var("STRATEGY_SALT") {
+                Ok(_) => Some(parse("STRATEGY_SALT")?),
+                Err(_) => None,
+            },
             timing: Timing {
                 fill_cutoff: timeouts.fill_cutoff,
                 destination_lock: timeouts.destination_lock,
