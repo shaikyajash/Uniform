@@ -31,9 +31,24 @@ then:
 - **Recovery first:** before applying the rules, it reads Bob's destination lock for this source lock. If it already exists (an earlier run stopped before recording it), it records it from the chain, whatever the rules or the Order Desk now say. A `Settled` for a fill it never recorded is also recorded, once the chain confirms the lock is Bob's.
 - **Clocks:** the destination expiry is set on Whitechain's clock from the time the source lock has left, so a clock difference cannot shrink the 5-minute gap. `fillCutoff` must be at least the destination lock time plus the gap; the config is rejected otherwise.
 - **Sending:** the nonce is read from the chain for every transaction (no cached nonce gap), every send is simulated first, and every RPC call and receipt has a time limit. Only a real revert counts as "skip"; network errors are retried.
-- **No single item blocks the rest:** each redeem and refund runs on its own. A log that keeps failing is skipped after 30 tries, and an event the Order Desk refuses for good is dropped. The cursor only moves once the node has the range's last block, and the range halves if the RPC refuses it. Logs removed by a reorg are ignored.
+- **No single item blocks the rest:** each redeem and refund runs on its own. Network and Order Desk outages are retried until they clear; only a permanent error (data on chain that does not match) counts towards skipping a log after 30 tries, and an event the Order Desk refuses for good is dropped. The cursor only moves once the node has the range's last block, and the range halves if the RPC refuses it. Logs removed by a reorg are ignored.
 - **Start-up checks:** our DestinationLock is the PayoutPool's own, Bob's strategy is active on Aqua with these settings, and `STRATEGY_FEE_BPS` equals `providerFeeBps`.
 - **Missed redeem:** if the source lock expired before Bob redeemed, the fill is marked `missed` and logged loudly.
+- **Secret lookup:** if a destination lock was paid to the shop but its `Settled` log was never handled, the secret is read from that lock's `Settled` log on chain (searching back up to 200,000 blocks) and Bob redeems.
+- **Timing limits:** `MIN_GAP_SECONDS` must be at least 60 and the destination lock time between 300 and 7200 seconds (the DestinationLock limits).
+**After the second review round:**
+- **A stale read never gives up money:** a lock that reads as empty is treated as a lagging node and retried. A fill is marked `missed` only when the source lock reads as refunded, or as open and expired on a second read.
+- **Separate redeem loop:** source redeems run on their own loop, so slow scans or refunds never delay them. Each round it also checks every open fill on chain, so a destination lock paid to the shop is noticed (and its secret read from the `Settled` log) even if that log was missed.
+- **One transaction at a time per chain:** the two loops never race for a nonce.
+- **Safe blocks on rollups:** customer chains (Base, Ethereum Sepolia) are read up to their `safe` block, not a few confirmations, so an L2 reorg cannot remove a lock Bob already filled. On Base this adds about a minute before a fill.
+- **Log range:** it halves only when the RPC refuses the range (not on rate limits or timeouts), never grows back past a size that was refused, and settles in a few tries (the public Base RPC allows 200 blocks).
+- **Failed logs are parked:** a log whose handling fails goes to a retry table, so it never holds up the chain's cursor. Outages are retried until they clear; a permanent mismatch is dropped after 30 tries.
+- **Junk locks cost Bob nothing:** a lock for an order the Order Desk doesn't know costs one HTTP request and no gas, and the Matchmaker only refunds source locks Bob actually filled (anyone can refund the others).
+- **Store:** fills are keyed by destination lock, so a second fill for an order is never silently dropped; events the Order Desk refuses are kept in `dead_letters`.
+- **Checks:** a node whose latest block is more than 2 minutes old is not trusted for time; the gap is at least 300 s; `ORDER_DESK_URL` must use https unless it is on this machine; the token must not be empty; the first run looks back 6,000 blocks (about 3 hours of Base).
+- The destination lock id is computed locally and checked against the live contract at start-up.
+
+- **Known limit:** a transaction stuck in the mempool is not re-sent with a higher fee; later transactions from the filler on that chain wait behind it. Fees come from the network's estimate, which is enough on these testnets.
 - RPC URLs are removed from error text.
 
 **Not yet strict:** the audit rule "accept only the exact lock id recomputed from the quote" needs the cross-chain quote that B4 adds. Until then, the checks above apply, plus one fill per order. When B4 lands, the Order Desk exposes the expected lock id and the Matchmaker requires an exact match.
@@ -46,7 +61,6 @@ then:
   - `events.rs`: maps logs to `common::events::ChainEvent`.
   - `store.rs`: its own SQLite file, with `cursors`, `fills` and an `outbox` of events not yet reported.
   - `order_desk.rs`: the HTTP client.
-  - `chain.rs`: providers and the filler wallet.
   - `main.rs`: the loop.
 - Its database is separate from the Order Desk's Postgres. The only link is HTTP.
 
@@ -71,10 +85,10 @@ Pure functions:
 Unit tests cover every Skip reason and the boundaries.
 
 ### Task 3: Store, Order Desk client, and the loop
-SQLite migrations; cursors start at the current head on first run. The outbox retries events until the Order Desk accepts them. Logs are read in ranges of at most 1,000 blocks.
+SQLite schema created on start; on the first run each cursor starts 6,000 blocks before the readable head, so locks made before start-up are still seen. The outbox retries events until the Order Desk accepts them. Logs are read in ranges of at most 1,000 blocks.
 
 ### Task 4: Local end to end on two anvil forks (Base and Whitechain) — passed
-Four scenarios passed: a normal payment, a timeout refund on both sides, a crash after filling with the secret revealed while the Matchmaker was down, and a crash before recording followed by a timeout. Bob's test account had to be a fresh key: anvil's well-known keys carry EIP-7702 code on Base Sepolia, and USDC then treats them as smart wallets.
+Harness: `server/matchmaker/e2e/` (see its README). Four scenarios passed: a normal payment, a timeout refund on both sides, a crash after filling with the secret revealed while the Matchmaker was down, and a crash before recording followed by a timeout. Bob's test account had to be a fresh key: anvil's well-known keys carry EIP-7702 code on Base Sepolia, and USDC then treats them as smart wallets.
 The contracts are already deployed on both forks. A mock Order Desk serves the order. A script plays the customer: it locks on Base, waits for the fill, then reveals the secret. The Matchmaker must fill, then redeem. Then the same run with no reveal: both sides refund after expiry.
 
 ### Task 5: Separate audit agent and verify agent

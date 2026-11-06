@@ -87,9 +87,13 @@ impl OrderDesk {
             return Ok(());
         }
         let text = response.text().await.unwrap_or_default();
-        let permanent = status.is_client_error()
-            && !matches!(status.as_u16(), 401 | 403 | 408 | 429);
-        if permanent { Err(ReportError::Rejected(format!("{status}: {text}"))) } else { Err(ReportError::Retry(format!("{status}: {text}"))) }
+        let permanent =
+            status.is_client_error() && !matches!(status.as_u16(), 401 | 403 | 408 | 429);
+        if permanent {
+            Err(ReportError::Rejected(format!("{status}: {text}")))
+        } else {
+            Err(ReportError::Retry(format!("{status}: {text}")))
+        }
     }
 }
 

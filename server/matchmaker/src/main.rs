@@ -12,7 +12,7 @@ mod rules;
 mod store;
 mod worker;
 
-use std::time::Duration;
+use std::{sync::Arc, time::Duration};
 
 #[tokio::main]
 async fn main() {
@@ -25,13 +25,23 @@ async fn main() {
     };
     let poll = Duration::from_secs(config.poll_seconds);
     let worker = match worker::Worker::new(config).await {
-        Ok(worker) => worker,
+        Ok(worker) => Arc::new(worker),
         Err(e) => {
             eprintln!("matchmaker: {e}");
             std::process::exit(1);
         }
     };
     eprintln!("matchmaker: running as filler {}", worker.filler());
+
+    // Source redeems run on their own loop, so slow scans or refunds can never delay them.
+    let redeemer = Arc::clone(&worker);
+    tokio::spawn(async move {
+        loop {
+            redeemer.redeem_duty().await;
+            tokio::time::sleep(poll).await;
+        }
+    });
+
     loop {
         worker.tick().await;
         tokio::time::sleep(poll).await;
