@@ -19,6 +19,34 @@ struct OrderJson {
     shop: ShopJson,
     amount: String,
     status: OrderStatus,
+    /// Empty until the customer has signed a cross-chain quote.
+    #[serde(default)]
+    legs: Vec<LegJson>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct LegJson {
+    chain_id: u64,
+    lock_id: B256,
+    expiry: u64,
+}
+
+/// One source lock the customer signed for. Its id commits to the order, Bob, the hashlock, the
+/// expiry, the token and the amount, so a lock on chain under this id is exactly what was signed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub struct OrderLeg {
+    pub chain_id: u64,
+    pub lock_id: B256,
+    pub expiry: u64,
+}
+
+/// An order and the source locks of its latest signed quote: one, or several for a split payment.
+/// No legs means nothing has been signed yet, so no lock pays for it.
+#[derive(Debug, Clone)]
+pub struct Order {
+    pub view: OrderView,
+    pub legs: Vec<OrderLeg>,
 }
 
 #[derive(Deserialize)]
@@ -28,7 +56,7 @@ struct ShopJson {
 
 #[derive(Debug)]
 pub enum OrderLookup {
-    Found(OrderView),
+    Found(Order),
     NotFound,
 }
 
@@ -62,10 +90,21 @@ impl OrderDesk {
         let order: OrderJson = response.json().await.map_err(|e| e.to_string())?;
         let amount =
             Amount::from_decimal(&order.amount, USDT_DECIMALS).map_err(|e| e.to_string())?;
-        Ok(OrderLookup::Found(OrderView {
-            merchant: order.shop.address,
-            amount: U256::from(amount.0),
-            status: order.status,
+        Ok(OrderLookup::Found(Order {
+            view: OrderView {
+                merchant: order.shop.address,
+                amount: U256::from(amount.0),
+                status: order.status,
+            },
+            legs: order
+                .legs
+                .into_iter()
+                .map(|l| OrderLeg {
+                    chain_id: l.chain_id,
+                    lock_id: l.lock_id,
+                    expiry: l.expiry,
+                })
+                .collect(),
         }))
     }
 
