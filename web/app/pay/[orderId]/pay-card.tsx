@@ -47,6 +47,7 @@ import { Badge } from "@/components/ui/badge";
 import { CardContent, CardHeader } from "@/components/ui/card";
 import { Separator } from "@/components/ui/separator";
 import {
+  CopyIcon,
   CopyText,
   ExplorerLink,
   FinePrint,
@@ -470,7 +471,10 @@ export function PayCard({ orderId }: { orderId: string }) {
                   <>
                     <div className="flex items-end justify-between gap-3">
                       <Stat label="YOUR WALLET">
-                        <span title={address}>{shortAddress(address)}</span>
+                        <span className="inline-flex items-center gap-1.5">
+                          <span title={address}>{shortAddress(address)}</span>
+                          <CopyIcon text={address} label="Copy wallet address" />
+                        </span>
                       </Stat>
                       <TextButton onClick={logout}>Not you?</TextButton>
                     </div>
@@ -482,6 +486,18 @@ export function PayCard({ orderId }: { orderId: string }) {
                         Your wallet doesn&apos;t hold enough yet. Send USDT on Whitechain, or USDC on{" "}
                         {customerChains.map((chain) => chainName(chain.id)).join(" or ")}, to{" "}
                         <CopyText text={address} />. This page updates by itself.
+                        <span className="mt-2 block">
+                          Testing? Get free test USDC from{" "}
+                          <a
+                            href="https://faucet.circle.com"
+                            target="_blank"
+                            rel="noreferrer"
+                            className="text-foreground underline decoration-hair-strong underline-offset-4 hover:decoration-foreground"
+                          >
+                            Circle&apos;s faucet
+                          </a>{" "}
+                          (Base Sepolia or Ethereum Sepolia).
+                        </span>
                       </Notice>
                     </Reveal>
                     <Reveal show={payment?.status === "failed"}>
