@@ -1,3 +1,39 @@
-//! Matchmaker: watches the chains and acts for Bob. Owned by A, built in A5.
+//! Matchmaker: watches the chains and acts for Bob, the liquidity provider. Owned by A.
+//!
+//! When a customer locks on a source chain for Bob, it opens the destination lock for the shop on
+//! Whitechain with Bob's USDT. When the shop is paid and the secret becomes public, it redeems the
+//! customer's source lock for Bob. It refunds locks that time out and reports every chain event to
+//! the Order Desk. See docs/plans/2026-11-06-a5-matchmaker.md.
 
-fn main() {}
+mod config;
+mod events;
+mod order_desk;
+mod rules;
+mod store;
+mod worker;
+
+use std::time::Duration;
+
+#[tokio::main]
+async fn main() {
+    let config = match config::Config::from_env() {
+        Ok(config) => config,
+        Err(e) => {
+            eprintln!("matchmaker: {e}");
+            std::process::exit(1);
+        }
+    };
+    let poll = Duration::from_secs(config.poll_seconds);
+    let worker = match worker::Worker::new(config).await {
+        Ok(worker) => worker,
+        Err(e) => {
+            eprintln!("matchmaker: {e}");
+            std::process::exit(1);
+        }
+    };
+    eprintln!("matchmaker: running as filler {}", worker.filler());
+    loop {
+        worker.tick().await;
+        tokio::time::sleep(poll).await;
+    }
+}
