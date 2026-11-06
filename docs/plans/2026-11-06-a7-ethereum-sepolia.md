@@ -25,7 +25,7 @@ contract as on Base; the Matchmaker watches every customer chain with a `sourceL
 | Deploy SourceLock | Ethereum Sepolia | [0x4bc9e3ff…](https://sepolia.etherscan.io/tx/0x4bc9e3ffdad7e97682f0a3106b9771d5c55ad26f2a2ed9f7a4066c778669dea9) |
 | Customer locks 1.003 USDC for Bob (signature only) | Ethereum Sepolia | [0x28efc04d…](https://sepolia.etherscan.io/tx/0x28efc04d7df98c38ffc701e1f8ac05f6a7c14d1e625a2b9de087aef3e8b2f8d1) |
 | **Matchmaker fills** the destination lock | Whitechain | [0xfc42d29c…](https://explorer.testnet.whitechain.io/tx/0xfc42d29c4af1d7c914e61cb79585869f2b1942e559d6763223b030c87c2a04cf) |
-| The secret is revealed: the shop gets 1 USDT | Whitechain | [0xcd52e636…](https://explorer.testnet.whitechain.io/tx/0xcd52e6364ae147603c5afad98b2d556347fed080e21eeec93951a5030be76772) |
+| The secret is revealed: the merchant gets 1 USDT | Whitechain | [0xcd52e636…](https://explorer.testnet.whitechain.io/tx/0xcd52e6364ae147603c5afad98b2d556347fed080e21eeec93951a5030be76772) |
 | **Matchmaker redeems** 1.003 USDC for Bob, 20 s later | Ethereum Sepolia | [0x3e304874…](https://sepolia.etherscan.io/tx/0x3e304874c9b92ad72ce7a8115ac75c272a9dac918d4404d98a91ff44710e9175) |
 
 On local forks a timeout refunded both sides: Bob's USDT went back to his strategy and the

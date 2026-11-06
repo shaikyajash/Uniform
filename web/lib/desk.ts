@@ -23,7 +23,7 @@ export type Payment = {
 
 export type Order = {
   orderId: string;
-  shop: { name: string; address: string };
+  merchant: { name: string; address: string };
   reference: string;
   /** USDT as decimal text, e.g. "12.000000". */
   amount: string;
@@ -39,9 +39,9 @@ export type Order = {
   hashlock: string | null;
   /** Cross-chain: the customer's locks. `lockId` is the only id to trust. */
   legs: Leg[];
-  /** Cross-chain: Bob's lock for the shop, once filled. */
+  /** Cross-chain: Bob's lock for the merchant, once filled. */
   destinationLockId: string | null;
-  /** Cross-chain: the Relayer claiming the shop's lock with the secret. */
+  /** Cross-chain: the Relayer claiming the merchant's lock with the secret. */
   claim: Payment | null;
 };
 
@@ -161,7 +161,7 @@ export function explain(error: unknown): string {
       case "quote_expired":
         return "That took a little too long. Tap Pay to sign again.";
       case "order_expired":
-        return "The time to pay this order has run out. Ask the shop for a new link.";
+        return "The time to pay this order has run out. Ask the merchant for a new link.";
       case "order_not_payable":
         return "This order can't be paid right now.";
       case "bad_signature":

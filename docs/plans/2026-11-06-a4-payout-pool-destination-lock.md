@@ -2,7 +2,7 @@
 
 > **For Claude:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task.
 
-**Goal:** The destination side of a cross-chain payment on Whitechain. Bob's USDT moves from his wallet, through his Aqua strategy, into a destination lock for the shop. The secret pays the shop and emits `Settled`. A timeout sends the USDT back to Bob. Done when a script ships Bob's strategy, fills 1 USDT into a DestinationLock, redeems it to the shop, and `Settled` shows on the Whitechain explorer.
+**Goal:** The destination side of a cross-chain payment on Whitechain. Bob's USDT moves from his wallet, through his Aqua strategy, into a destination lock for the merchant. The secret pays the merchant and emits `Settled`. A timeout sends the USDT back to Bob. Done when a script ships Bob's strategy, fills 1 USDT into a DestinationLock, redeems it to the merchant, and `Settled` shows on the Whitechain explorer.
 
 **Architecture:**
 - `PayoutPool` is an Aqua app (`AquaApp`). Bob ships a strategy to it with `Aqua.ship(pool, abi.encode(Strategy), [USDT], [allowance])`, so the strategy hash is `keccak256(abi.encode(Strategy))`. His USDT stays in his wallet.
@@ -12,7 +12,7 @@
 - `DestinationLock.refund(lockId)` after expiry returns the USDT to Bob with `Aqua.push`, which restores his strategy allowance. If Bob has docked the strategy, `push` reverts, so the USDT goes to his wallet with a plain transfer instead.
 - One destination lock per source lock and provider: `lockId = keccak256(abi.encode(TAG, chainid, this, srcChainId, srcLockId, maker))`, so Bob can never fill the same customer lock twice, and nobody else's lock can block his. The maker was added after the security review.
 
-**Out of scope (A9):** the refund direction (`openRefund`, where the shop's USDT is locked for Bob).
+**Out of scope (A9):** the refund direction (`openRefund`, where the merchant's USDT is locked for Bob).
 
 **Tech Stack:** Solidity 0.8.30, Foundry, @1inch/aqua 1.0.1 (`AquaApp`, `AquaRouter` in tests), OpenZeppelin 5.4 `SafeERC20`.
 
@@ -70,6 +70,6 @@ Simulate the deploy with no `--broadcast`.
 
 ### Task 6: Deploy and verify both contracts on Whitechain (the user runs it with the keystore), then a live run
 
-Bob for the live run is the test customer wallet, which holds 1 USDT on Whitechain. It needs a little WBT for its approve and ship transactions. The filler and redeemer is the gas payer, and the merchant is the test shop.
+Bob for the live run is the test customer wallet, which holds 1 USDT on Whitechain. It needs a little WBT for its approve and ship transactions. The filler and redeemer is the gas payer, and the merchant is the test merchant.
 
 ### Task 7: Record addresses and ABIs in `shared/`, update the spec and the build plan, then open a PR to `dev`

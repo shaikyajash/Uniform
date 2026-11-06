@@ -102,6 +102,9 @@ pub async fn create(
 #[serde(rename_all = "camelCase")]
 pub struct OrderView {
     order_id: String,
+    merchant: ShopView,
+    /// The same as `merchant`, under its old name, until every reader (A's Matchmaker) has moved to
+    /// `merchant`. Remove it then.
     shop: ShopView,
     reference: String,
     amount: String,
@@ -117,9 +120,9 @@ pub struct OrderView {
     hashlock: Option<String>,
     /// Cross-chain: the customer's locks, from the latest signed quote.
     legs: Vec<LegView>,
-    /// Cross-chain: Bob's lock for the shop on Whitechain, once filled (its id was recomputed).
+    /// Cross-chain: Bob's lock for the merchant on Whitechain, once filled (its id was recomputed).
     destination_lock_id: Option<String>,
-    /// Cross-chain: the Relayer's latest attempt to claim the shop's lock with the secret.
+    /// Cross-chain: the Relayer's latest attempt to claim the merchant's lock with the secret.
     claim: Option<PaymentView>,
 }
 
@@ -216,6 +219,7 @@ pub async fn read(State(state): State<AppState>, Path(id): Path<String>) -> Resu
     .await?;
     Ok(Json(OrderView {
         order_id: row.id,
+        merchant: ShopView { name: row.shop_name.clone(), address: row.shop_address.clone() },
         shop: ShopView { name: row.shop_name, address: row.shop_address },
         reference: row.reference,
         amount: amount.to_decimal(USDT_DECIMALS),
@@ -308,7 +312,9 @@ mod tests {
         let (status, order) = call(&test.app, read(&id.to_ascii_uppercase().replacen("0X", "0x", 1))).await;
         assert_eq!(status, StatusCode::OK, "{order}");
         assert_eq!(order["orderId"], id);
-        assert_eq!(order["shop"], json!({ "name": "Kettle & Co", "address": "0x5a30000000000000000000000000000000000001" }));
+        let merchant = json!({ "name": "Kettle & Co", "address": "0x5a30000000000000000000000000000000000001" });
+        assert_eq!(order["merchant"], merchant);
+        assert_eq!(order["shop"], merchant, "the old name stays until the Matchmaker reads `merchant`");
         assert_eq!(order["reference"], "shop-123");
         assert_eq!(order["amount"], "12.000000");
         assert_eq!(order["status"], "created");

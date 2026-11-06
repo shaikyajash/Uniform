@@ -1,4 +1,4 @@
-// The Demo Shop's products. Prices are in USDT and kept small: it runs on testnet money.
+// The Demo Store's products. Prices are in USDT and kept small: it runs on testnet money.
 // The server prices the cart from this list; the browser's numbers are never trusted.
 
 export type Product = { id: string; name: string; detail: string; price: string };

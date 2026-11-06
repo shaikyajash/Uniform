@@ -4,7 +4,7 @@ import { Frame } from "@/app/_ui/frame";
 import { PayCard } from "./pay-card";
 import { PayCardSkeleton } from "./parts";
 
-/** `/pay/<orderId>`: the link the Order Desk gives the shop as `payUrl`. */
+/** `/pay/<orderId>`: the link the Order Desk gives the merchant as `payUrl`. */
 export default function PayPage({ params }: PageProps<"/pay/[orderId]">) {
   return (
     // Anchored near the top, not centred: as the card grows it only extends downwards, like Garden's.

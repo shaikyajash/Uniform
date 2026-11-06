@@ -43,8 +43,8 @@ export function Progress({ order, amount }: { order: Order; amount: string }) {
       detail:
         rank > 0
           ? split
-            ? "Both held for the provider. They come back to you if the shop isn't paid."
-            : "Held for the provider. It comes back to you if the shop isn't paid."
+            ? "Both held for the provider. They come back to you if the merchant isn't paid."
+            : "Held for the provider. It comes back to you if the merchant isn't paid."
           : split
             ? `${lockedCount} of ${legs.length} locked. The provider waits for all of them.`
             : order.payment?.status === "sent"
@@ -57,20 +57,20 @@ export function Progress({ order, amount }: { order: Order; amount: string }) {
         : undefined,
     },
     {
-      title: `Provider locks ${amount} USDT for ${order.shop.name}`,
+      title: `Provider locks ${amount} USDT for ${order.merchant.name}`,
       detail: rank > 1 ? "Locked on Whitechain, waiting for your key." : "Usually under a minute.",
       state: rank > 1 ? "done" : rank === 1 ? "working" : "waiting",
     },
     {
-      title: "Pay the shop",
+      title: "Pay the merchant",
       detail:
         rank > 2
           ? "Paid."
           : claim?.status === "sent" || claim?.status === "sending"
-            ? "Releasing the USDT to the shop…"
+            ? "Releasing the USDT to the merchant…"
             : rank === 2
-              ? "Checking the shop's lock, then releasing it…"
-              : "Your key releases the shop's USDT.",
+              ? "Checking the merchant's lock, then releasing it…"
+              : "Your key releases the merchant's USDT.",
       state: rank > 2 ? "done" : rank === 2 ? "working" : "waiting",
       link: claim?.explorerUrl,
     },

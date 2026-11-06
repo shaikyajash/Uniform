@@ -1,4 +1,4 @@
-//! Shop refunds of Path A payments, signed by the shop's payout wallet in the dashboard.
+//! Shop refunds of Path A payments, signed by the merchant's payout wallet in the dashboard.
 //!
 //! 1. `POST /v1/orders/{id}/refund-note {amount}`: the note to sign. It is a USDT
 //!    `ReceiveWithAuthorization` from the shop to DirectPay; its nonce is
@@ -185,7 +185,7 @@ pub async fn submit(
     // the nonce differs and the signature does not match.
     let (typed_data, nonce) = note_json(&state, &order, amount, body.valid_after, body.valid_before)?;
     let signature = recover_check(&body.signature, &typed_data, order.merchant)
-        .map_err(|_| ApiError::bad_request("bad_signature", "the refund must be signed by the shop's payout wallet; sign again"))?;
+        .map_err(|_| ApiError::bad_request("bad_signature", "the refund must be signed by the merchant's payout wallet; sign again"))?;
 
     let job = Job::DirectRefund {
         order_id: order.order_id,

@@ -3,7 +3,7 @@
 // The wallet signs a fixed message for this order; the secret is keccak256 of that signature and
 // the hashlock is keccak256 of the secret. The same order gives the same signature, so a closed
 // tab gets the same secret back by signing again. Nothing is stored anywhere: not in the browser,
-// not on the server. The secret leaves the page only when it is revealed to pay the shop.
+// not on the server. The secret leaves the page only when it is revealed to pay the merchant.
 
 import { keccak256, type Hex } from "viem";
 import { shopChain } from "./chain";

@@ -6,8 +6,8 @@
 // - USDT on Whitechain (Path A): one signed note; the Relayer sends it to DirectPay.
 // - USDC on a customer chain (cross-chain): one signature makes the payment's key (the secret,
 //   kept only in this page's memory), a second signs the USDC note that locks it for the
-//   provider. Once the provider has locked USDT for the shop, this page checks that lock on
-//   chain itself and only then hands over the key, which pays the shop.
+//   provider. Once the provider has locked USDT for the merchant, this page checks that lock on
+//   chain itself and only then hands over the key, which pays the merchant.
 
 import { usePrivy, useSignTypedData, useWallets } from "@privy-io/react-auth";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
@@ -183,7 +183,7 @@ export function PayCard({ orderId }: { orderId: string }) {
     return () => clearInterval(timer);
   }, [address, anyEnough, readBalances]);
 
-  // Tell the shop's page once the order is paid: the widget shows us in a card (an iframe); an
+  // Tell the merchant's page once the order is paid: the widget shows us in a card (an iframe); an
   // older widget opened us as a pop-up. Only the order id is sent, so any listener may read it.
   const paid = order?.status === "paid";
   useEffect(() => {
@@ -205,9 +205,9 @@ export function PayCard({ orderId }: { orderId: string }) {
     return made;
   }, [address, units, order, signTypedData]);
 
-  // Cross-chain: once the provider has locked USDT for the shop, check that lock on chain and
+  // Cross-chain: once the provider has locked USDT for the merchant, check that lock on chain and
   // hand over the key. Runs again on every poll until the claim is under way.
-  // A split has a lock per chain; Bob's lock for the shop is named after the first (A8).
+  // A split has a lock per chain; Bob's lock for the merchant is named after the first (A8).
   const leg = order ? anchorLeg(currentLegs(order)) : null;
   const keyFits = key !== null && order !== null && key.orderId === order.orderId && key.hashlock === order.hashlock;
   const claimLive = order?.claim != null && order.claim.status !== "failed";
@@ -221,7 +221,7 @@ export function PayCard({ orderId }: { orderId: string }) {
           srcChainId: leg.chainId,
           srcLockId: leg.lockId as Hex,
           hashlock: key.hashlock,
-          merchant: order.shop.address as Address,
+          merchant: order.merchant.address as Address,
           amountUnits: units,
         });
         if (!check.ok) {
@@ -265,7 +265,7 @@ export function PayCard({ orderId }: { orderId: string }) {
     const signature = await signNote(
       quote.toSign[0].typedData,
       `Pay ${trimAmount(order.amount)} USDT`,
-      `To ${order.shop.name}. No gas needed: Uniform pays the network fee.`,
+      `To ${order.merchant.name}. No gas needed: Uniform pays the network fee.`,
     );
     setStep("submitting");
     await submitDirect(orderId, quote.quoteId, signature);
@@ -283,7 +283,7 @@ export function PayCard({ orderId }: { orderId: string }) {
     const signature = await signNote(
       note.typedData,
       `Pay ${trimAmount(quote.total)} USDC`,
-      `From ${chainName(chainId)}. Held for the provider until ${order.shop.name} is paid; it comes back to you if not.`,
+      `From ${chainName(chainId)}. Held for the provider until ${order.merchant.name} is paid; it comes back to you if not.`,
     );
     setStep("submitting");
     await submitLegs(orderId, quote.quoteId, [signature]);
@@ -319,7 +319,7 @@ export function PayCard({ orderId }: { orderId: string }) {
         await signNote(
           note.typedData,
           `Pay ${formatUsdc(values[index])} USDC`,
-          `From ${chainName(note.chainId)}, part of ${trimAmount(quote.total)} USDC to ${order.shop.name}.`,
+          `From ${chainName(note.chainId)}, part of ${trimAmount(quote.total)} USDC to ${order.merchant.name}.`,
         ),
       ],
       Promise.resolve([]),
@@ -403,7 +403,7 @@ export function PayCard({ orderId }: { orderId: string }) {
       <Swap id="order">
         <div className="flex flex-col gap-5 embedded:gap-4">
           {embedded ? (
-            <CompactSummary shop={order.shop.name} reference={order.reference} amount={amount} secondsLeft={secondsLeft} />
+            <CompactSummary merchant={order.merchant.name} reference={order.reference} amount={amount} secondsLeft={secondsLeft} />
           ) : (
             <CardHeader className="gap-4">
               <div className="flex justify-between gap-3 font-mono text-[10.5px] tracking-[0.08em] text-label">
@@ -411,7 +411,7 @@ export function PayCard({ orderId }: { orderId: string }) {
                 <span>ORDER {order.reference}</span>
               </div>
               <Separator className="bg-hair" />
-              <h1 className="text-2xl font-normal tracking-[-0.02em]">{order.shop.name}</h1>
+              <h1 className="text-2xl font-normal tracking-[-0.02em]">{order.merchant.name}</h1>
             </CardHeader>
           )}
 
@@ -425,7 +425,7 @@ export function PayCard({ orderId }: { orderId: string }) {
                   <span className="font-mono text-sm text-muted-foreground">USDT</span>
                 </p>
                 <p className="flex flex-wrap items-center gap-2 text-[14.5px] leading-[1.7] text-muted-foreground">
-                  The shop is paid on Whitechain
+                  The merchant is paid on Whitechain
                   <Badge variant="outline" className="border-hair-strong font-mono text-[10px] tracking-[0.08em] text-label">
                     NO GAS NEEDED
                   </Badge>
@@ -444,14 +444,14 @@ export function PayCard({ orderId }: { orderId: string }) {
                     <Reveal show={order.status === "destination_locked" && !keyFits && !claimLive}>
                       <div className="grid gap-3">
                         <Notice>
-                          The shop&apos;s USDT is locked and waiting. Confirm once more to release it: this page
+                          The merchant&apos;s USDT is locked and waiting. Confirm once more to release it: this page
                           doesn&apos;t keep your payment key.
                         </Notice>
                         <PrimaryButton onClick={finish}>Finish payment</PrimaryButton>
                       </div>
                     </Reveal>
                     <Reveal show={lockProblem !== null && order.status === "destination_locked"}>
-                      <FinePrint>Checking the shop&apos;s lock: {lockProblem}</FinePrint>
+                      <FinePrint>Checking the merchant&apos;s lock: {lockProblem}</FinePrint>
                     </Reveal>
                     <Reveal show={error !== null}>
                       <Problem>{error}</Problem>
@@ -459,7 +459,7 @@ export function PayCard({ orderId }: { orderId: string }) {
                   </>
                 )}
                 {view === "expired" && (
-                  <Notice>The time to pay this order has run out. Ask the shop for a new link.</Notice>
+                  <Notice>The time to pay this order has run out. Ask the merchant for a new link.</Notice>
                 )}
                 {view === "starting" && <PrimaryButton disabled>Loading…</PrimaryButton>}
                 {view === "log-in" && <EmailLogin />}
@@ -580,7 +580,7 @@ function Done({ order, amount }: { order: Order; amount: string }) {
       </span>
       <p className="text-2xl font-normal tracking-[-0.02em] embedded:text-xl">Payment confirmed</p>
       <p className="text-[14.5px] leading-[1.7] text-muted-foreground">
-        {order.shop.name} received {amount} USDT on Whitechain.
+        {order.merchant.name} received {amount} USDT on Whitechain.
         {legs.length > 0 && crosschain ? ` You paid ${describeLegs(legs)}.` : ""}
       </p>
       <div className="flex flex-wrap justify-center gap-x-5 gap-y-2">
@@ -608,7 +608,7 @@ function Returned({ order }: { order: Order }) {
     <div className="grid justify-items-center gap-3 pt-4 text-center" role="status">
       <p className="text-2xl font-normal tracking-[-0.02em] embedded:text-xl">Your money is back</p>
       <p className="text-[14.5px] leading-[1.7] text-muted-foreground">
-        The shop couldn&apos;t be paid in time, so {outcome}
+        The merchant couldn&apos;t be paid in time, so {outcome}
       </p>
       <div className="flex flex-wrap justify-center gap-x-5 gap-y-1">
         {legs
@@ -625,14 +625,14 @@ function Returned({ order }: { order: Order }) {
   );
 }
 
-/** The widget card's header and body: shop and order, the amount, and what the customer should know. */
+/** The widget card's header and body: merchant and order, the amount, and what the customer should know. */
 function CompactSummary({
-  shop,
+  merchant,
   reference,
   amount,
   secondsLeft,
 }: {
-  shop: string;
+  merchant: string;
   reference: string;
   amount: string;
   secondsLeft: number;
@@ -641,7 +641,7 @@ function CompactSummary({
   return (
     <div className="grid gap-4 px-(--card-spacing)">
       <div className="flex items-baseline justify-between gap-3">
-        <h1 className="truncate text-[15px] font-medium">{shop}</h1>
+        <h1 className="truncate text-[15px] font-medium">{merchant}</h1>
         <span className="font-mono text-[10px] tracking-[0.08em] text-faint uppercase">{reference}</span>
       </div>
       <p className="flex items-baseline gap-2">

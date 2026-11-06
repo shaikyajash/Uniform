@@ -1,6 +1,6 @@
 "use client";
 
-// The shop's orders, newest first, with refunds for Path A payments.
+// The merchant's orders, newest first, with refunds for Path A payments.
 
 import { useWallets } from "@privy-io/react-auth";
 import { useMemo, useState } from "react";
@@ -149,7 +149,7 @@ function OrdersTable({ orders, onRefund }: { orders: OrderRow[] | null; onRefund
       <div className="grid justify-items-center gap-1.5 px-6 py-16 text-center">
         <p className="text-[14.5px]">No payments here yet</p>
         <p className="max-w-sm text-[13px] leading-[1.6] text-muted-foreground">
-          Orders your shop creates with its API key show up here as soon as they exist.
+          Orders you create with your API key show up here as soon as they exist.
         </p>
       </div>
     );
@@ -272,12 +272,12 @@ function RefundDialog({
   }
 
   const left = order ? Number(order.amount) - Number(order.refunded) : 0;
-  const wallet = walletFor(wallets, session.shop.payoutAddress);
+  const wallet = walletFor(wallets, session.merchant.payoutAddress);
 
   async function refund() {
     if (!order) return;
     if (!wallet) {
-      setProblem(`Connect the payout wallet ${shortAddress(session.shop.payoutAddress)} to sign the refund.`);
+      setProblem(`Connect the payout wallet ${shortAddress(session.merchant.payoutAddress)} to sign the refund.`);
       return;
     }
     setBusy(true);
@@ -339,7 +339,7 @@ function RefundDialog({
           </div>
           {!wallet && (
             <p className="text-[12.5px] leading-[1.6] text-warn">
-              Your payout wallet {shortAddress(session.shop.payoutAddress)} isn&apos;t connected in this browser.
+              Your payout wallet {shortAddress(session.merchant.payoutAddress)} isn&apos;t connected in this browser.
             </p>
           )}
           {problem && (

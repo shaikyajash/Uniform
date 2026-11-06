@@ -88,7 +88,7 @@ pub struct VerifyRequest {
 pub struct SignedIn {
     token: String,
     expires_at: i64,
-    shop: ShopName,
+    merchant: ShopName,
 }
 
 #[derive(Debug, Serialize)]
@@ -135,7 +135,7 @@ pub async fn verify(
             .fetch_optional(&mut *tx)
             .await?;
     let Some((merchant_id, name, payout_address)) = shop else {
-        return Err(ApiError::new(StatusCode::FORBIDDEN, "not_a_shop", "no shop is paid to this wallet"));
+        return Err(ApiError::new(StatusCode::FORBIDDEN, "not_a_merchant", "no merchant is paid to this wallet"));
     };
     let (token, token_hash) = new_session_token();
     let created_at = now();
@@ -148,7 +148,7 @@ pub async fn verify(
         .execute(&mut *tx)
         .await?;
     tx.commit().await?;
-    Ok(Json(SignedIn { token, expires_at, shop: ShopName { name, payout_address } }))
+    Ok(Json(SignedIn { token, expires_at, merchant: ShopName { name, payout_address } }))
 }
 
 pub async fn logout(State(state): State<AppState>, owner: Owner) -> Result<StatusCode, ApiError> {
@@ -198,7 +198,7 @@ mod tests {
         let wallet = shop_wallet(&app).await;
         let (status, reply, nonce) = sign_in(&app, &wallet).await;
         assert_eq!(status, StatusCode::OK, "{reply}");
-        assert_eq!(reply["shop"]["name"], "Kettle & Co");
+        assert_eq!(reply["merchant"]["name"], "Kettle & Co");
         let token = reply["token"].as_str().unwrap().to_owned();
         assert!(token.starts_with("sess_"));
 
@@ -213,7 +213,7 @@ mod tests {
     async fn another_wallet_is_not_a_shop(pool: PgPool) {
         let app = test_app(pool).await;
         let (status, reply, _) = sign_in(&app, &PrivateKeySigner::random()).await;
-        assert_eq!((status, reply["error"]["code"].as_str()), (StatusCode::FORBIDDEN, Some("not_a_shop")));
+        assert_eq!((status, reply["error"]["code"].as_str()), (StatusCode::FORBIDDEN, Some("not_a_merchant")));
     }
 
     #[sqlx::test]

@@ -16,7 +16,7 @@ pub struct OrderDesk {
 
 #[derive(Deserialize)]
 struct OrderJson {
-    shop: ShopJson,
+    merchant: ShopJson,
     amount: String,
     status: OrderStatus,
     /// Empty until the customer has signed a cross-chain quote.
@@ -92,7 +92,7 @@ impl OrderDesk {
             Amount::from_decimal(&order.amount, USDT_DECIMALS).map_err(|e| e.to_string())?;
         Ok(OrderLookup::Found(Order {
             view: OrderView {
-                merchant: order.shop.address,
+                merchant: order.merchant.address,
                 amount: U256::from(amount.0),
                 status: order.status,
             },

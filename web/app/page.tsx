@@ -37,7 +37,7 @@ function Hero() {
           <span className={styles.line}>You receive USDT on Whitechain.</span>
         </p>
         <div id={HERO_CTA_ID} className={styles.heroActions}>
-          <SolidButton href="/demo">Try the demo shop</SolidButton>
+          <SolidButton href="/demo">Try the demo store</SolidButton>
           <StarButton href="#features" size="large">
             HOW IT WORKS
           </StarButton>
@@ -70,7 +70,7 @@ function Features() {
           <span className={styles.dim}>Settled on Whitechain.</span>
         </h2>
         <p className={styles.sectionLede}>
-          Customers pay with USDT on Whitechain or USDC on Base. The shop receives USDT on Whitechain, and the customer
+          Customers pay with USDT on Whitechain or USDC on Base. The merchant receives USDT on Whitechain, and the customer
           pays no gas.
         </p>
       </div>
@@ -78,7 +78,7 @@ function Features() {
       <div className={styles.grid}>
         <Block
           title="Cross-chain in one tap"
-          text="The customer locks on their chain, a liquidity provider pays the shop on Whitechain, and one secret settles both."
+          text="The customer locks on their chain, a liquidity provider pays the merchant on Whitechain, and one secret settles both."
         >
           <PipelineMock />
         </Block>
@@ -157,7 +157,7 @@ function PipelineMock() {
         <i className={styles.wire} />
         <div className={styles.outs}>
           <span>
-            Shop paid <i className={styles.okDot} />
+            Merchant paid <i className={styles.okDot} />
           </span>
           <span>
             Provider repaid <i className={styles.okDot} />
@@ -168,9 +168,9 @@ function PipelineMock() {
         className={styles.log}
         lines={[
           "Customer locked 12.036 USDC on Base",
-          "Provider locked 12 USDT on Whitechain for the shop",
+          "Provider locked 12 USDT on Whitechain for the merchant",
           "Browser checked the provider's lock, secret revealed",
-          "Shop claimed 12 USDT, provider claimed 12.036 USDC",
+          "Merchant claimed 12 USDT, provider claimed 12.036 USDC",
         ]}
       />
       <div className={styles.stats}>
@@ -183,7 +183,7 @@ function PipelineMock() {
           <b>0.3%</b>
         </div>
         <div>
-          <small>SHOP GETS</small>
+          <small>MERCHANT GETS</small>
           <b>USDT</b>
         </div>
         <div className={styles.statRight}>
@@ -228,7 +228,7 @@ function PathsMock() {
         ))}
       </div>
       <div className={styles.panelFoot}>
-        <span>The shop always gets USDT</span>
+        <span>The merchant always gets USDT</span>
         <span>0 gas for customers</span>
       </div>
     </div>
@@ -238,7 +238,7 @@ function PathsMock() {
 /* ---------- Block 3: the Relayer's guardrails ---------- */
 
 const RULES = [
-  { name: "Daily gas budget", hint: "Per shop, per day", value: "Enforced" },
+  { name: "Daily gas budget", hint: "Per merchant, per day", value: "Enforced" },
   { name: "Order cap", hint: "Largest order sent", value: "100 USDT" },
   { name: "Dry run", hint: "Simulate before sending", value: "Always" },
   { name: "Blocked payers", hint: "USDT block list", value: "Refused" },
@@ -273,7 +273,7 @@ function CheckoutMock() {
       </div>
       <div className={styles.checkout}>
         <small>PAY</small>
-        <b className={styles.checkoutShop}>Your shop</b>
+        <b className={styles.checkoutShop}>Your store</b>
         <p className={styles.checkoutAmount}>
           12.00 <span>USDT</span>
         </p>
@@ -293,7 +293,7 @@ const FOOTER_COLUMNS: FooterColumn[] = [
     title: "Product",
     links: [
       { label: "How it works", href: "#features" },
-      { label: "Demo shop", href: "/demo" },
+      { label: "Demo store", href: "/demo" },
       { label: "Dashboard", href: "/dashboard" },
     ],
   },

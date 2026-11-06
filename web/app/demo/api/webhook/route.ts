@@ -1,7 +1,7 @@
-// The Demo Shop's webhook: Uniform's Notifier POSTs here when an order is paid, returned or
-// expired. The shop checks the signature before believing it:
+// The Demo Store's webhook: Uniform's Notifier POSTs here when an order is paid, returned or
+// expired. The merchant checks the signature before believing it:
 //   X-Uniform-Signature: hex(HMAC_SHA256(body, webhook secret))
-// Verified deliveries are kept in this server's memory so the shop page can show them.
+// Verified deliveries are kept in this server's memory so the merchant page can show them.
 
 import { createHmac, timingSafeEqual } from "node:crypto";
 

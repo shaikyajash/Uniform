@@ -1,16 +1,16 @@
 # B4: Cross-chain quotes, legs and the Relayer's lock jobs (USDC only)
 
-**Goal:** a customer who holds USDC on Base can pay a shop that is paid in USDT on Whitechain, with no gas. Uniform's Relayer sends every transaction the customer would otherwise have to send: the source lock, the destination claim, and the source refund when Bob never fills.
+**Goal:** a customer who holds USDC on Base can pay a merchant that is paid in USDT on Whitechain, with no gas. Uniform's Relayer sends every transaction the customer would otherwise have to send: the source lock, the destination claim, and the source refund when Bob never fills.
 
 **Done when:** for a 12 USDT order and a customer holding USDC on Base:
 1. `POST /quote` with a hashlock returns a 12.036 USDC note that SourceLock accepts.
 2. `POST /legs` hands the signed note to the Relayer, which locks the USDC on Base.
 3. Bob's Matchmaker fills on Whitechain.
-4. `POST /secret` makes the Relayer claim the destination lock, and the shop is paid.
+4. `POST /secret` makes the Relayer claim the destination lock, and the merchant is paid.
 
 Tested on Base and Whitechain forks first, then once live. A source lock Bob never fills is refunded by the Relayer after it times out.
 
-**Not in this task:** Uniswap, EURC and ETH (EURC is already accepted by A's SourceLock, but the quote here is USDC only), split payments (Path C), the pay page (B5), shop refunds on the cross-chain path (A9).
+**Not in this task:** Uniswap, EURC and ETH (EURC is already accepted by A's SourceLock, but the quote here is USDC only), split payments (Path C), the pay page (B5), merchant refunds on the cross-chain path (A9).
 
 ## 1. The two locks and the six steps
 
@@ -19,8 +19,8 @@ A cross-chain payment uses two locks. Each ends by being claimed with the secret
 | # | Step | Chain | Sent by | Status |
 |---|---|---|---|---|
 | 1 | Source lock: the customer's USDC, for Bob | Base | **our Relayer** | this task |
-| 2 | Destination lock: Bob's USDT, for the shop | Whitechain | Matchmaker | done (A5) |
-| 3 | Destination claim: the secret pays the shop | Whitechain | **our Relayer** | this task |
+| 2 | Destination lock: Bob's USDT, for the merchant | Whitechain | Matchmaker | done (A5) |
+| 3 | Destination claim: the secret pays the merchant | Whitechain | **our Relayer** | this task |
 | 4 | Source claim: Bob reuses the secret | Base | Matchmaker | done (A5) |
 | 5 | Destination refund: USDT back to Bob | Whitechain | Matchmaker | done (A5) |
 | 6 | Source refund: USDC back to the customer | Base | Matchmaker, **only for locks Bob filled**; **our Relayer** for the rest | this task |
@@ -30,7 +30,7 @@ The customer has no gas on any chain, so steps 1, 3 and the uncovered half of 6 
 ## 2. How it works today
 
 - **Order Desk:** `POST /quote` handles Path A only. `/internal/events` applies `Paid` only; the other events are stored and not applied.
-- **Relayer:** one chain (Whitechain), one job (`DirectPay.pay`). Its machinery (sign and save before sending, same-bytes retries, fee bumps, leases, per-shop gas budget) does not depend on the job.
+- **Relayer:** one chain (Whitechain), one job (`DirectPay.pay`). Its machinery (sign and save before sending, same-bytes retries, fee bumps, leases, per-merchant gas budget) does not depend on the job.
 - **SourceLock (A6, Base Sepolia `0x02dF…4871`):** USDC or EURC. `lockWithAuthorization(params, payer, token, amount, validAfter, validBefore, v, r, s, "")`; the note's nonce is `lockIdFor(params, payer, token, amount)` with `LOCK_TAG = keccak256("uniform.sourcelock.lock.v2")`.
 - **Matchmaker (A5 on `dev`):** fills a source lock whose receiver is Bob for an order that is `quoted`, `paying` or `source_locked`, when the lock covers the order plus 0.3%, with at least 15 minutes left. It refunds only source locks it filled.
 
@@ -68,14 +68,14 @@ The customer has no gas on any chain, so steps 1, 3 and the uncovered half of 6 
 ### 4c. `POST /v1/orders/:id/secret` (Order Desk)
 - Only when the order is `destination_locked`.
 - `keccak256(secret)` must equal the order's hashlock.
-- Writes a `destination_claim` job with the expected destination lock id, the shop's address and the order amount.
+- Writes a `destination_claim` job with the expected destination lock id, the merchant's address and the order amount.
 
 ### 4d. Source refunds (Order Desk)
 - Every `REFUND_SWEEP_SECONDS` (default 5): for each leg that our Relayer locked, that is not claimed or returned, and whose lock is `REFUND_GRACE_SECONDS` (default 30) past expiry, write a `source_refund` job.
 - The grace gives the Matchmaker its turn first; whoever loses the race finds the lock already refunded and sends nothing.
 - A failed refund job is written again 2 minutes later, for as long as the lock stays open. A refusal costs no gas, and the Relayer dry-runs before it sends.
-- No refund is written while our claim for the order may still be mined: if it lands, the shop is paid and the lock is Bob's.
-- The shop's daily gas budget can stop only a payment or a lock, while the money is still in the customer's wallet. A claim or a refund finishes money already locked, so it is always sent.
+- No refund is written while our claim for the order may still be mined: if it lands, the merchant is paid and the lock is Bob's.
+- The merchant's daily gas budget can stop only a payment or a lock, while the money is still in the customer's wallet. A claim or a refund finishes money already locked, so it is always sent.
 - When our claim or refund is mined, the Relayer marks the order `paid` or `returned` itself, so the order is right even while the Matchmaker is down.
 
 ### 4e. Relayer: several chains, four jobs
@@ -85,7 +85,7 @@ The customer has no gas on any chain, so steps 1, 3 and the uncovered half of 6 
 |---|---|---|---|
 | `direct_pay` | `DirectPay.pay` | as today | the note is used; `Paid` log |
 | `source_lock` | `SourceLock.lockWithAuthorization` | lock id recomputes; Circle has not blacklisted the payer; balance; ≥ 16 min left on the lock; dry run | the note is used; `Locked` log |
-| `destination_claim` | `DestinationLock.claim` | the lock is open, pays this shop at least the order amount, hashlock matches, ≥ 2 min left; Tether has not blocked the DestinationLock; dry run | lock claimed; `Settled` log |
+| `destination_claim` | `DestinationLock.claim` | the lock is open, pays this merchant at least the order amount, hashlock matches, ≥ 2 min left; Tether has not blocked the DestinationLock; dry run | lock claimed; `Settled` log |
 | `source_refund` | `SourceLock.refund` | the lock is open and expired; dry run | lock refunded; `Refunded` log |
 
 - The claim's checks matter: a claim that reverts still puts the secret on chain, where Bob could take the USDC while also getting his USDT back.
@@ -118,8 +118,8 @@ The customer has no gas on any chain, so steps 1, 3 and the uncovered half of 6 
 ## 5. Open points for A
 
 1. **SPEC:** `/quote` must take the hashlock, because the note's nonce is built from it. `/legs` becomes `{quoteId, signature}`. `/secret` takes `{secret}`. `shared/types.ts` needs `Order.legs` and the quote shape. This needs A's agreement; the code follows this proposal.
-2. **`Settled` has no lock id** in `ChainEvent`. Anyone can open a lock on our DestinationLock with an order's id, any shop address and the order's amount, then claim it, and the Matchmaker reports that `Settled` too.
-   - Until the event carries the lock id and the shop, the Order Desk accepts `Settled` only for an order whose verified fill it already has, with the same amount. That narrows the hole, but does not close it.
+2. **`Settled` has no lock id** in `ChainEvent`. Anyone can open a lock on our DestinationLock with an order's id, any merchant address and the order's amount, then claim it, and the Matchmaker reports that `Settled` too.
+   - Until the event carries the lock id and the merchant, the Order Desk accepts `Settled` only for an order whose verified fill it already has, with the same amount. That narrows the hole, but does not close it.
    - Ask A to add `destinationLockId` and `merchant` to `Settled`.
 3. **Exact match in the Matchmaker:** once `legs[].lockId` is in `GET /v1/orders/:id`, it can require that id, as its plan says.
 4. **Bob's address** for `PROVIDER_ADDRESS`. It is the receiver of the M2 source lock.
@@ -140,7 +140,7 @@ The customer has no gas on any chain, so steps 1, 3 and the uncovered half of 6 
 
 `server/order-desk/e2e/`: our Order Desk and Relayer with A's Matchmaker, against the deployed contracts on local forks.
 
-- **Paid:** a 1 USDT order. The quote asked 1.003 USDC; the Relayer locked it on Base; Bob filled; `/secret` made the Relayer claim on Whitechain. The shop's USDT went 0 → 1.000000, Bob redeemed the source lock, and the order ended `paid` with its leg `claimed`.
+- **Paid:** a 1 USDT order. The quote asked 1.003 USDC; the Relayer locked it on Base; Bob filled; `/secret` made the Relayer claim on Whitechain. The merchant's USDT went 0 → 1.000000, Bob redeemed the source lock, and the order ended `paid` with its leg `claimed`.
 - **Never filled:** a 3 USDT order, over Bob's 2 USDT limit. The Relayer locked 3.009 USDC; the Matchmaker skipped it (`AboveMaxPerOrder`). After the lock timed out, the sweeper queued a refund, the Relayer sent it, and the order ended `returned` with the customer's USDC back in full.
 - Seen on the way: the public Base RPC behind the fork answers `eth_getLogs` for at most 200 blocks, so the Matchmaker took about 2 minutes to catch up before filling. Live, it reads only new blocks.
 
@@ -148,4 +148,4 @@ The customer has no gas on any chain, so steps 1, 3 and the uncovered half of 6 
 
 - **Relayer** `0xD5337E6E2061da3f4C8dA8148F702AD6c47ddA03`: Base Sepolia ETH. It never holds USDC.
 - **Test customer** (Privy `0xA917c1caA01032468DeEDb752371f6E27718936d`): a few USDC on Base Sepolia.
-- **Test shop:** a payout address that is not the Relayer.
+- **Test merchant:** a payout address that is not the Relayer.

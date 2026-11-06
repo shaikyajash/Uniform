@@ -282,7 +282,7 @@ pub async fn retry_webhook(
     .execute(&state.pool)
     .await?;
     if updated.rows_affected() == 0 {
-        return Err(ApiError::not_found("webhook (or the shop has no webhook URL)"));
+        return Err(ApiError::not_found("webhook (or the merchant has no webhook URL)"));
     }
     Ok(StatusCode::ACCEPTED)
 }
@@ -349,17 +349,17 @@ mod tests {
     #[sqlx::test]
     async fn settings_need_a_session_not_the_api_key(pool: PgPool) {
         let app = test_app(pool).await;
-        assert_eq!(call(&app.app, request("GET", "/v1/shop", &app.key, None)).await.0, StatusCode::UNAUTHORIZED);
+        assert_eq!(call(&app.app, request("GET", "/v1/merchant", &app.key, None)).await.0, StatusCode::UNAUTHORIZED);
 
         let token = session(&app).await;
         let change = json!({ "webhookUrl": "https://shop.example/hook" });
-        let (status, shop) = call(&app.app, request("PATCH", "/v1/shop", &token, Some(change))).await;
+        let (status, shop) = call(&app.app, request("PATCH", "/v1/merchant", &token, Some(change))).await;
         assert_eq!(status, StatusCode::OK, "{shop}");
         assert_eq!(shop["webhookUrl"], "https://shop.example/hook");
         let bad = json!({ "webhookUrl": "ftp://shop.example" });
-        assert_eq!(call(&app.app, request("PATCH", "/v1/shop", &token, Some(bad))).await.0, StatusCode::BAD_REQUEST);
+        assert_eq!(call(&app.app, request("PATCH", "/v1/merchant", &token, Some(bad))).await.0, StatusCode::BAD_REQUEST);
 
-        let (_, rotated) = call(&app.app, request("POST", "/v1/shop/api-key", &token, None)).await;
+        let (_, rotated) = call(&app.app, request("POST", "/v1/merchant/api-key", &token, None)).await;
         let new_key = rotated["secret"].as_str().unwrap();
         assert_eq!(call(&app.app, request("GET", "/v1/orders", &app.key, None)).await.0, StatusCode::UNAUTHORIZED, "old key");
         assert_eq!(call(&app.app, request("GET", "/v1/orders", new_key, None)).await.0, StatusCode::OK);

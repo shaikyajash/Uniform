@@ -2,7 +2,7 @@
 @import "tw-animate-css";
 @import "shadcn/tailwind.css";
 
-/* Inside the checkout widget's card on a shop's page (layout.tsx marks <html>): a compact pay page. */
+/* Inside the checkout widget's card on a merchant's page (layout.tsx marks <html>): a compact pay page. */
 @custom-variant embedded (html[data-embedded] &);
 
 /* The whole app is dark: black, hairline borders, white text. Fonts are loaded in layout.tsx.

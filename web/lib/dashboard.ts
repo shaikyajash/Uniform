@@ -1,6 +1,6 @@
-// The shop dashboard's calls to the Order Desk, and the signed-in session.
+// The merchant dashboard's calls to the Order Desk, and the signed-in session.
 //
-// The session token (`sess_...`) comes from signing a one-time message with the shop's payout
+// The session token (`sess_...`) comes from signing a one-time message with the merchant's payout
 // wallet. It is kept in this tab's sessionStorage (gone when the tab closes) and sent as a Bearer
 // token. A 401 means it ran out: the dashboard signs out.
 
@@ -12,7 +12,7 @@ import { DeskError, type OrderStatus, type TypedData } from "./desk";
 export type Session = {
   token: string;
   expiresAt: number;
-  shop: { name: string; payoutAddress: string };
+  merchant: { name: string; payoutAddress: string };
 };
 
 const KEY = "uniform.dashboard.session";
@@ -151,14 +151,14 @@ export type Settings = {
   createdAt: number;
 };
 
-export const getShop = (token: string) => call<Settings>("/shop", { token });
+export const getShop = (token: string) => call<Settings>("/merchant", { token });
 
 export const updateShop = (token: string, webhookUrl: string | null) =>
-  call<Settings>("/shop", { method: "PATCH", body: JSON.stringify({ webhookUrl }), token });
+  call<Settings>("/merchant", { method: "PATCH", body: JSON.stringify({ webhookUrl }), token });
 
-export const rotateWebhookSecret = (token: string) => call<{ secret: string }>("/shop/webhook-secret", post({}, token));
+export const rotateWebhookSecret = (token: string) => call<{ secret: string }>("/merchant/webhook-secret", post({}, token));
 
-export const rotateApiKey = (token: string) => call<{ secret: string }>("/shop/api-key", post({}, token));
+export const rotateApiKey = (token: string) => call<{ secret: string }>("/merchant/api-key", post({}, token));
 
 export type Delivery = {
   id: number;
@@ -191,12 +191,12 @@ export const submitRefund = (token: string, orderId: string, note: RefundNote, s
     post({ amount: note.amount, validAfter: note.validAfter, validBefore: note.validBefore, signature }, token),
   );
 
-/** Order Desk error codes, in the shop owner's words. */
+/** Order Desk error codes, in the merchant's words. */
 export function explainDashboard(error: unknown): string {
   if (error instanceof DeskError) {
     switch (error.code) {
-      case "not_a_shop":
-        return "No shop is paid to this wallet. Sign in with the wallet your payouts go to.";
+      case "not_a_merchant":
+        return "No merchant is paid to this wallet. Sign in with the wallet your payouts go to.";
       case "challenge_expired":
         return "That sign-in message ran out. Try again.";
       case "bad_signature":

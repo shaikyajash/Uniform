@@ -1,6 +1,6 @@
 "use client";
 
-// The webhook log: every message Uniform sent (or is trying to send) to the shop's server.
+// The webhook log: every message Uniform sent (or is trying to send) to the merchant's server.
 
 import { useState } from "react";
 import { Loader2, RotateCw } from "lucide-react";

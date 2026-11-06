@@ -28,7 +28,7 @@ A 1 USDT order paid with 0.91 EURC, with the Matchmaker on the public RPCs and a
 | Bob ships a 2 USDT strategy on Aqua | Whitechain | [0x88a2a7d5…](https://explorer.testnet.whitechain.io/tx/0x88a2a7d5a04a8d0df2073ba82209666847e6d99e8a0dfc09794b52c647e07442) |
 | Customer locks 0.91 EURC for Bob (signature only) | Base Sepolia | [0xc9fa0353…](https://sepolia.basescan.org/tx/0xc9fa0353517c614ffe74a5bc746d9be53748b787eb6e92b78393e8b4dcf70562) |
 | **Matchmaker values the EURC and fills** the destination lock | Whitechain | [0x0d812d64…](https://explorer.testnet.whitechain.io/tx/0x0d812d64611a32838e4d0de08b2d710604d814d5e1bf1fbcef36df546b609223) |
-| The secret is revealed: the shop gets 1 USDT (`Settled`) | Whitechain | [0x36eb70b5…](https://explorer.testnet.whitechain.io/tx/0x36eb70b51a83a837fbbd1af80249e22215afcf16a0124c489aeca070346b7cc6) |
+| The secret is revealed: the merchant gets 1 USDT (`Settled`) | Whitechain | [0x36eb70b5…](https://explorer.testnet.whitechain.io/tx/0x36eb70b51a83a837fbbd1af80249e22215afcf16a0124c489aeca070346b7cc6) |
 | **Matchmaker redeems** the source lock: Bob gets 0.91 EURC | Base Sepolia | [0x8891f531…](https://sepolia.basescan.org/tx/0x8891f53128642d19975485585850556a455839ad41488bf0c0fdc3bb7d1e98f7) |
 
 On local forks, a 0.80 EURC lock for the same order was skipped (worth 0.887 of the 1.003 USDC

@@ -17,7 +17,7 @@ Every folder has exactly one owner.
 | Part | Language | Main libraries |
 |---|---|---|
 | `contracts/` | Solidity 0.8.30 | Foundry, OpenZeppelin 5.4, 1inch Aqua |
-| `server/` (Order Desk, Gas Payer, Shop Notifier, Matchmaker) | **Rust** (stable), one Cargo workspace | `tokio`, `axum` (HTTP), `sqlx` (SQLite, migrations), `alloy` (RPC, `sol!` bindings from `shared/abis`, signing, EIP-712), `serde`, `reqwest` (webhooks, internal events), `hmac` + `sha2` (webhook signature), `tracing` |
+| `server/` (Order Desk, Gas Payer, Merchant Notifier, Matchmaker) | **Rust** (stable), one Cargo workspace | `tokio`, `axum` (HTTP), `sqlx` (SQLite, migrations), `alloy` (RPC, `sol!` bindings from `shared/abis`, signing, EIP-712), `serde`, `reqwest` (webhooks, internal events), `hmac` + `sha2` (webhook signature), `tracing` |
 | `web/`, `demo-shop/` | TypeScript | Next.js, Privy, viem |
 
 Server layout: `server/Cargo.toml` is a workspace with one binary crate per service (`order-desk`, `gas-payer`, `notifier`, `matchmaker`) plus two library crates: `server/common` (B: status enums and `can_move`, `ChainEvent`, the `chains.json` loader, config) and `server/bindings` (A: `alloy::sol!` contract bindings from `shared/abis/`). `shared/types.ts` stays as the web's copy of the same types, and the two must match.
@@ -26,7 +26,7 @@ Server layout: `server/Cargo.toml` is a workspace with one binary crate per serv
 
 | Chain | Id | Role | Tokens |
 |---|---|---|---|
-| Whitechain Sepolia | 1874 | Shop is paid here | USDT `0xcedfB56113143d55b2358b8CFbB0dEB5Ad2f55a7` (6 decimals), gas in WBT |
+| Whitechain Sepolia | 1874 | Merchant is paid here | USDT `0xcedfB56113143d55b2358b8CFbB0dEB5Ad2f55a7` (6 decimals), gas in WBT |
 | Base Sepolia | 84532 | Customer chain | USDC `0x036CbD53842c5426634e7929541eC2318f3dCF7e`, EURC `0x808456652fdb597867f38412077A9182bf77359F`, ETH |
 | Ethereum Sepolia | 11155111 | Customer chain | USDC `0x1c7D4B196Cb0C7B01d743Fbc6116a902379C7238`, EURC `0x08210F9170F89Ab7658F0B5E3fF39b0E03C594D4`, ETH |
 
@@ -51,8 +51,8 @@ Customer secret (Pay Button, Paths B and C):
 
 ```
 1. Source lock         customer → Source Lock (Base or Ethereum Sepolia)   USDC held for Bob
-2. Destination lock    Bob      → Destination Lock (Whitechain)                      USDT held for the shop
-3. Destination redeem  customer's browser reveals the secret (via Gas Payer)  shop gets USDT  (Settled)
+2. Destination lock    Bob      → Destination Lock (Whitechain)                      USDT held for the merchant
+3. Destination redeem  customer's browser reveals the secret (via Gas Payer)  merchant gets USDT  (Settled)
 4. Source redeem       Matchmaker reuses the now-public secret                Bob gets USDC   (Claimed)
 Refund (timeout): each lock returns to whoever locked it; the destination lock expires first.
 ```
@@ -83,12 +83,12 @@ paid → partially_refunded → refunded
 
 | Status | Means | Set by |
 |---|---|---|
-| `created` | Shop made the order | `POST /v1/orders` |
+| `created` | Merchant made the order | `POST /v1/orders` |
 | `quoted` | Customer got a price and the data to sign | `POST /v1/orders/:id/quote` |
 | `paying` | Signature received, transaction sent | Gas Payer sent it |
 | `source_locked` | Every customer leg is locked | `Locked` events |
-| `destination_locked` | Bob's USDT is locked for the shop | `Filled` event |
-| `paid` | The shop has the USDT | `Paid` or `Settled` event |
+| `destination_locked` | Bob's USDT is locked for the merchant | `Filled` event |
+| `paid` | The merchant has the USDT | `Paid` or `Settled` event |
 | `partially_refunded` | Part of the amount given back | refund events |
 | `refunded` | Full amount given back | refund events |
 | `expired` | Quote ran out, no money moved | Order Desk timer |
@@ -117,7 +117,7 @@ event Refunded(bytes32 indexed paymentId, bytes32 indexed orderId, address index
 // MAX_AUTH_WINDOW = 1 hour: validBefore must be <= now + 1 hour
 ```
 
-What the customer (or shop, for refunds) signs with `eth_signTypedData_v4`:
+What the customer (or merchant, for refunds) signs with `eth_signTypedData_v4`:
 
 ```
 domain  = { name: "Tether USD", version: "1", chainId: 1874,
@@ -239,23 +239,23 @@ Rules from the security review:
 
 | Call | Caller | Does |
 |---|---|---|
-| `POST /v1/orders` | Shop server (API key) | `{amount, reference, successUrl}` → `{orderId, payUrl}` |
-| `POST /v1/links` | Shop Dashboard | Payment link with amount, memo, due date |
-| `GET /v1/orders/:id` | Pay Button, receipt page | Status, legs, transaction links |
+| `POST /v1/orders` | Merchant server (API key) | `{amount, reference, successUrl}` → `{orderId, payUrl}` |
+| `POST /v1/links` | Merchant Dashboard | Payment link with amount, memo, due date |
+| `GET /v1/orders/:id` | Pay Button, receipt page, Matchmaker | Status, legs, transaction links; `merchant: {name, address}` (also sent as `shop` until every reader uses `merchant`) |
 | `POST /v1/orders/:id/quote` | Pay Button | `{payer}` (same chain), `{payer, hashlock, chainId}` (cross-chain) or `{payer, hashlock, legs:[{chainId, amount?}]}` (split) → `{quoteId, path, total, fee, expiresAt, toSign:[{chainId, token, amount, lockId, typedData}]}` |
 | `POST /v1/orders/:id/direct` | Pay Button | Signature → Gas Payer calls `DirectPay.pay` |
 | `POST /v1/orders/:id/legs` | Pay Button | `{quoteId, signature}` or `{quoteId, signatures:[…]}` (one per `toSign`, in order) → a `lockWithAuthorization` job per leg; see `docs/plans/2026-11-06-a8-split-payments.md` |
 | `POST /v1/orders/:id/secret` | Pay Button | Only when `destination_locked`: Gas Payer calls `DestinationLock.claim` |
-| `POST /v1/orders/:id/refunds` | Shop Dashboard | `{amount, hashlock, signature}` → refund flow |
-| `POST /v1/refunds/:id/secret` | Shop Dashboard | Releases the refund to the customer |
-| `GET /v1/payments.csv` | Shop Dashboard | Accountant export |
+| `POST /v1/orders/:id/refunds` | Merchant Dashboard | `{amount, hashlock, signature}` → refund flow |
+| `POST /v1/refunds/:id/secret` | Merchant Dashboard | Releases the refund to the customer |
+| `GET /v1/payments.csv` | Merchant Dashboard | Accountant export |
 | `POST /internal/events` | Matchmaker | Chain events (`ChainEvent` in `server/common`, mirrored in `shared/types.ts`) |
 
 ### Webhook
 
 ```
-POST {shop webhook url}
-X-Uniform-Signature: hex(HMAC_SHA256(body, shop_secret))
+POST {merchant webhook url}
+X-Uniform-Signature: hex(HMAC_SHA256(body, merchant_secret))
 { "type": "order.paid" | "order.refunded" | "order.expired",
   "orderId": "0x…", "reference": "shop-123", "amount": "12.000000", "currency": "USDT",
   "path": "direct" | "crosschain" | "split",
@@ -264,7 +264,7 @@ X-Uniform-Signature: hex(HMAC_SHA256(body, shop_secret))
 
 ### Gas Payer limits
 
-- Only submits for orders from registered shops, with signatures matching the issued quote.
+- Only submits for orders from registered merchants, with signatures matching the issued quote.
 - Simulates every transaction first.
-- Caps on order size and a gas budget per shop per day.
+- Caps on order size and a gas budget per merchant per day.
 - Separate hot wallet per chain with a small balance.

@@ -139,7 +139,7 @@ async fn apply_paid(
 ) -> Result<EventReceipt, ApiError> {
     let chain = state.chains.shop_chain();
     if paid.chain_id != chain.chain_id {
-        return Ok(EventReceipt::not_applied(format!("Paid on chain {}, not the shop chain", paid.chain_id)));
+        return Ok(EventReceipt::not_applied(format!("Paid on chain {}, not the merchant's chain", paid.chain_id)));
     }
     let direct_pay = chain.contracts.direct_pay.ok_or_else(|| ApiError::internal("chains.json has no DirectPay"))?;
 
@@ -165,7 +165,7 @@ async fn apply_paid(
     // paymentId commits to the merchant, so a match proves the USDT went to this order's shop.
     let expected = direct_pay::payment_id_for(chain.chain_id, direct_pay, *paid.order_id, merchant, amount, paid.payer);
     if *paid.payment_id != expected {
-        return Ok(EventReceipt::not_applied("paymentId does not match this order's shop, amount and payer"));
+        return Ok(EventReceipt::not_applied("paymentId does not match this order's merchant, amount and payer"));
     }
 
     // The relayer sets `paying` when it sends (B2). A confirmed payment can arrive first, so walk

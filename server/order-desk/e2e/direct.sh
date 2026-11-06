@@ -53,8 +53,8 @@ NONCE=$(json "d['nonce']" < "$STATE/challenge.json")
 SIGNATURE=$(cast wallet sign --private-key "$SHOP_KEY" "$MESSAGE")
 SESSION=$(curl -s -X POST $DESK/v1/auth/verify -H 'content-type: application/json' \
   -d "{\"nonce\":\"$NONCE\",\"signature\":\"$SIGNATURE\"}" | json "d['token']")
-echo "signed in as $(shop_call $DESK/v1/shop | json "d['name']")"
-shop_call -X PATCH $DESK/v1/shop -d '{"webhookUrl":"http://127.0.0.1:4199/uniform"}' > "$STATE/shop.json"
+echo "signed in as $(shop_call $DESK/v1/merchant | json "d['name']")"
+shop_call -X PATCH $DESK/v1/merchant -d '{"webhookUrl":"http://127.0.0.1:4199/uniform"}' > "$STATE/shop.json"
 json "d['webhookSecret']" < "$STATE/shop.json" > "$STATE/webhook.secret"
 echo "webhook URL set: $(json "d['webhookUrl']" < "$STATE/shop.json")"
 

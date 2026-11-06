@@ -70,7 +70,7 @@ export function Receipt({ orderId }: { orderId: string }) {
           </div>
           <Separator className="bg-hair" />
           <div className="grid gap-1">
-            <h1 className="text-2xl font-normal tracking-[-0.02em]">{order.shop.name}</h1>
+            <h1 className="text-2xl font-normal tracking-[-0.02em]">{order.merchant.name}</h1>
             <p className="flex items-center gap-2 text-[13.5px] text-muted-foreground">
               <span
                 aria-hidden="true"
@@ -91,7 +91,7 @@ export function Receipt({ orderId }: { orderId: string }) {
 
           <dl className="grid gap-0 border-y border-hair text-[13.5px]">
             <Row label="Paid to">
-              <CopyText text={order.shop.address} />
+              <CopyText text={order.merchant.address} />
             </Row>
             {order.payer && (
               <Row label="Paid by">
@@ -133,12 +133,12 @@ function Row({ label, children }: { label: string; children: ReactNode }) {
 function Transactions({ order }: { order: Order }) {
   const lines: { label: string; href: string }[] = [];
   if (order.path === "direct" && order.payment?.explorerUrl) {
-    lines.push({ label: "Payment to the shop · Whitechain", href: order.payment.explorerUrl });
+    lines.push({ label: "Payment to the merchant · Whitechain", href: order.payment.explorerUrl });
   }
   for (const leg of order.legs) {
     if (leg.lockTx) lines.push({ label: `Customer's USDC locked · ${chainName(leg.chainId)}`, href: explorerTx(leg.chainId, leg.lockTx) });
   }
-  if (order.claim?.explorerUrl) lines.push({ label: "Shop paid in USDT · Whitechain", href: order.claim.explorerUrl });
+  if (order.claim?.explorerUrl) lines.push({ label: "Merchant paid in USDT · Whitechain", href: order.claim.explorerUrl });
   for (const leg of order.legs) {
     if (leg.refundTx) lines.push({ label: `USDC returned · ${chainName(leg.chainId)}`, href: explorerTx(leg.chainId, leg.refundTx) });
   }

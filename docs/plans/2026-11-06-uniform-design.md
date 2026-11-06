@@ -1,6 +1,6 @@
 # Uniform Design
 
-Uniform is a checkout for shops on Whitechain. The shop is always paid in USDT on Whitechain. The customer pays from wherever their money is: USDT on Whitechain, or USDC, EURC or ETH on Base Sepolia or Ethereum Sepolia. The customer logs in by email, signs once and never pays gas.
+Uniform is a checkout for merchants on Whitechain. The merchant is always paid in USDT on Whitechain. The customer pays from wherever their money is: USDT on Whitechain, or USDC, EURC or ETH on Base Sepolia or Ethereum Sepolia. The customer logs in by email, signs once and never pays gas.
 
 - Deadline: Sat Nov 7, 09:00 IST (ETHGlobal Mumbai 2026)
 - Repo: https://github.com/shaikyajash/Uniform (work on `dev`)
@@ -11,7 +11,7 @@ Uniform is a checkout for shops on Whitechain. The shop is always paid in USDT o
 
 | Name in the demo | Role | Has | Wants |
 |---|---|---|---|
-| Kettle & Co | Shop (merchant) | Nothing at the start | USDT on Whitechain |
+| Kettle & Co | Merchant (merchant) | Nothing at the start | USDT on Whitechain |
 | Alice, Mei, Ravi | Customers | USDT on Whitechain, or USDC, EURC or ETH on Base or Ethereum Sepolia | To pay with one tap and no gas |
 | Bob | Liquidity provider | USDT on Whitechain, shipped to Aqua | A small fee per order (0.3%) |
 
@@ -19,7 +19,7 @@ Uniform is a checkout for shops on Whitechain. The shop is always paid in USDT o
 
 | Chain | Id | Role | Tokens |
 |---|---|---|---|
-| Whitechain Sepolia | 1874 | Destination chain: the shop is paid here | USDT `0xcedf…55a7` (EIP-712 "Tether USD", version "1") |
+| Whitechain Sepolia | 1874 | Destination chain: the merchant is paid here | USDT `0xcedf…55a7` (EIP-712 "Tether USD", version "1") |
 | Base Sepolia | 84532 | Source chain | USDC (EIP-712 "USDC", version "2"), EURC, ETH |
 | Ethereum Sepolia | 11155111 | Source chain | USDC, EURC, ETH |
 
@@ -30,22 +30,22 @@ Every address lives in `shared/chains.json`.
 ### Path A: same chain (USDT on Whitechain)
 
 1. The Pay Button asks the customer to sign an EIP-3009 `ReceiveWithAuthorization` whose nonce is `DirectPay.paymentIdFor(orderId, merchant, amount, payer)`.
-2. The Gas Payer calls `DirectPay.pay`. USDT moves from the customer to the shop in one transaction, and the contract emits `Paid`.
-3. Refunds: the shop signs, the Gas Payer calls `DirectPay.refund`, and the USDT goes back to the original payer (`Refunded`). Partial refunds are allowed up to the paid amount.
+2. The Gas Payer calls `DirectPay.pay`. USDT moves from the customer to the merchant in one transaction, and the contract emits `Paid`.
+3. Refunds: the merchant signs, the Gas Payer calls `DirectPay.refund`, and the USDT goes back to the original payer (`Refunded`). Partial refunds are allowed up to the paid amount.
 
 ### Path B: cross chain (an HTLC, a hash time-locked contract)
 
 ```
 1. Source lock         Mei → Source Lock (Base)      12 USDC held for Bob       (Locked)
-2. Destination lock    Bob → Destination Lock (Whitechain)    12 USDT held for the shop  (Filled)
-3. Destination redeem  Mei reveals the secret          shop gets 12 USDT          (Settled)
+2. Destination lock    Bob → Destination Lock (Whitechain)    12 USDT held for the merchant  (Filled)
+3. Destination redeem  Mei reveals the secret          merchant gets 12 USDT          (Settled)
 4. Source redeem       Bob reuses the public secret    Bob gets 12 USDC           (Claimed)
 Timeout: each lock refunds whoever locked it. The destination lock (10 min) expires before the source lock (20 min).
 ```
 
 - The Source Lock holds the token the customer paid with (USDC, EURC or ETH). Bob swaps it to USDC on Uniswap v4 only when he redeems, so a successful payment swaps once and a failed one refunds the exact token with no swap and no fee (A6). Uniswap's Quoter also prices every quote.
 - Bob's USDT reaches the Destination Lock through 1inch Aqua: the Payout Pool `pull`s it from Bob's shipped strategy.
-- Why nobody can cheat: Bob cannot redeem without the secret, and the secret is first used on the Destination Lock, which can only pay the shop. Mei reveals only after her browser has checked the Destination Lock itself.
+- Why nobody can cheat: Bob cannot redeem without the secret, and the secret is first used on the Destination Lock, which can only pay the merchant. Mei reveals only after her browser has checked the Destination Lock itself.
 
 ### Path C: split (two source chains, all or nothing)
 
@@ -80,18 +80,18 @@ One Cargo workspace in `server/`: a binary per service, plus `server/common` (B:
 |---|---|---|---|---|
 | Order Desk | B | Orders, quotes, signatures in, status from events, dashboard data | Sends transactions; marks paid without an event | None |
 | Gas Payer | B | Simulates, sends, retries; caps and daily gas budget | Decides status | A small hot wallet per chain |
-| Matchmaker | A | Watches all 3 chains, reports events, fills for Bob, source redeems, refunds expired locks | Talks to shops or customers | Bob's filler wallet |
-| Shop Notifier | B | Signed webhooks with retries and a log | Reads the chain | Shop webhook secrets |
+| Matchmaker | A | Watches all 3 chains, reports events, fills for Bob, source redeems, refunds expired locks | Talks to merchants or customers | Bob's filler wallet |
+| Merchant Notifier | B | Signed webhooks with retries and a log | Reads the chain | Merchant webhook secrets |
 
 ### Frontend
 
 | Page | Owner | Job |
 |---|---|---|
 | Pay Button `/pay/[orderId]` | B | Privy email login, price, sign, secret, Destination Lock check, reveal, live status |
-| Shop Dashboard | B | Payments, refunds, payment links, settings, CSV |
+| Merchant Dashboard | B | Payments, refunds, payment links, settings, CSV |
 | Receipt `/receipt/[orderId]` | B | Public proof with every transaction link |
 | Earn Page | A | Bob ships or docks his strategy and sees his fees |
-| Widget and Demo Shop | B | The 20-line button a shop adds |
+| Widget and Demo Store | B | The 20-line button a merchant adds |
 
 ## 6. Data
 
@@ -123,7 +123,7 @@ paid → partially_refunded → refunded
 
 - Every EIP-3009 nonce commits to all the parameters (DirectPay: order, merchant, amount, payer; SourceLock: the whole LockParams, payer, token and amount), plus a tag, the chain id and the contract. The submitter cannot change anything, nobody can squat another customer's id, and each signature works once.
 - Contracts record state before moving tokens.
-- The Gas Payer simulates every transaction, checks `authorizationState` and balances first, and submits only for registered shops and issued quotes.
+- The Gas Payer simulates every transaction, checks `authorizationState` and balances first, and submits only for registered merchants and issued quotes.
 - Only 65-byte EOA signatures are supported (no ERC-1271 smart wallets).
 - Private keys stay in gitignored `.env` files. Deploys use the Foundry keystore (`--account deployer`).
 
@@ -153,7 +153,7 @@ Milestones: M1 Path A in the browser · M2 Path B with USDC from Base · M3 EURC
 
 | Decision | Why |
 |---|---|
-| The shop is always paid in USDT on Whitechain | Whitechain's prize requires USDT `0xcedf…` in the main flow |
+| The merchant is always paid in USDT on Whitechain | Whitechain's prize requires USDT `0xcedf…` in the main flow |
 | HTLC with Bob, not a bridge | Their prize won't place custodial bridges; Bob's USDT gives instant settlement |
 | Our own Aqua deployment on Whitechain | 1inch has not deployed Aqua there (confirm at the booth that it counts) |
 | Privy for email login | Reown embedded wallets do not support Whitechain; B0 passed |

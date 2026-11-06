@@ -1,6 +1,6 @@
 "use client";
 
-// Whether this page is shown inside the checkout widget's card (an iframe on a shop's page).
+// Whether this page is shown inside the checkout widget's card (an iframe on a merchant's page).
 // layout.tsx marks <html data-embedded> before the first paint; CSS reads it with the `embedded:`
 // variant, and components that need a different layout read it here.
 

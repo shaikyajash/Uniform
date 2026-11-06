@@ -31,9 +31,9 @@ pub async fn add_shop(pool: &PgPool, name: &str, payout: Address) -> Result<NewS
     Ok(NewShop { id, api_key, webhook_secret })
 }
 
-/// `add-shop --name "Kettle & Co" --payout 0x...`
+/// `add-merchant --name "Kettle & Co" --payout 0x...` (`add-shop` still works)
 pub async fn add_shop_command(pool: &PgPool, args: &[String]) -> Result<(), String> {
-    let usage = "usage: order-desk add-shop --name \"Kettle & Co\" --payout 0x<shop wallet>";
+    let usage = "usage: order-desk add-merchant --name \"Kettle & Co\" --payout 0x<merchant wallet>";
     let mut name = None;
     let mut payout = None;
     let mut args = args.iter();
@@ -51,11 +51,11 @@ pub async fn add_shop_command(pool: &PgPool, args: &[String]) -> Result<(), Stri
 
     let shop = add_shop(pool, &name, payout).await.map_err(|error| match error {
         sqlx::Error::Database(db) if db.is_unique_violation() => {
-            format!("a shop with payout address {payout:#x} already exists")
+            format!("a merchant with payout address {payout:#x} already exists")
         }
         other => other.to_string(),
     })?;
-    println!("Shop {} \"{name}\" added, paid at {payout:#x}.", shop.id);
+    println!("Merchant {} \"{name}\" added, paid at {payout:#x}.", shop.id);
     println!("Shown once, store them now:");
     println!("  API key:        {}", shop.api_key);
     println!("  Webhook secret: {}", shop.webhook_secret);

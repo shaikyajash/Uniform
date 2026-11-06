@@ -1,4 +1,4 @@
-// The Demo Shop's server: it makes the order on the Order Desk with its own API key, which never
+// The Demo Store's server: it makes the order on the Order Desk with its own API key, which never
 // reaches the browser. The widget calls this when the customer clicks Pay.
 
 import { randomBytes } from "node:crypto";
@@ -6,7 +6,7 @@ import { totalUnits, type Cart } from "../../catalog";
 
 export async function POST(request: Request) {
   const key = process.env.DEMO_SHOP_API_KEY;
-  if (!key) return Response.json({ error: "The demo shop isn't set up: DEMO_SHOP_API_KEY is missing." }, { status: 503 });
+  if (!key) return Response.json({ error: "The demo store isn't set up: DEMO_SHOP_API_KEY is missing." }, { status: 503 });
 
   const body = (await request.json().catch(() => null)) as { cart?: Cart } | null;
   const units = totalUnits(body?.cart ?? {});

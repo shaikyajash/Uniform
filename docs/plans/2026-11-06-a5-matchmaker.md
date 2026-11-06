@@ -2,7 +2,7 @@
 
 > **For Claude:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task.
 
-**Goal:** A Rust service that runs a cross-chain payment for Bob with no human step. It watches a customer's source lock on Base, fills a destination lock for the shop on Whitechain, and redeems the source lock with the secret once the shop is paid. It also refunds anything that times out and reports every chain event to the Order Desk. Done when a manual lock on Base results in the shop being paid and Bob being repaid with no human action (M2).
+**Goal:** A Rust service that runs a cross-chain payment for Bob with no human step. It watches a customer's source lock on Base, fills a destination lock for the merchant on Whitechain, and redeems the source lock with the secret once the merchant is paid. It also refunds anything that times out and reports every chain event to the Order Desk. Done when a manual lock on Base results in the merchant being paid and Bob being repaid with no human action (M2).
 
 **What the Matchmaker does, step by step**
 
@@ -34,11 +34,11 @@ then:
 - **No single item blocks the rest:** each redeem and refund runs on its own. Network and Order Desk outages are retried until they clear; only a permanent error (data on chain that does not match) counts towards skipping a log after 30 tries, and an event the Order Desk refuses for good is dropped. The cursor only moves once the node has the range's last block, and the range halves if the RPC refuses it. Logs removed by a reorg are ignored.
 - **Start-up checks:** our DestinationLock is the PayoutPool's own, Bob's strategy is active on Aqua with these settings, and `STRATEGY_FEE_BPS` equals `providerFeeBps`.
 - **Missed redeem:** if the source lock expired before Bob redeemed, the fill is marked `missed` and logged loudly.
-- **Secret lookup:** if a destination lock was paid to the shop but its `Settled` log was never handled, the secret is read from that lock's `Settled` log on chain (searching back up to 200,000 blocks) and Bob redeems.
+- **Secret lookup:** if a destination lock was paid to the merchant but its `Settled` log was never handled, the secret is read from that lock's `Settled` log on chain (searching back up to 200,000 blocks) and Bob redeems.
 - **Timing limits:** `MIN_GAP_SECONDS` must be at least 60 and the destination lock time between 300 and 7200 seconds (the DestinationLock limits).
 **After the second review round:**
 - **A stale read never gives up money:** a lock that reads as empty is treated as a lagging node and retried. A fill is marked `missed` only when the source lock reads as refunded, or as open and expired on a second read.
-- **Separate redeem loop:** source redeems run on their own loop, so slow scans or refunds never delay them. Each round it also checks every open fill on chain, so a destination lock paid to the shop is noticed (and its secret read from the `Settled` log) even if that log was missed.
+- **Separate redeem loop:** source redeems run on their own loop, so slow scans or refunds never delay them. Each round it also checks every open fill on chain, so a destination lock paid to the merchant is noticed (and its secret read from the `Settled` log) even if that log was missed.
 - **One transaction at a time per chain:** the two loops never race for a nonce.
 - **Safe blocks on rollups (optional):** rollup customer chains listed in `SAFE_TAG_CHAINS` (none by default since A7, for fast demo fills; see README.md) are read up to their `safe` block, not a few confirmations, so an L2 reorg cannot remove a lock Bob already filled. On Base this adds about a minute before a fill. Ethereum Sepolia waits its `confirmations` from chains.json instead (A7): its safe block trails by about 9 minutes, too long for a 20-minute lock.
 - **Log range:** it halves only when the RPC refuses the range (not on rate limits or timeouts), never grows back past a size that was refused, and settles in a few tries (the public Base RPC allows 200 blocks).
@@ -102,7 +102,7 @@ A 0.99 USDT order settled across the real testnets, with the Matchmaker running 
 | Bob ships a 1 USDT strategy on Aqua | Whitechain | [0xac5a930b…](https://explorer.testnet.whitechain.io/tx/0xac5a930bd05a05433c30e8eba03b66730dcf0ce50b29eaae3e31bd76cc8dd94e) |
 | Customer locks 0.99297 USDC for Bob (signature only) | Base Sepolia | [0x4f8baaaf…](https://sepolia.basescan.org/tx/0x4f8baaaffbd7979cd885c8a0630ce61b732dcc54161ce7f2cd3ba03f214cd939) |
 | **Matchmaker fills** the destination lock from Bob's strategy | Whitechain | [0xd2961282…](https://explorer.testnet.whitechain.io/tx/0xd29612828c52d6a7bf5865f201cdc0696516ddb1d1e5ddec39570ce4ec72d3ff) |
-| Customer reveals the secret: the shop gets 0.99 USDT (`Settled`) | Whitechain | [0xaea41865…](https://explorer.testnet.whitechain.io/tx/0xaea4186570335fc3e72eff00afdbd9fd94adadef817fdcc9f89ab7e103b97339) |
+| Customer reveals the secret: the merchant gets 0.99 USDT (`Settled`) | Whitechain | [0xaea41865…](https://explorer.testnet.whitechain.io/tx/0xaea4186570335fc3e72eff00afdbd9fd94adadef817fdcc9f89ab7e103b97339) |
 | **Matchmaker redeems** the source lock: Bob gets 0.99297 USDC | Base Sepolia | [0x2de5c351…](https://sepolia.basescan.org/tx/0x2de5c3518350c7057314cf292e0f5413a759f7e648bc92f9f7304a008c508ff6) |
 
 Every event was reported to the Order Desk: Locked, Filled, Settled, Claimed. A first lock was made by mistake with the wrong receiver ([0xa0fc84a7…](https://sepolia.basescan.org/tx/0xa0fc84a73166afc364ffed94251755c0b7f847c9c971499a3dfd18c9b1b7a5b2)); the Matchmaker correctly ignored it, and it was refunded to the customer in full after expiry ([0x1ff83c33…](https://sepolia.basescan.org/tx/0x1ff83c332b78ed30c9cd98798a7409cbd133e9f1a6e5575ae2325131f1c4ce65)).

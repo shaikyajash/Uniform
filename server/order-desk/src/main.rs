@@ -41,8 +41,8 @@ async fn run() -> Result<(), String> {
     let args: Vec<String> = env::args().skip(1).collect();
     match args.first().map(String::as_str) {
         None | Some("serve") => serve(pool).await,
-        Some("add-shop") => admin::add_shop_command(&pool, &args[1..]).await,
-        Some(other) => Err(format!("unknown command {other:?}: use serve or add-shop")),
+        Some("add-merchant" | "add-shop") => admin::add_shop_command(&pool, &args[1..]).await,
+        Some(other) => Err(format!("unknown command {other:?}: use serve or add-merchant")),
     }
 }
 
