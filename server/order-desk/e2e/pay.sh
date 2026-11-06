@@ -31,7 +31,7 @@ ORDER=$(curl -s -X POST $DESK/v1/orders -H "Authorization: Bearer $(cat "$STATE/
   -d "{\"amount\":\"$1\",\"reference\":\"e2e-$2\"}" | json "d['orderId']")
 echo "order $ORDER ($1 USDT)"
 curl -s -X POST "$DESK/v1/orders/$ORDER/quote" -H 'content-type: application/json' \
-  -d "{\"payer\":\"$CUSTOMER\",\"hashlock\":\"$HASHLOCK\"}" > "$STATE/quote.json"
+  -d "{\"payer\":\"$CUSTOMER\",\"hashlock\":\"$HASHLOCK\",\"chainId\":84532}" > "$STATE/quote.json"
 QUOTE=$(json "d['quoteId']" < "$STATE/quote.json")
 echo "quote: $(json "d['total']" < "$STATE/quote.json") USDC, lock $(json "d['toSign'][0]['lockId']" < "$STATE/quote.json")"
 json "__import__('json').dumps(d['toSign'][0]['typedData'])" < "$STATE/quote.json" > "$STATE/typed.json"

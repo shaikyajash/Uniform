@@ -464,7 +464,7 @@ mod tests {
 
         let test = test_app(pool).await;
         let id = new_order(&test).await;
-        let (status, reply) = call(&test.app, quote(&id, json!({ "payer": PAYER, "hashlock": HASHLOCK }))).await;
+        let (status, reply) = call(&test.app, quote(&id, json!({ "payer": PAYER, "hashlock": HASHLOCK, "chainId": 84532 }))).await;
         assert_eq!(status, StatusCode::OK, "{reply}");
         assert_eq!(reply["path"], "crosschain");
         assert_eq!((reply["total"].as_str(), reply["fee"].as_str()), (Some("12.036000"), Some("0.036000")));
@@ -513,6 +513,21 @@ mod tests {
     }
 
     #[sqlx::test]
+    async fn ethereum_sepolia_gets_a_note_for_its_own_source_lock(pool: PgPool) {
+        let test = test_app(pool).await;
+        let id = new_order(&test).await;
+        let (status, reply) =
+            call(&test.app, quote(&id, json!({ "payer": PAYER, "hashlock": HASHLOCK, "chainId": 11155111 }))).await;
+        assert_eq!(status, StatusCode::OK, "{reply}");
+        let chains = common::chains::Chains::from_json(include_str!("../../../../shared/chains.json")).unwrap();
+        let ethereum = chains.by_id(11155111).unwrap();
+        let typed = &reply["toSign"][0]["typedData"];
+        assert_eq!(typed["domain"]["chainId"], 11155111);
+        assert_eq!(typed["domain"]["verifyingContract"], format!("{:#x}", ethereum.tokens["USDC"].address));
+        assert_eq!(typed["message"]["to"], format!("{:#x}", ethereum.contracts.source_lock.unwrap()));
+    }
+
+    #[sqlx::test]
     async fn bad_hashlocks_and_chains_are_refused(pool: PgPool) {
         let test = test_app(pool).await;
         let id = new_order(&test).await;
@@ -521,7 +536,8 @@ mod tests {
             (json!({ "payer": PAYER, "hashlock": "0x1234" }), "bad_hashlock"),
             (json!({ "payer": PAYER, "hashlock": zero }), "bad_hashlock"),
             (json!({ "payer": PAYER, "hashlock": HASHLOCK, "chainId": 1874 }), "bad_chain"),
-            (json!({ "payer": PAYER, "hashlock": HASHLOCK, "chainId": 11155111 }), "bad_chain"),
+            (json!({ "payer": PAYER, "hashlock": HASHLOCK, "chainId": 1 }), "bad_chain"),
+            (json!({ "payer": PAYER, "hashlock": HASHLOCK }), "bad_chain"),
         ] {
             let (status, reply) = call(&test.app, quote(&id, body.clone())).await;
             assert_eq!((status, reply["error"]["code"].as_str()), (StatusCode::BAD_REQUEST, Some(code)), "{body}");

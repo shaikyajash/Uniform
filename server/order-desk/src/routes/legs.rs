@@ -154,7 +154,7 @@ pub(crate) mod tests {
         let (_, created) = test.create_order(json!({ "amount": "12", "reference": "shop-123" })).await;
         let id = created["orderId"].as_str().unwrap().to_owned();
         let hashlock = common::locks::hashlock_of(SECRET.parse().unwrap());
-        let body = json!({ "payer": payer.address(), "hashlock": hashlock });
+        let body = json!({ "payer": payer.address(), "hashlock": hashlock, "chainId": 84532 });
         let (status, quote) = call(&test.app, post(format!("/v1/orders/{id}/quote"), body)).await;
         assert_eq!(status, StatusCode::OK, "{quote}");
         (id, quote)
