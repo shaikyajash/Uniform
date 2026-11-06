@@ -28,7 +28,7 @@ use crate::{
     config::Config,
     events::{self, Action, Source},
     order_desk::{Order, OrderDesk, OrderLeg, OrderLookup, ReportError},
-    price::EurcPrice,
+    price::{self, CoinPrice},
     rules::{self, LockedToken, SourceLockView},
     store::{Fill, FillLeg, PendingLog, SourceLeg, Store},
 };
@@ -167,6 +167,8 @@ struct LegRead {
     leg: OrderLeg,
     kind: LockedToken,
     token: Address,
+    /// CoinGecko id, for a `LockedToken::Priced` lock.
+    price_id: Option<String>,
     view: SourceLockView,
     src_now: u64,
 }
@@ -209,25 +211,44 @@ pub struct Worker {
     /// Our SourceLock and the tokens it accepts on each customer chain.
     source_locks: HashMap<u64, Address>,
     tokens: HashMap<u64, LockTokens>,
-    eurc_price: EurcPrice,
+    eurc_price: CoinPrice,
+    /// Prices of the priced tokens, by CoinGecko id.
+    prices: HashMap<String, CoinPrice>,
 }
 
-/// The tokens a chain's SourceLock accepts, from chains.json.
-#[derive(Debug, Clone, Copy)]
+/// The tokens Bob accepts in a chain's SourceLock, from chains.json.
+#[derive(Debug, Clone)]
 struct LockTokens {
     usdc: Address,
     /// `None` if chains.json lists no EURC for the chain; EURC locks there are then skipped.
     eurc: Option<Address>,
+    /// Tokens with a `priceId` (WETH, WBTC, ...), valued at their market price.
+    priced: Vec<PricedToken>,
+}
+
+#[derive(Debug, Clone)]
+struct PricedToken {
+    address: Address,
+    decimals: u8,
+    price_id: String,
 }
 
 impl LockTokens {
-    fn kind(&self, token: Address) -> Option<LockedToken> {
+    /// How Bob values `token`, and its CoinGecko id if it is a priced token. `None`: not accepted.
+    fn kind(&self, token: Address) -> Option<(LockedToken, Option<&str>)> {
         if token == self.usdc {
-            Some(LockedToken::Usdc)
+            Some((LockedToken::Usdc, None))
         } else if Some(token) == self.eurc {
-            Some(LockedToken::Eurc)
+            Some((LockedToken::Eurc, None))
         } else {
-            None
+            self.priced.iter().find(|t| t.address == token).map(|t| {
+                (
+                    LockedToken::Priced {
+                        decimals: t.decimals,
+                    },
+                    Some(t.price_id.as_str()),
+                )
+            })
         }
     }
 }
@@ -342,12 +363,38 @@ impl Worker {
                     chain.chain_id
                 );
             }
+            let priced: Vec<PricedToken> = chain
+                .tokens
+                .iter()
+                .filter(|(symbol, _)| !["USDC", "EURC"].contains(&symbol.as_str()))
+                .filter_map(|(_, t)| {
+                    t.price_id.as_ref().map(|id| PricedToken {
+                        address: t.address,
+                        decimals: t.decimals,
+                        price_id: id.clone(),
+                    })
+                })
+                .collect();
+            let names: Vec<&str> = chain
+                .tokens
+                .iter()
+                .filter(|(_, t)| priced.iter().any(|p| p.address == t.address))
+                .map(|(symbol, _)| symbol.as_str())
+                .collect();
+            eprintln!(
+                "matchmaker: chain {} accepts USDC{}{}{}",
+                chain.chain_id,
+                if eurc.is_some() { ", EURC" } else { "" },
+                if names.is_empty() { "" } else { ", " },
+                names.join(", ")
+            );
             source_locks.insert(chain.chain_id, lock);
             tokens.insert(
                 chain.chain_id,
                 LockTokens {
                     usdc: token.address,
                     eurc: eurc.map(|t| t.address),
+                    priced,
                 },
             );
             chains.push(watched(
@@ -359,7 +406,19 @@ impl Worker {
             ));
         }
 
-        let eurc_price = EurcPrice::new(config.eurc_price_url.clone())?;
+        let eurc_price = CoinPrice::new(
+            config.eurc_price_url.clone(),
+            "euro-coin",
+            price::EURC_SANE_RANGE,
+        )?;
+        let mut prices = HashMap::new();
+        for t in tokens.values().flat_map(|t: &LockTokens| &t.priced) {
+            if !prices.contains_key(&t.price_id) {
+                let url = price::simple_price_url(&config.price_api_url, &t.price_id);
+                let coin = CoinPrice::new(url, &t.price_id, price::ANY_PRICE)?;
+                prices.insert(t.price_id.clone(), coin);
+            }
+        }
         let mut worker = Worker {
             shop_chain_id: shop.chain_id,
             config,
@@ -375,6 +434,7 @@ impl Worker {
             source_locks,
             tokens,
             eurc_price,
+            prices,
         };
         worker.strategy_hash = worker.check_setup().await?;
         Ok(worker)
@@ -457,7 +517,7 @@ impl Worker {
             let lock = SourceLock::new(lock_address, self.provider(chain_id)?);
             let usdc = lock.usdc().call().await.map_err(err)?;
             let alt = lock.altToken().call().await.map_err(err)?;
-            let tokens = self.tokens[&chain_id];
+            let tokens = &self.tokens[&chain_id];
             if usdc != tokens.usdc || tokens.eurc.is_some_and(|eurc| eurc != alt) {
                 return Err(format!(
                     "SourceLock {lock_address} on chain {chain_id} accepts {usdc} and {alt}, not the USDC and EURC in chains.json"
@@ -465,6 +525,10 @@ impl Worker {
             }
             for token in std::iter::once(usdc).chain(tokens.eurc) {
                 self.require_six_decimals(chain_id, token).await?;
+            }
+            // A priced lock is valued in the token's own decimals, so they must match chains.json.
+            for t in &tokens.priced {
+                self.require_decimals(chain_id, t.address, t.decimals).await?;
             }
         }
         self.require_six_decimals(self.shop_chain_id, self.usdt)
@@ -496,14 +560,18 @@ impl Worker {
 
     /// Valuing a lock assumes USDC, EURC and USDT all have 6 decimals; refuse a token that doesn't.
     async fn require_six_decimals(&self, chain_id: u64, token: Address) -> Result<()> {
+        self.require_decimals(chain_id, token, 6).await
+    }
+
+    async fn require_decimals(&self, chain_id: u64, token: Address, expected: u8) -> Result<()> {
         let decimals = IFiatToken::new(token, self.provider(chain_id)?)
             .decimals()
             .call()
             .await
             .map_err(err)?;
-        if decimals != 6 {
+        if decimals != expected {
             return Err(format!(
-                "token {token} on chain {chain_id} has {decimals} decimals, not 6"
+                "token {token} on chain {chain_id} has {decimals} decimals, not {expected}"
             ));
         }
         Ok(())
@@ -884,7 +952,7 @@ impl Worker {
                     leg.lock_id
                 ));
             }
-            let Some(kind) = self.tokens[&leg.chain_id].kind(on_chain.token) else {
+            let Some((kind, price_id)) = self.tokens[&leg.chain_id].kind(on_chain.token) else {
                 eprintln!(
                     "matchmaker: skip lock {}: token {} is not one the provider accepts here",
                     leg.lock_id, on_chain.token
@@ -895,6 +963,7 @@ impl Worker {
                 leg: *leg,
                 kind,
                 token: on_chain.token,
+                price_id: price_id.map(str::to_string),
                 view: SourceLockView {
                     open: on_chain.state == OPEN,
                     receiver: on_chain.receiver,
@@ -920,7 +989,7 @@ impl Worker {
             )
             .map(|plan| (plan, combined))
         };
-        if reads.iter().any(|r| r.kind == LockedToken::Eurc) {
+        if reads.iter().any(|r| r.kind.is_priced()) {
             // Every other rule first, so locks that would be skipped anyway never wait on the
             // price. A price outage is retried like any other: the log stays parked until it
             // clears or the locks no longer pass these rules.
@@ -928,7 +997,7 @@ impl Worker {
                 .iter()
                 .map(|r| {
                     let mut view = r.view;
-                    if r.kind == LockedToken::Eurc {
+                    if r.kind.is_priced() {
                         view.usdc_value = U256::MAX;
                     }
                     (view, r.src_now)
@@ -938,13 +1007,22 @@ impl Worker {
                 eprintln!("matchmaker: skip order {}: {skip:?}", locked.orderId);
                 return Ok(());
             }
-            let price = self.eurc_price.micro_usd().await?;
-            for r in reads.iter_mut().filter(|r| r.kind == LockedToken::Eurc) {
+            for r in reads.iter_mut().filter(|r| r.kind.is_priced()) {
+                let price = match &r.price_id {
+                    None => self.eurc_price.micro_usd().await?,
+                    Some(id) => {
+                        self.prices
+                            .get(id)
+                            .ok_or(format!("no price feed for {id}"))?
+                            .micro_usd()
+                            .await?
+                    }
+                };
                 r.view.usdc_value = rules::usdc_value(
                     r.kind,
                     r.view.usdc_value,
                     price,
-                    self.config.eurc_price_buffer_bps,
+                    self.config.price_buffer_bps,
                 )
                 .ok_or(format!("{PERMANENT}cannot value lock {}", r.leg.lock_id))?;
             }
@@ -958,12 +1036,14 @@ impl Worker {
         };
         for r in &reads {
             // Circle can block an address for USDC or EURC; Bob is paid in the token that was
-            // locked.
-            if IFiatToken::new(r.token, self.provider(r.leg.chain_id)?)
-                .isBlacklisted(bob)
-                .call()
-                .await
-                .map_err(err)?
+            // locked. Priced tokens (WETH, WBTC, ...) have no blacklist.
+            let circle = matches!(r.kind, LockedToken::Usdc | LockedToken::Eurc);
+            if circle
+                && IFiatToken::new(r.token, self.provider(r.leg.chain_id)?)
+                    .isBlacklisted(bob)
+                    .call()
+                    .await
+                    .map_err(err)?
             {
                 eprintln!(
                     "matchmaker: skip lock {}: Circle has blacklisted the provider, it could not redeem",
@@ -1572,13 +1652,53 @@ mod tests {
         let both = LockTokens {
             usdc,
             eurc: Some(eurc),
+            priced: vec![],
         };
-        assert_eq!(both.kind(usdc), Some(LockedToken::Usdc));
-        assert_eq!(both.kind(eurc), Some(LockedToken::Eurc));
+        assert_eq!(both.kind(usdc), Some((LockedToken::Usdc, None)));
+        assert_eq!(both.kind(eurc), Some((LockedToken::Eurc, None)));
         assert_eq!(both.kind(Address::repeat_byte(3)), None);
         assert_eq!(both.kind(Address::ZERO), None);
-        let usdc_only = LockTokens { usdc, eurc: None };
+        let usdc_only = LockTokens {
+            usdc,
+            eurc: None,
+            priced: vec![],
+        };
         assert_eq!(usdc_only.kind(eurc), None);
+    }
+
+    #[test]
+    fn priced_tokens_carry_their_decimals_and_price_id_and_unlisted_ones_are_skipped() {
+        let weth = Address::repeat_byte(4);
+        let wbtc = Address::repeat_byte(5);
+        let tokens = LockTokens {
+            usdc: Address::repeat_byte(1),
+            eurc: None,
+            priced: vec![
+                PricedToken {
+                    address: weth,
+                    decimals: 18,
+                    price_id: "ethereum".into(),
+                },
+                PricedToken {
+                    address: wbtc,
+                    decimals: 8,
+                    price_id: "bitcoin".into(),
+                },
+            ],
+        };
+        assert_eq!(
+            tokens.kind(weth),
+            Some((LockedToken::Priced { decimals: 18 }, Some("ethereum")))
+        );
+        assert_eq!(
+            tokens.kind(wbtc),
+            Some((LockedToken::Priced { decimals: 8 }, Some("bitcoin")))
+        );
+        // An ERC-20 chains.json does not list (or lists without a priceId) is not accepted.
+        assert_eq!(tokens.kind(Address::repeat_byte(6)), None);
+        assert!(LockedToken::Priced { decimals: 8 }.is_priced());
+        assert!(LockedToken::Eurc.is_priced());
+        assert!(!LockedToken::Usdc.is_priced());
     }
 
     fn order_with(legs: Vec<OrderLeg>) -> Order {

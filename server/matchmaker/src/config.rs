@@ -30,9 +30,12 @@ pub struct Config {
     pub min_filler_gas_wei: HashMap<u64, u128>,
     /// Where one EURC's USD price is read (CoinGecko's reply shape).
     pub eurc_price_url: String,
-    /// EURC locks are valued this far below the price, so a price move before Bob converts the
-    /// EURC cannot leave him short (100 = 1%).
-    pub eurc_price_buffer_bps: u16,
+    /// CoinGecko's simple price endpoint, for tokens with a `priceId` in chains.json (WETH, WBTC).
+    pub price_api_url: String,
+    /// EURC and priced-token locks are valued this far below the price, so a price move before Bob
+    /// converts the token cannot leave him short (100 = 1%). `PRICE_BUFFER_BPS`, else the older
+    /// `EURC_PRICE_BUFFER_BPS`. Keep it below the Order Desk's quote buffer.
+    pub price_buffer_bps: u16,
     /// Customer chains listed here read up to their "safe" block: the strongest guard against a
     /// reorg, but on Base it trails the head by 50 s to 2 min. Default: none, so fills are fast.
     /// On Ethereum "safe" trails by about 9 minutes, too long for a 20-minute lock.
@@ -80,7 +83,13 @@ impl Config {
                 "https://api.coingecko.com/api/v3/simple/price?ids=euro-coin&vs_currencies=usd&include_last_updated_at=true"
                     .into()
             }),
-            eurc_price_buffer_bps: number("EURC_PRICE_BUFFER_BPS", 100)?,
+            price_api_url: env::var("PRICE_API_URL").unwrap_or_else(|_| {
+                "https://api.coingecko.com/api/v3/simple/price".into()
+            }),
+            price_buffer_bps: match env::var("PRICE_BUFFER_BPS") {
+                Ok(_) => number("PRICE_BUFFER_BPS", 100)?,
+                Err(_) => number("EURC_PRICE_BUFFER_BPS", 100)?,
+            },
             safe_tag_chains: chain_list("SAFE_TAG_CHAINS", &[])?,
             confirmations: HashMap::new(),
             chains,
@@ -135,14 +144,17 @@ impl Config {
                 self.provider.fee_bps, self.chains.provider_fee_bps
             ));
         }
-        if self.eurc_price_buffer_bps > 1_000 {
+        if self.price_buffer_bps > 1_000 {
             return Err(format!(
-                "EURC_PRICE_BUFFER_BPS ({}) must be at most 1000 (10%)",
-                self.eurc_price_buffer_bps
+                "PRICE_BUFFER_BPS ({}) must be at most 1000 (10%)",
+                self.price_buffer_bps
             ));
         }
         if !self.eurc_price_url.starts_with("https://") {
             return Err("EURC_PRICE_URL must use https".into());
+        }
+        if !self.price_api_url.starts_with("https://") {
+            return Err("PRICE_API_URL must use https".into());
         }
         let customers: Vec<u64> = self
             .chains
