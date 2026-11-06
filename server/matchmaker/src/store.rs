@@ -33,6 +33,14 @@ CREATE TABLE IF NOT EXISTS source_locks (
     done     INTEGER NOT NULL DEFAULT 0,
     PRIMARY KEY (chain_id, lock_id)
 );
+-- How often handling one log has failed, so a log that keeps failing is skipped, not retried forever.
+CREATE TABLE IF NOT EXISTS failures (
+    chain_id  INTEGER NOT NULL,
+    tx_hash   TEXT NOT NULL,
+    log_index INTEGER NOT NULL,
+    count     INTEGER NOT NULL,
+    PRIMARY KEY (chain_id, tx_hash, log_index)
+);
 -- Events waiting to be accepted by the Order Desk.
 CREATE TABLE IF NOT EXISTS outbox (
     chain_id  INTEGER NOT NULL,
@@ -102,11 +110,12 @@ impl Store {
         Ok(row.is_some())
     }
 
-    pub async fn insert_fill(&self, f: &Fill) -> Result<(), sqlx::Error> {
-        sqlx::query(
+    /// Records a fill unless the order already has one. Returns whether it was new.
+    pub async fn record_fill_if_missing(&self, f: &Fill) -> Result<bool, sqlx::Error> {
+        let done = sqlx::query(
             "INSERT INTO fills (order_id, src_chain_id, src_lock_id, src_expiry, destination_lock_id,
                                 destination_expiry, amount, status, secret)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL)",
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT DO NOTHING",
         )
         .bind(f.order_id.to_string())
         .bind(f.src_chain_id as i64)
@@ -116,9 +125,26 @@ impl Store {
         .bind(f.destination_expiry as i64)
         .bind(f.amount.to_string())
         .bind(&f.status)
+        .bind(f.secret.map(|s| s.to_string()))
         .execute(&self.pool)
+        .await?
+        .rows_affected();
+        Ok(done == 1)
+    }
+
+    /// Counts one more failure for a log and returns the total.
+    pub async fn bump_failure(&self, chain_id: u64, tx_hash: B256, log_index: u64) -> Result<u64, sqlx::Error> {
+        let row = sqlx::query(
+            "INSERT INTO failures (chain_id, tx_hash, log_index, count) VALUES (?, ?, ?, 1)
+             ON CONFLICT (chain_id, tx_hash, log_index) DO UPDATE SET count = count + 1
+             RETURNING count",
+        )
+        .bind(chain_id as i64)
+        .bind(tx_hash.to_string())
+        .bind(log_index as i64)
+        .fetch_one(&self.pool)
         .await?;
-        Ok(())
+        Ok(row.get::<i64, _>(0) as u64)
     }
 
     pub async fn fill_by_destination(
@@ -313,9 +339,9 @@ mod tests {
     #[tokio::test]
     async fn a_fill_is_one_per_order_and_settles_once() {
         let s = store().await;
-        s.insert_fill(&fill()).await.unwrap();
+        assert!(s.record_fill_if_missing(&fill()).await.unwrap());
         assert!(s.has_fill(B256::repeat_byte(1)).await.unwrap());
-        assert!(s.insert_fill(&fill()).await.is_err());
+        assert!(!s.record_fill_if_missing(&fill()).await.unwrap());
 
         s.mark_settled(B256::repeat_byte(3), B256::repeat_byte(9))
             .await
@@ -362,5 +388,24 @@ mod tests {
             .await
             .unwrap();
         assert!(s.expired_source_locks(200).await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn record_if_missing_keeps_the_first_fill() {
+        let s = store().await;
+        assert!(s.record_fill_if_missing(&fill()).await.unwrap());
+        let mut other = fill();
+        other.status = "settled".into();
+        assert!(!s.record_fill_if_missing(&other).await.unwrap());
+        assert_eq!(s.fill_by_destination(B256::repeat_byte(3)).await.unwrap().unwrap().status, "filled");
+    }
+
+    #[tokio::test]
+    async fn failures_are_counted_per_log() {
+        let s = store().await;
+        let tx = B256::repeat_byte(4);
+        assert_eq!(s.bump_failure(84532, tx, 1).await.unwrap(), 1);
+        assert_eq!(s.bump_failure(84532, tx, 1).await.unwrap(), 2);
+        assert_eq!(s.bump_failure(84532, tx, 2).await.unwrap(), 1);
     }
 }

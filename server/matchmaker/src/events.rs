@@ -26,6 +26,10 @@ pub enum Action {
 
 /// The event to report (if the log is one the Order Desk tracks) and what to act on.
 pub fn decode(chain_id: u64, source: Source, log: &Log) -> (Option<ChainEvent>, Action) {
+    // A log removed by a reorg is no longer part of the chain.
+    if log.removed {
+        return (None, Action::None);
+    }
     let (Some(block_number), Some(tx_hash), Some(log_index)) =
         (log.block_number, log.transaction_hash, log.log_index)
     else {
@@ -240,5 +244,50 @@ mod tests {
         );
         pending.block_number = None;
         assert!(decode(84532, Source::SourceLock, &pending).0.is_none());
+    }
+
+    #[test]
+    fn a_log_removed_by_a_reorg_is_ignored() {
+        let mut log = rpc_log(LOCK, SourceLock::Refunded { lockId: B256::repeat_byte(1) }.encode_log_data());
+        log.removed = true;
+        assert!(decode(84532, Source::SourceLock, &log).0.is_none());
+    }
+
+    #[test]
+    fn the_other_kinds_map_to_the_order_desk_names() {
+        let id = B256::repeat_byte(1);
+        let amount = U256::from(5u64);
+        let cases: Vec<(Source, LogData, &str)> = vec![
+            (
+                Source::DirectPay,
+                DirectPay::Paid { paymentId: id, orderId: id, merchant: Address::ZERO, payer: Address::ZERO, amount }
+                    .encode_log_data(),
+                "Paid",
+            ),
+            (
+                Source::DirectPay,
+                DirectPay::Refunded { paymentId: id, orderId: id, payer: Address::ZERO, amount, totalRefunded: amount }
+                    .encode_log_data(),
+                "DirectRefunded",
+            ),
+            (
+                Source::PayoutPool,
+                PayoutPool::Filled { orderId: id, maker: Address::ZERO, strategyHash: id, amount, lockId: id }
+                    .encode_log_data(),
+                "Filled",
+            ),
+            (Source::SourceLock, SourceLock::Claimed { lockId: id, secret: id }.encode_log_data(), "Claimed"),
+            (Source::SourceLock, SourceLock::Refunded { lockId: id }.encode_log_data(), "Refunded"),
+            (
+                Source::DestinationLock,
+                DestinationLock::Refunded { lockId: id, maker: Address::ZERO, amount, backToAqua: true }
+                    .encode_log_data(),
+                "Refunded",
+            ),
+        ];
+        for (source, data, name) in cases {
+            let event = decode(1, source, &rpc_log(LOCK, data)).0.unwrap_or_else(|| panic!("{name} not decoded"));
+            assert_eq!(event.kind.name(), name);
+        }
     }
 }

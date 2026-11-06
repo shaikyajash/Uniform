@@ -20,6 +20,9 @@ pub struct Config {
     pub poll_seconds: u64,
     /// Largest block range read in one `eth_getLogs` call.
     pub max_block_range: u64,
+    /// Skip filling when the filler holds less than this on the source chain, so it can always
+    /// afford the source redeem.
+    pub min_filler_gas_wei: u128,
 }
 
 impl Config {
@@ -38,7 +41,7 @@ impl Config {
                 })
                 .unwrap_or(Ok(chains.provider_fee_bps))?,
         };
-        Ok(Config {
+        let config = Config {
             order_desk_url: required("ORDER_DESK_URL")?
                 .trim_end_matches('/')
                 .to_string(),
@@ -49,20 +52,44 @@ impl Config {
             timing: Timing {
                 fill_cutoff: timeouts.fill_cutoff,
                 destination_lock: timeouts.destination_lock,
-                min_gap: 300,
+                min_gap: number("MIN_GAP_SECONDS", 300)?,
                 min_destination_lock: 300,
             },
             db_path: env::var("DB_PATH").unwrap_or_else(|_| "matchmaker.db".into()),
-            poll_seconds: env::var("POLL_SECONDS")
-                .ok()
-                .and_then(|v| v.parse().ok())
-                .unwrap_or(4),
-            max_block_range: env::var("MAX_BLOCK_RANGE")
-                .ok()
-                .and_then(|v| v.parse().ok())
-                .unwrap_or(1000),
+            poll_seconds: number("POLL_SECONDS", 4)?,
+            max_block_range: number("MAX_BLOCK_RANGE", 1000)?,
+            min_filler_gas_wei: number("MIN_FILLER_GAS_WEI", 100_000_000_000_000u128)?,
             chains,
-        })
+        };
+        config.check()?;
+        Ok(config)
+    }
+
+    /// Rejects settings that would make the Matchmaker stall or fill unsafely.
+    fn check(&self) -> Result<(), String> {
+        if self.max_block_range == 0 {
+            return Err("MAX_BLOCK_RANGE must be at least 1".into());
+        }
+        if self.poll_seconds == 0 {
+            return Err("POLL_SECONDS must be at least 1".into());
+        }
+        if self.provider.max_per_order.is_zero() {
+            return Err("STRATEGY_MAX_PER_ORDER must be above zero".into());
+        }
+        if self.provider.fee_bps != self.chains.provider_fee_bps {
+            return Err(format!(
+                "STRATEGY_FEE_BPS ({}) differs from providerFeeBps in chains.json ({}): quotes and fills would disagree",
+                self.provider.fee_bps, self.chains.provider_fee_bps
+            ));
+        }
+        let t = self.timing;
+        if t.fill_cutoff < t.destination_lock + t.min_gap {
+            return Err(format!(
+                "fillCutoff ({}) must be at least destinationLock ({}) + MIN_GAP_SECONDS ({})",
+                t.fill_cutoff, t.destination_lock, t.min_gap
+            ));
+        }
+        Ok(())
     }
 
     /// `RPC_<chainId>` overrides the RPC in chains.json (for example a private Whitechain RPC).
@@ -79,4 +106,11 @@ fn parse<T: FromStr>(name: &str) -> Result<T, String> {
     required(name)?
         .parse()
         .map_err(|_| format!("{name} is not valid"))
+}
+
+fn number<T: FromStr>(name: &str, default: T) -> Result<T, String> {
+    match env::var(name) {
+        Ok(value) => value.parse().map_err(|_| format!("{name} is not a number")),
+        Err(_) => Ok(default),
+    }
 }

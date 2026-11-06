@@ -69,9 +69,10 @@ impl OrderDesk {
         }))
     }
 
-    /// Sends one event (the JSON of `common::events::ChainEvent`). Ok means the Order Desk has it,
-    /// including when it was already reported.
-    pub async fn report(&self, body: &str) -> Result<(), String> {
+    /// Sends one event (the JSON of `common::events::ChainEvent`). `Ok` means the Order Desk has
+    /// it, including when it was already reported. `Rejected` means it refused this event for good
+    /// (a 4xx other than auth or rate limiting), so retrying will not help.
+    pub async fn report(&self, body: &str) -> Result<(), ReportError> {
         let response = self
             .http
             .post(format!("{}/internal/events", self.base_url))
@@ -80,15 +81,20 @@ impl OrderDesk {
             .body(body.to_string())
             .send()
             .await
-            .map_err(|e| e.to_string())?;
-        if response.status().is_success() {
-            Ok(())
-        } else {
-            Err(format!(
-                "{}: {}",
-                response.status(),
-                response.text().await.unwrap_or_default()
-            ))
+            .map_err(|e| ReportError::Retry(e.without_url().to_string()))?;
+        let status = response.status();
+        if status.is_success() {
+            return Ok(());
         }
+        let text = response.text().await.unwrap_or_default();
+        let permanent = status.is_client_error()
+            && !matches!(status.as_u16(), 401 | 403 | 408 | 429);
+        if permanent { Err(ReportError::Rejected(format!("{status}: {text}"))) } else { Err(ReportError::Retry(format!("{status}: {text}"))) }
     }
+}
+
+#[derive(Debug)]
+pub enum ReportError {
+    Retry(String),
+    Rejected(String),
 }
