@@ -1,14 +1,18 @@
-//! One step of the Relayer: take the oldest job no one holds, move it one stage forward, save.
+//! One step of the Relayer: take the oldest job no one holds on this chain, move it one stage
+//! forward, save. Every job kind runs through the same steps (see `chain::Call`): a payment or a
+//! lock carries the customer's note; a claim or a refund acts on a lock.
 //!
 //! - `pending`: check everything, dry-run, **sign and save** the transaction (`sending`), then
 //!   send it (`sent`). The bytes are saved before they go out, so every retry after a timeout or
 //!   a crash sends the very same transaction: one job can never become two payments.
 //! - `sending` / `sent`: send the saved bytes again if needed and wait for the receipt. Raise the
-//!   fee (same nonce) if it is not mined. Follow whichever transaction actually used the note.
+//!   fee (same nonce) if it is not mined. Follow whichever transaction actually did the job (used
+//!   the note, claimed or refunded the lock): someone else may have sent it first.
 //!
-//! When may a job give the order back to `quoted` so the customer can sign again? Only when the
-//! note can no longer pay: either nothing was ever sent, or the note has run out unused. Before
-//! that, a transaction carrying the note may still be mined, by us or by anyone who saw it.
+//! When may a job give the order back to `quoted` so the customer can sign again? Only for a job
+//! carrying the customer's note, and only when the note can no longer pay: either nothing was
+//! ever sent, or the note has run out unused. Before that, a transaction carrying the note may
+//! still be mined, by us or by anyone who saw it.
 //!
 //! The Relayer never marks an order paid: that comes from the `Paid` event the Matchmaker reports.
 //! Every write checks the lease token, so a Relayer that lost the job to another writes nothing.
@@ -17,13 +21,13 @@ use alloy::primitives::{B256, Bytes, U256};
 use common::{amount::Amount, jobs::Job};
 use sqlx::{PgConnection, PgPool, postgres::PgQueryResult};
 
-use crate::chain::{Chain, ChainError, Mined, PayCall, SignedTx};
+use crate::chain::{Call, Chain, ChainError, Mined, SignedTx};
 
 /// What the operator sets; see `main.rs` for the environment variables.
 #[derive(Debug, Clone)]
 pub struct Limits {
     pub chain_id: u64,
-    /// The largest order the Relayer pays gas for, in USDT base units.
+    /// The largest order the Relayer pays gas for, in USDT base units (a lock may be 1% more).
     pub max_order: Amount,
     /// Gas (wei) the Relayer may spend for one shop on one UTC day.
     pub daily_gas_wei: U256,
@@ -153,7 +157,7 @@ impl Taken<'_> {
     async fn run(&self, chain: &impl Chain, limits: &Limits, row: &Row) -> Step<Outcome> {
         let never_sent = row.status == "pending";
         let call = match serde_json::from_value::<Job>(row.args.clone()) {
-            Ok(job) => PayCall::from_job(&job),
+            Ok(job) => Call::from_job(&job),
             Err(error) => Err(format!("unreadable job: {error}")),
         };
         let call = match call {
@@ -188,38 +192,38 @@ impl Taken<'_> {
     async fn start(
         &self,
         chain: &impl Chain,
-        call: &PayCall,
+        call: &Call,
         merchant_id: i64,
         limits: &Limits,
         attempts: i32,
     ) -> Step<Outcome> {
         if let Some(reason) = self.check_limits(call, merchant_id, limits).await? {
-            return self.fail(reason, true).await;
+            return self.fail(reason, call.reopens_order()).await;
         }
-        // Someone (even the customer) may have sent this note already.
-        match chain.note_used(call.payer, call.nonce).await {
-            Ok(true) => return self.follow_payment(chain, call).await,
+        // Someone (even the customer, or the Matchmaker) may have done this already.
+        match chain.done(call).await {
+            Ok(true) => return self.follow_done(chain, call).await,
             Ok(false) => {}
-            Err(error) => return self.retry_unsent(error, attempts).await,
+            Err(error) => return self.retry_unsent(call, error, attempts).await,
         }
-        if let Err(error) = check_chain(chain, call).await {
-            return self.retry_unsent(error, attempts).await;
+        if let Err(error) = chain.check(call, self.now).await {
+            return self.retry_unsent(call, error, attempts).await;
         }
         let signed = match chain.sign(call, None, 0).await {
             Ok(signed) => signed,
-            Err(error) => return self.retry_unsent(error, attempts).await,
+            Err(error) => return self.retry_unsent(call, error, attempts).await,
         };
         self.save_signed(&signed, 0).await?;
         self.send_signed(chain, &signed).await
     }
 
     /// The checks that need no chain, in the order a shop would want to read them.
-    async fn check_limits(&self, call: &PayCall, merchant_id: i64, limits: &Limits) -> Step<Option<&'static str>> {
-        if call.amount.0 > limits.max_order.0 {
+    async fn check_limits(&self, call: &Call, merchant_id: i64, limits: &Limits) -> Step<Option<&'static str>> {
+        if call.amount_for_limit().is_some_and(|amount| amount > limits.max_order.0) {
             return Ok(Some("order is above the Relayer's limit"));
         }
-        if call.valid_before < self.now + MIN_NOTE_LIFE_SECONDS {
-            return Ok(Some("the signed note runs out too soon"));
+        if call.deadline().is_some_and(|deadline| deadline < self.now + MIN_NOTE_LIFE_SECONDS) {
+            return Ok(Some("the signed note or the lock runs out too soon"));
         }
         if self.gas_spent_today(merchant_id, limits.chain_id).await? >= limits.daily_gas_wei {
             return Ok(Some("the shop's gas budget for today is used up"));
@@ -227,11 +231,13 @@ impl Taken<'_> {
         Ok(None)
     }
 
-    /// Nothing was sent: a refusal fails the job and reopens the order; an RPC error is retried.
-    async fn retry_unsent(&self, error: ChainError, attempts: i32) -> Step<Outcome> {
+    /// Nothing was sent: a refusal fails the job (and reopens the order for a note); an RPC error
+    /// is retried.
+    async fn retry_unsent(&self, call: &Call, error: ChainError, attempts: i32) -> Step<Outcome> {
+        let reopen = call.reopens_order();
         match error {
-            ChainError::Revert(reason) => self.fail(&reason, true).await,
-            ChainError::Rpc(reason) if attempts >= MAX_ATTEMPTS => self.fail(&format!("gave up: {reason}"), true).await,
+            ChainError::Revert(reason) => self.fail(&reason, reopen).await,
+            ChainError::Rpc(reason) if attempts >= MAX_ATTEMPTS => self.fail(&format!("gave up: {reason}"), reopen).await,
             ChainError::Rpc(reason) => self.retry(&reason).await,
         }
     }
@@ -247,11 +253,11 @@ impl Taken<'_> {
         }
     }
 
-    /// `sending` / `sent`: wait for our transaction, or follow the one that used the note.
+    /// `sending` / `sent`: wait for our transaction, or follow the one that did the job.
     async fn watch(
         &self,
         chain: &impl Chain,
-        call: &PayCall,
+        call: &Call,
         merchant_id: i64,
         limits: &Limits,
         ours: &Ours,
@@ -267,30 +273,32 @@ impl Taken<'_> {
         }
     }
 
-    /// Our transaction reverted. The note decides what really happened.
-    async fn after_revert(&self, chain: &impl Chain, call: &PayCall) -> Step<Outcome> {
-        match chain.note_used(call.payer, call.nonce).await {
-            // Another transaction paid first: follow it. The order is paid, not reopened.
-            Ok(true) => self.follow_payment(chain, call).await,
+    /// Our transaction reverted. The chain decides what really happened.
+    async fn after_revert(&self, chain: &impl Chain, call: &Call) -> Step<Outcome> {
+        match chain.done(call).await {
+            // Another transaction did it first: follow it. The order is not reopened.
+            Ok(true) => self.follow_done(chain, call).await,
+            Ok(false) if !call.reopens_order() => self.fail("our transaction reverted", false).await,
             Ok(false) => self.reopen_once_note_runs_out(call, "our transaction reverted").await,
             Err(error) => self.retry(&error.to_string()).await,
         }
     }
 
-    async fn not_mined(&self, chain: &impl Chain, call: &PayCall, ours: &Ours) -> Step<Outcome> {
-        let used = match chain.note_used(call.payer, call.nonce).await {
+    async fn not_mined(&self, chain: &impl Chain, call: &Call, ours: &Ours) -> Step<Outcome> {
+        let used = match chain.done(call).await {
             Ok(used) => used,
             Err(error) => return self.retry(&error.to_string()).await,
         };
         if used {
-            return match chain.find_payment(call.nonce).await {
+            return match chain.find_done(call).await {
                 Ok(Some(other)) if other != ours.hash => self.adopt(other).await,
                 Ok(_) => self.poll("mined, waiting for its receipt").await,
                 Err(error) => self.retry(&error.to_string()).await,
             };
         }
-        if self.note_ran_out(call) {
-            return self.fail("the note ran out before our transaction was mined", true).await;
+        if self.ran_out(call) {
+            let reason = format!("{} ran out before our transaction was mined", call.what_runs_out());
+            return self.fail(&reason, call.reopens_order()).await;
         }
         if self.now >= ours.signed_at + BUMP_AFTER_SECONDS
             && ours.fee_bumps < MAX_FEE_BUMPS
@@ -310,25 +318,25 @@ impl Taken<'_> {
         self.poll("not mined yet").await
     }
 
-    /// The note was used: find the transaction that used it and wait for that one.
-    async fn follow_payment(&self, chain: &impl Chain, call: &PayCall) -> Step<Outcome> {
-        match chain.find_payment(call.nonce).await {
+    /// The job was done on chain: find the transaction that did it and wait for that one.
+    async fn follow_done(&self, chain: &impl Chain, call: &Call) -> Step<Outcome> {
+        match chain.find_done(call).await {
             Ok(Some(hash)) => self.adopt(hash).await,
-            Ok(None) => self.retry("the note is used but its Paid log is not found yet").await,
+            Ok(None) => self.retry("done on chain but its log is not found yet").await,
             Err(error) => self.retry(&error.to_string()).await,
         }
     }
 
-    async fn reopen_once_note_runs_out(&self, call: &PayCall, what: &str) -> Step<Outcome> {
-        if self.note_ran_out(call) {
+    async fn reopen_once_note_runs_out(&self, call: &Call, what: &str) -> Step<Outcome> {
+        if self.ran_out(call) {
             self.fail(&format!("{what}; the note ran out unused"), true).await
         } else {
             self.retry(&format!("{what}; waiting for the note to run out before reopening the order")).await
         }
     }
 
-    fn note_ran_out(&self, call: &PayCall) -> bool {
-        self.now > call.valid_before + NOTE_EXPIRY_SLACK_SECONDS
+    fn ran_out(&self, call: &Call) -> bool {
+        call.deadline().is_some_and(|deadline| self.now > deadline + NOTE_EXPIRY_SLACK_SECONDS)
     }
 
     // ---- Writes. Every one checks the lease token. ----
@@ -518,17 +526,6 @@ impl Taken<'_> {
         .await?;
         Ok(spent.and_then(|text| text.parse::<Amount>().ok()).map_or(U256::ZERO, |amount| amount.0))
     }
-}
-
-/// The free checks on chain before signing: USDT's block list, the balance, and a dry run.
-async fn check_chain(chain: &impl Chain, call: &PayCall) -> Result<(), ChainError> {
-    if chain.is_blocked(call.payer).await? {
-        return Err(ChainError::Revert("the payer is blocked by USDT".into()));
-    }
-    if chain.usdt_balance(call.payer).await? < call.amount.0 {
-        return Err(ChainError::Revert("the payer does not have enough USDT".into()));
-    }
-    chain.dry_run(call).await
 }
 
 /// A guarded write that changed no row means the lease token no longer matches.

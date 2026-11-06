@@ -18,7 +18,7 @@ use super::{
     BUMP_AFTER_SECONDS, Limits, MAX_ATTEMPTS, NOTE_EXPIRY_SLACK_SECONDS, Outcome, RECEIPT_POLL_SECONDS, RETRY_SECONDS,
     step,
 };
-use crate::chain::{Chain, ChainError, Mined, PayCall, SignedTx};
+use crate::chain::{Call, Chain, ChainError, Mined, SignedTx};
 
 const CHAIN_ID: u64 = 2_625;
 const NOW: u64 = 1_800_000_000;
@@ -132,27 +132,30 @@ impl Chain for FakeChain {
         RELAYER
     }
 
-    async fn note_used(&self, _payer: Address, nonce: B256) -> Result<bool, ChainError> {
+    async fn done(&self, call: &Call) -> Result<bool, ChainError> {
         self.down()?;
-        Ok(self.with(|state| state.used_notes.contains_key(&nonce)))
+        Ok(self.with(|state| state.used_notes.contains_key(&call.done_id())))
     }
 
-    async fn usdt_balance(&self, _owner: Address) -> Result<U256, ChainError> {
+    async fn check(&self, call: &Call, _now: u64) -> Result<(), ChainError> {
         self.down()?;
-        Ok(self.with(|state| state.balance))
+        let amount = match call {
+            Call::DirectPay(call) => call.amount.0,
+            Call::SourceLock(call) => call.amount.0,
+            Call::DestinationClaim(_) | Call::SourceRefund { .. } => U256::ZERO,
+        };
+        self.with(|state| {
+            if state.blocked {
+                return Err(ChainError::Revert("the payer is blocked".into()));
+            }
+            if state.balance < amount {
+                return Err(ChainError::Revert("the payer does not have enough".into()));
+            }
+            state.dry_run.clone().map_or(Ok(()), Err)
+        })
     }
 
-    async fn is_blocked(&self, _account: Address) -> Result<bool, ChainError> {
-        self.down()?;
-        Ok(self.with(|state| state.blocked))
-    }
-
-    async fn dry_run(&self, _call: &PayCall) -> Result<(), ChainError> {
-        self.down()?;
-        self.with(|state| state.dry_run.clone()).map_or(Ok(()), Err)
-    }
-
-    async fn sign(&self, call: &PayCall, nonce: Option<u64>, fee_bumps: u32) -> Result<SignedTx, ChainError> {
+    async fn sign(&self, call: &Call, nonce: Option<u64>, fee_bumps: u32) -> Result<SignedTx, ChainError> {
         self.down()?;
         let (signed, steal) = self.with(|state| {
             let pending = state
@@ -163,8 +166,9 @@ impl Chain for FakeChain {
                 .max()
                 .map_or(0, |highest| highest + 1);
             let nonce = nonce.unwrap_or(pending);
-            let hash = keccak256([call.nonce.as_slice(), &nonce.to_be_bytes(), &fee_bumps.to_be_bytes()].concat());
-            state.signed.insert(hash, Tx { note: call.nonce, nonce });
+            let note = call.done_id();
+            let hash = keccak256([note.as_slice(), &nonce.to_be_bytes(), &fee_bumps.to_be_bytes()].concat());
+            state.signed.insert(hash, Tx { note, nonce });
             (SignedTx { raw: Bytes::copy_from_slice(hash.as_slice()), hash, nonce }, state.steal_lease_on_sign.clone())
         });
         if let Some(pool) = steal {
@@ -196,9 +200,9 @@ impl Chain for FakeChain {
         Ok(self.with(|state| state.receipts.get(&tx_hash).copied()))
     }
 
-    async fn find_payment(&self, payment_id: B256) -> Result<Option<B256>, ChainError> {
+    async fn find_done(&self, call: &Call) -> Result<Option<B256>, ChainError> {
         self.down()?;
-        Ok(self.with(|state| state.used_notes.get(&payment_id).copied()))
+        Ok(self.with(|state| state.used_notes.get(&call.done_id()).copied()))
     }
 }
 
@@ -213,27 +217,6 @@ fn order_id(order: u8) -> String {
 
 /// A shop, a `paying` order and its pending `direct_pay` job; returns the job id.
 async fn add_job(pool: &PgPool, order: u8, amount: u64, valid_before: u64) -> i64 {
-    sqlx::query(
-        "INSERT INTO merchants (name, payout_address, webhook_secret, created_at)
-         VALUES ('Kettle & Co', $1, 'whsec_test', 1) ON CONFLICT (payout_address) DO NOTHING",
-    )
-    .bind(format!("{SHOP:#x}"))
-    .execute(pool)
-    .await
-    .unwrap();
-    let merchant_id: i64 = sqlx::query_scalar("SELECT id FROM merchants").fetch_one(pool).await.unwrap();
-    sqlx::query(
-        "INSERT INTO orders (id, merchant_id, amount, reference, status, path, created_at, expires_at)
-         VALUES ($1, $2, $3::numeric, 'shop-123', 'paying', 'direct', 1, $4)",
-    )
-    .bind(order_id(order))
-    .bind(merchant_id)
-    .bind(amount.to_string())
-    .bind(i64::try_from(NOW + 1_800).unwrap())
-    .execute(pool)
-    .await
-    .unwrap();
-
     let signature = PrivateKeySigner::random().sign_hash_sync(&note(order)).unwrap();
     let job = Job::DirectPay {
         order_id: B256::repeat_byte(order),
@@ -245,14 +228,42 @@ async fn add_job(pool: &PgPool, order: u8, amount: u64, valid_before: u64) -> i6
         nonce: note(order),
         signature: Bytes::from(signature.as_bytes().to_vec()),
     };
+    add_order_and_job(pool, order, amount, "paying", &job).await
+}
+
+/// A shop, an order in `order_status` and `job` for it, pending; returns the job id.
+async fn add_order_and_job(pool: &PgPool, order: u8, amount: u64, order_status: &str, job: &Job) -> i64 {
+    sqlx::query(
+        "INSERT INTO merchants (name, payout_address, webhook_secret, created_at)
+         VALUES ('Kettle & Co', $1, 'whsec_test', 1) ON CONFLICT (payout_address) DO NOTHING",
+    )
+    .bind(format!("{SHOP:#x}"))
+    .execute(pool)
+    .await
+    .unwrap();
+    let merchant_id: i64 = sqlx::query_scalar("SELECT id FROM merchants").fetch_one(pool).await.unwrap();
+    sqlx::query(
+        "INSERT INTO orders (id, merchant_id, amount, reference, status, path, created_at, expires_at)
+         VALUES ($1, $2, $3::numeric, 'shop-123', $5, 'direct', 1, $4)",
+    )
+    .bind(order_id(order))
+    .bind(merchant_id)
+    .bind(amount.to_string())
+    .bind(i64::try_from(NOW + 1_800).unwrap())
+    .bind(order_status)
+    .execute(pool)
+    .await
+    .unwrap();
+
     sqlx::query_scalar(
         "INSERT INTO relayer_jobs (order_id, merchant_id, chain_id, kind, args, created_at, updated_at)
-         VALUES ($1, $2, $3, 'direct_pay', $4, $5, $5) RETURNING id",
+         VALUES ($1, $2, $3, $4, $5, $6, $6) RETURNING id",
     )
     .bind(order_id(order))
     .bind(merchant_id)
     .bind(i64::try_from(CHAIN_ID).unwrap())
-    .bind(serde_json::to_value(&job).unwrap())
+    .bind(job.kind())
+    .bind(serde_json::to_value(job).unwrap())
     .bind(i64::try_from(NOW).unwrap())
     .fetch_one(pool)
     .await
@@ -493,4 +504,107 @@ async fn a_job_on_another_chain_is_left_alone(pool: PgPool) {
     add_default_job(&pool).await;
     sqlx::query("UPDATE relayer_jobs SET chain_id = 1").execute(&pool).await.unwrap();
     assert_eq!(outcome(&pool, &FakeChain::new(), NOW).await, None);
+}
+
+// ---- The cross-chain jobs: the same machinery, with what differs checked here. ----
+
+fn lock_job(order: u8, amount: u64) -> Job {
+    let signature = PrivateKeySigner::random().sign_hash_sync(&note(order)).unwrap();
+    Job::SourceLock {
+        params: common::locks::SourceLockParams {
+            order_id: B256::repeat_byte(order),
+            receiver: Address::repeat_byte(0xb0),
+            min_usdc_out: Amount::from(amount),
+            hashlock: B256::repeat_byte(0x42),
+            expiry: NOW + 1_200,
+            out_token: Address::ZERO,
+        },
+        payer: PAYER,
+        token: Address::repeat_byte(0xc0),
+        amount: Amount::from(amount),
+        valid_after: NOW - 60,
+        valid_before: NOW + 300,
+        lock_id: note(order),
+        signature: Bytes::from(signature.as_bytes().to_vec()),
+    }
+}
+
+#[sqlx::test(migrations = "../order-desk/migrations")]
+async fn a_lock_with_bobs_fee_on_a_full_size_order_is_sent_and_confirmed(pool: PgPool) {
+    // 100 USDT is the limit; the customer locks 100.3 USDC for it.
+    let job = add_order_and_job(&pool, 1, 100_000_000, "paying", &lock_job(1, 100_300_000)).await;
+    let chain = FakeChain::new();
+    chain.with(|state| state.balance = U256::from(100_300_000u64));
+    let hash = sent(&pool, &chain, NOW).await;
+    chain.mine(hash, false);
+    assert_eq!(outcome(&pool, &chain, NOW + RECEIPT_POLL_SECONDS).await, Some(Outcome::Confirmed(hash)));
+    assert_eq!(statuses(&pool, job).await, ("confirmed".into(), "paying".into()), "only Locked moves the order");
+}
+
+#[sqlx::test(migrations = "../order-desk/migrations")]
+async fn a_refused_lock_reopens_the_order_so_the_customer_can_sign_again(pool: PgPool) {
+    let job = add_order_and_job(&pool, 1, AMOUNT, "paying", &lock_job(1, 12_036_000)).await;
+    let chain = FakeChain::new();
+    chain.with(|state| state.dry_run = Some(ChainError::Revert("too little time left on the lock".into())));
+    assert!(failed(outcome(&pool, &chain, NOW).await));
+    assert_eq!(statuses(&pool, job).await, ("failed".into(), "quoted".into()));
+}
+
+#[sqlx::test(migrations = "../order-desk/migrations")]
+async fn a_refused_claim_sends_nothing_and_leaves_the_order_alone(pool: PgPool) {
+    let claim = Job::DestinationClaim {
+        lock_id: note(1),
+        secret: B256::repeat_byte(7),
+        merchant: SHOP,
+        min_amount: Amount::from(AMOUNT),
+        deadline: NOW + 1_200,
+    };
+    let job = add_order_and_job(&pool, 1, AMOUNT, "destination_locked", &claim).await;
+    let chain = FakeChain::new();
+    chain.with(|state| state.dry_run = Some(ChainError::Revert("the shop's lock pays someone else".into())));
+    let result = outcome(&pool, &chain, NOW).await;
+    assert!(matches!(result, Some(Outcome::Failed(ref reason)) if reason.contains("someone else")), "{result:?}");
+    assert_eq!(chain.signed_count(), 0, "the secret never left");
+    assert_eq!(statuses(&pool, job).await, ("failed".into(), "destination_locked".into()));
+}
+
+#[sqlx::test(migrations = "../order-desk/migrations")]
+async fn a_claim_whose_transaction_reverts_fails_at_once(pool: PgPool) {
+    let claim = Job::DestinationClaim {
+        lock_id: note(1),
+        secret: B256::repeat_byte(7),
+        merchant: SHOP,
+        min_amount: Amount::from(AMOUNT),
+        deadline: NOW + 1_200,
+    };
+    let job = add_order_and_job(&pool, 1, AMOUNT, "destination_locked", &claim).await;
+    let chain = FakeChain::new();
+    let ours = sent(&pool, &chain, NOW).await;
+    chain.mine(ours, true);
+    assert!(failed(outcome(&pool, &chain, NOW + RECEIPT_POLL_SECONDS).await));
+    assert_eq!(statuses(&pool, job).await, ("failed".into(), "destination_locked".into()));
+}
+
+#[sqlx::test(migrations = "../order-desk/migrations")]
+async fn a_lock_the_matchmaker_already_refunded_is_followed_not_sent(pool: PgPool) {
+    let job = add_order_and_job(&pool, 1, AMOUNT, "source_locked", &Job::SourceRefund { lock_id: note(1) }).await;
+    let chain = FakeChain::new();
+    let theirs = chain.front_run(note(1));
+    assert_eq!(outcome(&pool, &chain, NOW).await, Some(Outcome::Sent(theirs)));
+    assert_eq!(outcome(&pool, &chain, NOW).await, Some(Outcome::Confirmed(theirs)));
+    assert_eq!(chain.signed_count(), 0);
+    assert_eq!(statuses(&pool, job).await.0, "confirmed");
+    assert_eq!(gas_spent(&pool).await, None, "we paid no gas");
+}
+
+#[sqlx::test(migrations = "../order-desk/migrations")]
+async fn a_refund_never_runs_out_so_a_slow_one_keeps_waiting(pool: PgPool) {
+    let job = add_order_and_job(&pool, 1, AMOUNT, "source_locked", &Job::SourceRefund { lock_id: note(1) }).await;
+    let chain = FakeChain::new();
+    let hash = sent(&pool, &chain, NOW).await;
+    sqlx::query("UPDATE relayer_jobs SET fee_bumps = 3").execute(&pool).await.unwrap();
+    assert!(waiting(outcome(&pool, &chain, NOW + 86_400).await));
+    chain.mine(hash, false);
+    assert_eq!(outcome(&pool, &chain, NOW + 86_400 + RECEIPT_POLL_SECONDS).await, Some(Outcome::Confirmed(hash)));
+    assert_eq!(statuses(&pool, job).await, ("confirmed".into(), "source_locked".into()));
 }
