@@ -23,18 +23,23 @@ interface IERC3009 {
 /// @title SourceLock
 /// @notice The source lock of a Uniform cross-chain payment. The customer's tokens are held, as the
 /// token they paid with, for a receiver (normally Bob, the liquidity provider) under a hashlock and
-/// an expiry. Allowed tokens are fixed at deploy (USDC and EURC):
+/// an expiry. Any ERC-20 that moves exact amounts can be locked:
 ///   - claim(lockId, secret) before expiry pays the receiver the locked token (source redeem);
 ///   - refund(lockId) at or after expiry returns exactly the locked token and amount to the payer.
 /// The lock never swaps, so a payment that fails costs the customer no swap fee. The receiver
 /// converts what it collects to USDC separately.
-/// Customers lock gaslessly with an EIP-3009 authorization whose nonce is the lock id:
+/// Each lock has the id
 ///     lockId = keccak256(abi.encode(LOCK_TAG, chainid, this, params, payer, tokenIn, amountIn))
-/// so a submitter cannot change the receiver, hashlock, expiry, token or amount, and each
-/// authorization works once. An authorization may live at most MAX_AUTH_WINDOW and must end at
-/// least MIN_TIME_AFTER_AUTH before the lock expires. `lock` lets any payer lock its own approved
-/// tokens directly. Anyone can open a lock with any orderId, so off-chain watchers must trust only
-/// the exact lock id they expect, never an orderId match.
+/// and opens two ways:
+///   - lockWithAuthorization: the note tokens fixed at deploy (USDC and EURC) with an EIP-3009
+///     authorization whose nonce is the lock id, so a submitter cannot change the receiver,
+///     hashlock, expiry, token or amount, and each authorization works once. An authorization may
+///     live at most MAX_AUTH_WINDOW and must end at least MIN_TIME_AFTER_AUTH before the lock expires;
+///   - lock: the caller locks its own approved tokens of any ERC-20 (a provider, or a customer's
+///     smart account such as an EIP-7702 delegated wallet running a batch). The contract must
+///     receive exactly the amount, so fee-on-transfer and rebasing tokens are refused.
+/// Anyone can open a lock with any orderId and any token, so off-chain watchers must trust only the
+/// exact lock id they expect, never an orderId match.
 contract SourceLock is ReentrancyGuard {
     using SafeERC20 for IERC20;
 
@@ -73,8 +78,9 @@ contract SourceLock is ReentrancyGuard {
     uint256 public constant MAX_AUTH_WINDOW = 1 hours;
     uint256 public constant MIN_TIME_AFTER_AUTH = 15 minutes;
 
+    /// The note token whose amount is checked against `minUsdcOut`, and the only `outToken`.
     IERC20 public immutable usdc;
-    /// The second allowed token (EURC).
+    /// The second note token (EURC).
     IERC20 public immutable altToken;
 
     mapping(bytes32 lockId => Lock) public locks;
@@ -109,6 +115,7 @@ contract SourceLock is ReentrancyGuard {
     error LockExpired(bytes32 lockId);
     error NotExpired(bytes32 lockId);
     error WrongSecret(bytes32 lockId);
+    error AmountNotReceived(uint256 expected, uint256 received);
 
     constructor(IERC20 usdc_, IERC20 altToken_) {
         if (address(usdc_) == address(0) || address(altToken_) == address(0) || address(usdc_) == address(altToken_)) {
@@ -118,7 +125,8 @@ contract SourceLock is ReentrancyGuard {
         altToken = altToken_;
     }
 
-    function isAllowed(address token) public view returns (bool) {
+    /// @notice True for the tokens `lockWithAuthorization` accepts (USDC and EURC).
+    function isNoteToken(address token) public view returns (bool) {
         return token == address(usdc) || token == address(altToken);
     }
 
@@ -147,18 +155,23 @@ contract SourceLock is ReentrancyGuard {
         if (swapData.length != 0) revert SwapNotSupported();
         if (validBefore > validAfter + MAX_AUTH_WINDOW) revert AuthorizationWindowTooLong(validAfter, validBefore);
         if (validBefore + MIN_TIME_AFTER_AUTH > p.expiry) revert AuthorizationTooLate(validBefore, p.expiry);
+        if (!isNoteToken(tokenIn)) revert UnsupportedToken(tokenIn);
         lockId = lockIdFor(p, payer, tokenIn, amountIn);
         _open(lockId, p, payer, tokenIn, amountIn);
         IERC3009(tokenIn)
             .receiveWithAuthorization(payer, address(this), amountIn, validAfter, validBefore, lockId, v, r, s);
     }
 
-    /// @notice Locks the caller's own tokens (approved beforehand). The caller is the payer: a
-    /// provider locking for a refund, or a customer's account paying directly.
+    /// @notice Locks the caller's own tokens of any ERC-20 (approved beforehand). The caller is the
+    /// payer: a provider locking for a refund, or a customer's account paying directly. Reverts
+    /// unless this contract's balance of `token` rises by exactly `amount`.
     function lock(LockParams calldata p, address token, uint256 amount) external nonReentrant returns (bytes32 lockId) {
         lockId = lockIdFor(p, msg.sender, token, amount);
         _open(lockId, p, msg.sender, token, amount);
+        uint256 before = IERC20(token).balanceOf(address(this));
         IERC20(token).safeTransferFrom(msg.sender, address(this), amount);
+        uint256 balance = IERC20(token).balanceOf(address(this));
+        if (balance != before + amount) revert AmountNotReceived(amount, balance > before ? balance - before : 0);
     }
 
     /// @notice Source redeem: pays the receiver the locked token if `secret` matches before expiry.
@@ -183,12 +196,13 @@ contract SourceLock is ReentrancyGuard {
     }
 
     function _open(bytes32 lockId, LockParams calldata p, address payer, address token, uint256 amount) private {
-        if (!isAllowed(token)) revert UnsupportedToken(token);
+        if (token == address(0)) revert ZeroToken();
+        if (token.code.length == 0) revert UnsupportedToken(token);
         if (amount == 0) revert ZeroAmount();
         if (amount > type(uint96).max) revert AmountTooLarge(amount);
         if (token == address(usdc) && amount < p.minUsdcOut) revert BelowMinimum(amount, p.minUsdcOut);
         if (p.receiver == address(0)) revert ZeroReceiver();
-        if (p.receiver == address(this) || isAllowed(p.receiver)) revert InvalidReceiver(p.receiver);
+        if (p.receiver == address(this) || p.receiver == token) revert InvalidReceiver(p.receiver);
         if (p.hashlock == bytes32(0)) revert ZeroHashlock();
         if (p.expiry < block.timestamp + MIN_LOCK_TIME || p.expiry > block.timestamp + MAX_LOCK_TIME) {
             revert ExpiryOutOfRange(p.expiry);
