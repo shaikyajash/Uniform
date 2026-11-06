@@ -79,7 +79,7 @@ export interface LockParams {
 export type ChainEvent =
   | { type: "Paid"; paymentId: Hex; orderId: Hex; payer: Hex; amount: string; txHash: Hex }
   | { type: "DirectRefunded"; paymentId: Hex; orderId: Hex; amount: string; totalRefunded: string; txHash: Hex }
-  | { type: "Locked"; chainId: number; lockId: Hex; orderId: Hex; usdcAmount: string; txHash: Hex }
+  | { type: "Locked"; chainId: number; lockId: Hex; orderId: Hex; token: Hex; amount: string; txHash: Hex }
   | { type: "Filled"; orderId: Hex; destinationLockId: Hex; amount: string; txHash: Hex }
   | { type: "Settled"; orderId: Hex; amount: string; txHash: Hex }
   | { type: "Claimed"; chainId: number; lockId: Hex; txHash: Hex }
