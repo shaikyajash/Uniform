@@ -140,7 +140,7 @@ pub fn fill_decision(
     let destination_expiry =
         destination_expiry(dest_now, left, timing).ok_or(Skip::TooLittleTime {
             left,
-            needed: timing.min_gap + timing.min_destination_lock,
+            needed: timing.min_gap.saturating_add(timing.min_destination_lock),
         })?;
     Ok(FillPlan {
         merchant: order.merchant,

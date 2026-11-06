@@ -67,6 +67,17 @@ impl Config {
 
     /// Rejects settings that would make the Matchmaker stall or fill unsafely.
     fn check(&self) -> Result<(), String> {
+        if self.internal_token.trim().is_empty() {
+            return Err("INTERNAL_EVENTS_TOKEN is empty".into());
+        }
+        // The shop address comes from the Order Desk, so the connection to it must not be open to
+        // tampering unless it is on this machine.
+        let local = ["http://127.0.0.1", "http://localhost", "http://[::1]"]
+            .iter()
+            .any(|p| self.order_desk_url.starts_with(p));
+        if !self.order_desk_url.starts_with("https://") && !local {
+            return Err("ORDER_DESK_URL must use https unless it is on this machine".into());
+        }
         if self.max_block_range == 0 {
             return Err("MAX_BLOCK_RANGE must be at least 1".into());
         }
@@ -83,7 +94,22 @@ impl Config {
             ));
         }
         let t = self.timing;
-        if t.fill_cutoff < t.destination_lock + t.min_gap {
+        if t.min_gap < 300 {
+            return Err(format!(
+                "MIN_GAP_SECONDS ({}) must be at least 300 (time to redeem after the shop is paid)",
+                t.min_gap
+            ));
+        }
+        if !(300..=7200).contains(&t.destination_lock) {
+            return Err(format!(
+                "timeoutsSeconds.destinationLock ({}) must be between 300 and 7200, the DestinationLock limits",
+                t.destination_lock
+            ));
+        }
+        if t.destination_lock
+            .checked_add(t.min_gap)
+            .is_none_or(|needed| t.fill_cutoff < needed)
+        {
             return Err(format!(
                 "fillCutoff ({}) must be at least destinationLock ({}) + MIN_GAP_SECONDS ({})",
                 t.fill_cutoff, t.destination_lock, t.min_gap

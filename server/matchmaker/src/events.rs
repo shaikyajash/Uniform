@@ -16,6 +16,28 @@ pub enum Source {
     DestinationLock,
 }
 
+impl Source {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Source::DirectPay => "DirectPay",
+            Source::SourceLock => "SourceLock",
+            Source::PayoutPool => "PayoutPool",
+            Source::DestinationLock => "DestinationLock",
+        }
+    }
+
+    pub fn parse(text: &str) -> Option<Source> {
+        [
+            Source::DirectPay,
+            Source::SourceLock,
+            Source::PayoutPool,
+            Source::DestinationLock,
+        ]
+        .into_iter()
+        .find(|s| s.as_str() == text)
+    }
+}
+
 /// A decoded log the Matchmaker acts on, besides reporting it.
 #[derive(Debug, Clone)]
 pub enum Action {
@@ -248,7 +270,13 @@ mod tests {
 
     #[test]
     fn a_log_removed_by_a_reorg_is_ignored() {
-        let mut log = rpc_log(LOCK, SourceLock::Refunded { lockId: B256::repeat_byte(1) }.encode_log_data());
+        let mut log = rpc_log(
+            LOCK,
+            SourceLock::Refunded {
+                lockId: B256::repeat_byte(1),
+            }
+            .encode_log_data(),
+        );
         log.removed = true;
         assert!(decode(84532, Source::SourceLock, &log).0.is_none());
     }
@@ -260,33 +288,70 @@ mod tests {
         let cases: Vec<(Source, LogData, &str)> = vec![
             (
                 Source::DirectPay,
-                DirectPay::Paid { paymentId: id, orderId: id, merchant: Address::ZERO, payer: Address::ZERO, amount }
-                    .encode_log_data(),
+                DirectPay::Paid {
+                    paymentId: id,
+                    orderId: id,
+                    merchant: Address::ZERO,
+                    payer: Address::ZERO,
+                    amount,
+                }
+                .encode_log_data(),
                 "Paid",
             ),
             (
                 Source::DirectPay,
-                DirectPay::Refunded { paymentId: id, orderId: id, payer: Address::ZERO, amount, totalRefunded: amount }
-                    .encode_log_data(),
+                DirectPay::Refunded {
+                    paymentId: id,
+                    orderId: id,
+                    payer: Address::ZERO,
+                    amount,
+                    totalRefunded: amount,
+                }
+                .encode_log_data(),
                 "DirectRefunded",
             ),
             (
                 Source::PayoutPool,
-                PayoutPool::Filled { orderId: id, maker: Address::ZERO, strategyHash: id, amount, lockId: id }
-                    .encode_log_data(),
+                PayoutPool::Filled {
+                    orderId: id,
+                    maker: Address::ZERO,
+                    strategyHash: id,
+                    amount,
+                    lockId: id,
+                }
+                .encode_log_data(),
                 "Filled",
             ),
-            (Source::SourceLock, SourceLock::Claimed { lockId: id, secret: id }.encode_log_data(), "Claimed"),
-            (Source::SourceLock, SourceLock::Refunded { lockId: id }.encode_log_data(), "Refunded"),
+            (
+                Source::SourceLock,
+                SourceLock::Claimed {
+                    lockId: id,
+                    secret: id,
+                }
+                .encode_log_data(),
+                "Claimed",
+            ),
+            (
+                Source::SourceLock,
+                SourceLock::Refunded { lockId: id }.encode_log_data(),
+                "Refunded",
+            ),
             (
                 Source::DestinationLock,
-                DestinationLock::Refunded { lockId: id, maker: Address::ZERO, amount, backToAqua: true }
-                    .encode_log_data(),
+                DestinationLock::Refunded {
+                    lockId: id,
+                    maker: Address::ZERO,
+                    amount,
+                    backToAqua: true,
+                }
+                .encode_log_data(),
                 "Refunded",
             ),
         ];
         for (source, data, name) in cases {
-            let event = decode(1, source, &rpc_log(LOCK, data)).0.unwrap_or_else(|| panic!("{name} not decoded"));
+            let event = decode(1, source, &rpc_log(LOCK, data))
+                .0
+                .unwrap_or_else(|| panic!("{name} not decoded"));
             assert_eq!(event.kind.name(), name);
         }
     }
