@@ -71,6 +71,9 @@ for (const key of ["DEMO_SHOP_API_KEY", "DEMO_WEBHOOK_SECRET"]) {
 }
 
 const nextConfig: NextConfig = {
+  // Extra hosts allowed to load the dev server, such as this machine's address on the local
+  // network for trying the pay page on a phone: DEV_ORIGINS=10.0.0.5,other-host.
+  allowedDevOrigins: process.env.DEV_ORIGINS?.split(",").map((host) => host.trim()).filter(Boolean),
   cacheComponents: true,
   partialPrefetching: true,
   env: {
