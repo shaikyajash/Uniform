@@ -14,8 +14,8 @@
     "contracts": {
       "aqua": "0x02dF2659B5B4956EAFEe3293584C2aaefC114871",
       "directPay": "0x9DF1C7C32Ce3f1322e1c7bAEc30664b1c472DaE9",
-      "payoutPool": "",
-      "destinationLock": ""
+      "payoutPool": "0x3D79F7D2366D26c7325F58bEADbf7ECcB1d13E01",
+      "destinationLock": "0x669c928135B848C828144360aD7a73391968BDA3"
     },
     "confirmations": 1
   },
