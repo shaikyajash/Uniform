@@ -35,7 +35,8 @@
         "address": "0x808456652fdb597867f38412077A9182bf77359F",
         "decimals": 6,
         "eip712": { "name": "EURC", "version": "2" }
-      }
+      },
+      "WETH": { "address": "0x4200000000000000000000000000000000000006", "decimals": 18, "priceId": "ethereum" }
     },
     "uniswap": {
       "poolManager": "0x05E73354cFDd6745C338b50BcFDfA3Aa6fA03408",
@@ -45,7 +46,8 @@
     },
     "permit2": "0x000000000022D473030F116dDEE9F6B43aC78BA3",
     "contracts": {
-      "sourceLock": "0x02dF2659B5B4956EAFEe3293584C2aaefC114871"
+      "sourceLock": "0x3D79F7D2366D26c7325F58bEADbf7ECcB1d13E01",
+      "calibur": "0x000000005c84F8Fd50b21CAC312528A64437030e"
     },
     "confirmations": 10
   },
@@ -64,7 +66,9 @@
         "address": "0x08210F9170F89Ab7658F0B5E3fF39b0E03C594D4",
         "decimals": 6,
         "eip712": { "name": "EURC", "version": "2" }
-      }
+      },
+      "WETH": { "address": "0xfFf9976782d46CC05630D1f6eBAb18b2324d6B14", "decimals": 18, "priceId": "ethereum" },
+      "WBTC": { "address": "0x29f2D40B0605204364af54EC677bD022dA425d03", "decimals": 8, "priceId": "bitcoin" }
     },
     "uniswap": {
       "poolManager": "0xE03A1074c86CFeDd5C142C4F04F1a1536e203543",
@@ -74,7 +78,8 @@
     },
     "permit2": "0x000000000022D473030F116dDEE9F6B43aC78BA3",
     "contracts": {
-      "sourceLock": "0x3aCDE874Eeb36dD28507B5b1FF29219Ba262F5d9"
+      "sourceLock": "0x7ff2630DD4620d7052eDD52B89e9248Bab878CB1",
+      "calibur": "0x000000005c84F8Fd50b21CAC312528A64437030e"
     },
     "confirmations": 3
   },

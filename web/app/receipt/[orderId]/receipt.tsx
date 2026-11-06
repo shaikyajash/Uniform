@@ -6,7 +6,7 @@ import Link from "next/link";
 import { useEmbedded } from "@/app/_ui/embedded";
 import { CardContent, CardHeader } from "@/components/ui/card";
 import { Separator } from "@/components/ui/separator";
-import { chainName, explorerTx, trimAmount } from "@/lib/chain";
+import { chainName, explorerTx, legToken, trimAmount } from "@/lib/chain";
 import { currentLegs, explain, getOrder, type Order, type OrderStatus } from "@/lib/desk";
 import { describeLegs } from "@/app/pay/[orderId]/progress";
 import { CopyText, FinePrint, PayCardSkeleton, PayShell, Problem } from "@/app/pay/[orderId]/parts";
@@ -152,11 +152,11 @@ function Transactions({ order }: { order: Order }) {
     lines.push({ label: "Payment to the merchant · Whitechain", href: order.payment.explorerUrl });
   }
   for (const leg of order.legs) {
-    if (leg.lockTx) lines.push({ label: `Customer's USDC locked · ${chainName(leg.chainId)}`, href: explorerTx(leg.chainId, leg.lockTx) });
+    if (leg.lockTx) lines.push({ label: `Customer's ${legToken(leg.chainId, leg.token).symbol} locked · ${chainName(leg.chainId)}`, href: explorerTx(leg.chainId, leg.lockTx) });
   }
   if (order.claim?.explorerUrl) lines.push({ label: "Merchant paid in USDT · Whitechain", href: order.claim.explorerUrl });
   for (const leg of order.legs) {
-    if (leg.refundTx) lines.push({ label: `USDC returned · ${chainName(leg.chainId)}`, href: explorerTx(leg.chainId, leg.refundTx) });
+    if (leg.refundTx) lines.push({ label: `${legToken(leg.chainId, leg.token).symbol} returned · ${chainName(leg.chainId)}`, href: explorerTx(leg.chainId, leg.refundTx) });
   }
   if (lines.length === 0) return null;
   return (

@@ -52,11 +52,16 @@ pub struct Note {
 
 /// The EIP-712 JSON the pay page passes to the wallet. Numbers are decimal text and addresses
 /// lowercase hex, the JSON form wallets accept (checked with Privy in B0).
-pub fn typed_data(token: &Token, chain_id: u64, note: &Note) -> Value {
-    json!({
+pub fn typed_data(token: &Token, chain_id: u64, note: &Note) -> Result<Value, crate::error::ApiError> {
+    let domain = token
+        .eip712
+        .as_ref()
+        .ok_or_else(|| crate::error::ApiError::internal(format!("chains.json has no EIP-712 domain for token {}", token.address)))?;
+    let (name, version) = (domain.name.as_str(), domain.version.as_str());
+    Ok(json!({
         "domain": {
-            "name": token.eip712.name,
-            "version": token.eip712.version,
+            "name": name,
+            "version": version,
             "chainId": chain_id,
             "verifyingContract": format!("{:#x}", token.address),
         },
@@ -85,7 +90,19 @@ pub fn typed_data(token: &Token, chain_id: u64, note: &Note) -> Value {
             "validBefore": note.valid_before.to_string(),
             "nonce": note.nonce.to_string(),
         },
-    })
+    }))
+}
+
+/// The same note as a `TransferWithAuthorization`: anyone may submit it, and the USDT goes straight
+/// to `to`. Used for a shop's refund to the customer.
+pub fn transfer_typed_data(token: &Token, chain_id: u64, note: &Note) -> Result<Value, crate::error::ApiError> {
+    let mut data = typed_data(token, chain_id, note)?;
+    let fields = data["types"]["ReceiveWithAuthorization"].take();
+    let types = data["types"].as_object_mut().expect("types is an object");
+    types.remove("ReceiveWithAuthorization");
+    types.insert("TransferWithAuthorization".into(), fields);
+    data["primaryType"] = json!("TransferWithAuthorization");
+    Ok(data)
 }
 
 #[cfg(test)]
@@ -146,7 +163,8 @@ mod tests {
         let token = Token {
             address: USDT,
             decimals: 6,
-            eip712: Eip712Domain { name: "Tether USD".into(), version: "1".into() },
+            eip712: Some(Eip712Domain { name: "Tether USD".into(), version: "1".into() }),
+            price_id: None,
         };
         let note = Note {
             from: address!("a917000000000000000000000000000000000001"),
@@ -156,7 +174,7 @@ mod tests {
             valid_before: 1_793_914_600,
             nonce: B256::repeat_byte(0x42),
         };
-        let json = typed_data(&token, 1874, &note);
+        let json = typed_data(&token, 1874, &note).unwrap();
         let from_json: TypedData = serde_json::from_value(json).unwrap();
 
         let expected = ReceiveWithAuthorization {

@@ -27,6 +27,15 @@ type ShopChain = {
   destinationLock: Address | null;
 };
 
+/** An ERC-20 paid at market price through a Calibur batch (EIP-7702), e.g. WETH or WBTC. */
+export type PricedToken = {
+  symbol: string;
+  address: Address;
+  decimals: number;
+  /** CoinGecko id, e.g. "ethereum". */
+  priceId: string;
+};
+
 export type CustomerChain = {
   key: string;
   id: number;
@@ -35,6 +44,9 @@ export type CustomerChain = {
   usdc: Address;
   usdcDecimals: number;
   sourceLock: Address;
+  /** Calibur, the EIP-7702 delegate that runs a priced token's batch. */
+  calibur: Address | null;
+  tokens: PricedToken[];
 };
 
 export const shopChain: ShopChain = JSON.parse(process.env.NEXT_PUBLIC_SHOP_CHAIN ?? "null");
@@ -99,6 +111,72 @@ export async function usdcBalance(chain: CustomerChain, owner: Address): Promise
   const client = customerClients.get(chain.id);
   if (!client) throw new Error(`no client for chain ${chain.id}`);
   return client.readContract({ address: chain.usdc, abi: erc20Abi, functionName: "balanceOf", args: [owner] });
+}
+
+/** The wallet's balance of any ERC-20 on a customer chain, in base units. */
+export async function tokenBalance(chainId: number, token: Address, owner: Address): Promise<bigint> {
+  const client = customerClients.get(chainId);
+  if (!client) throw new Error(`no client for chain ${chainId}`);
+  return client.readContract({ address: token, abi: erc20Abi, functionName: "balanceOf", args: [owner] });
+}
+
+/** The wallet's code on a customer chain: "0x" for a plain wallet, `0xef0100 ‖ delegate` after EIP-7702. */
+export async function walletCode(chainId: number, owner: Address): Promise<Hex> {
+  const client = customerClients.get(chainId);
+  if (!client) throw new Error(`no client for chain ${chainId}`);
+  return (await client.getCode({ address: owner })) ?? "0x";
+}
+
+/** The wallet's transaction nonce on a customer chain: what an EIP-7702 authorization must name. */
+export async function walletNonce(chainId: number, owner: Address): Promise<number> {
+  const client = customerClients.get(chainId);
+  if (!client) throw new Error(`no client for chain ${chainId}`);
+  return client.getTransactionCount({ address: owner, blockTag: "pending" });
+}
+
+/** A customer leg's token by address: USDC or a priced token. Unknown tokens read as 6-decimal "tokens". */
+export function legToken(chainId: number, address: string): { symbol: string; decimals: number } {
+  const chain = customerChain(chainId);
+  const wanted = address.toLowerCase();
+  if (!chain || chain.usdc.toLowerCase() === wanted) return { symbol: "USDC", decimals: chain?.usdcDecimals ?? 6 };
+  const token = chain.tokens.find((candidate) => candidate.address.toLowerCase() === wanted);
+  return token ? { symbol: token.symbol, decimals: token.decimals } : { symbol: "tokens", decimals: 6 };
+}
+
+/** USD prices by CoinGecko id, for estimates only: the Order Desk's quote sets the real amount. */
+export async function usdPrices(ids: string[]): Promise<Record<string, number>> {
+  const response = await fetch(
+    `https://api.coingecko.com/api/v3/simple/price?ids=${ids.map(encodeURIComponent).join(",")}&vs_currencies=usd`,
+    { cache: "no-store" },
+  );
+  if (!response.ok) throw new Error(`prices: http ${response.status}`);
+  const body: Record<string, { usd?: number }> = await response.json();
+  return Object.fromEntries(
+    Object.entries(body)
+      .filter(([, entry]) => typeof entry.usd === "number" && entry.usd > 0)
+      .map(([id, entry]) => [id, entry.usd as number]),
+  );
+}
+
+/**
+ * About how much of a priced token pays `usd6` (USD in 6-decimal units, fee included): at `price`
+ * USD per token, plus the quote's 3% safety buffer, rounded up (as the Order Desk).
+ */
+export function estimateTokenUnits(usd6: bigint, price: number, decimals: number): bigint {
+  const priceMicro = BigInt(Math.round(price * 1_000_000));
+  if (priceMicro <= BigInt(0)) return BigInt(0);
+  const numerator = usd6 * BigInt(10) ** BigInt(decimals) * BigInt(10_000);
+  const denominator = priceMicro * BigInt(9_700);
+  return (numerator + denominator - BigInt(1)) / denominator;
+}
+
+/** A token amount for people: exact up to 6 decimals (USDC), else 6 significant digits ("0.00341234" WETH). */
+export function formatTokenAmount(units: bigint, decimals: number): string {
+  if (decimals <= 6) return trimAmount(formatUnits(units, decimals));
+  const [whole, fraction = ""] = formatUnits(units, decimals).split(".");
+  if (whole !== "0") return trimAmount(`${whole}.${fraction.slice(0, Math.max(2, 6 - whole.length))}`);
+  const lead = fraction.length - fraction.replace(/^0+/, "").length;
+  return trimAmount(`0.${fraction.slice(0, lead + 6)}`);
 }
 
 /** What the customer locks for an order: the amount plus Bob's fee, rounded up (as the server). */

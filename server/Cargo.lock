@@ -3938,6 +3938,7 @@ dependencies = [
  "axum",
  "common",
  "getrandom 0.4.3",
+ "reqwest 0.13.5",
  "serde",
  "serde_json",
  "sha2 0.11.1",

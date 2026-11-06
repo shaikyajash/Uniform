@@ -228,7 +228,7 @@ export function explainDashboard(error: unknown): string {
       case "not_refundable":
         return `This order can't be refunded: ${error.message.replace(/^the order is /, "it is ")}.`;
       case "refund_unavailable":
-        return "Only USDT payments can be refunded from here for now.";
+        return "This order has no payment to refund.";
       case "note_expired":
         return "The refund note ran out. Try again.";
       case "bad_amount":

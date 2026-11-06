@@ -14,7 +14,7 @@
 
 use alloy::{
     hex,
-    primitives::{Address, B256},
+    primitives::{Address, B256, U256},
 };
 use axum::{
     Json,
@@ -22,6 +22,7 @@ use axum::{
 };
 use common::{
     amount::Amount,
+    calibur,
     chains::{Chain, Token},
     locks::{SourceLockParams, source_lock_id, with_provider_fee},
     status::{OrderStatus, PayPath},
@@ -40,6 +41,10 @@ const USDT: &str = "USDT";
 const USDC: &str = "USDC";
 /// SourceLock takes only USDC and EURC, both with 6 decimals (checked against chains.json).
 const USDC_DECIMALS: u8 = 6;
+/// A token paid through a Calibur batch is quoted this much above its value at the market price:
+/// 2% above the Matchmaker's own buffer (1%), so a price move while the customer signs and the
+/// lock waits still fills.
+const QUOTE_BUFFER_BPS: u64 = 300;
 /// The least a split leg may lock (0.1 USDC), so a split cannot make the Relayer pay gas for dust.
 const MIN_SPLIT_LEG: u64 = 100_000;
 /// `validAfter` = now - 60, so a customer whose clock runs a little behind can still sign (SPEC).
@@ -62,6 +67,9 @@ pub struct QuoteRequest {
     chain_id: Option<u64>,
     /// Split only: the chains the customer pays from, and how much USDC on each.
     legs: Option<Vec<LegRequest>>,
+    /// Cross-chain only: the token the customer pays with, by symbol in chains.json. `USDC` when
+    /// left out. A token with a `priceId` (WETH, WBTC) is locked through a Calibur batch.
+    token: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -90,12 +98,22 @@ pub struct QuoteView {
 #[serde(rename_all = "camelCase")]
 pub struct ToSign {
     chain_id: u64,
-    token: &'static str,
+    token: String,
     amount: String,
     typed_data: Value,
     /// Cross-chain: the source lock the note opens (also its nonce).
     #[serde(skip_serializing_if = "Option::is_none")]
     lock_id: Option<B256>,
+    /// `note`: an EIP-3009 note. `batch`: a Calibur batch (approve + lock), signed by the wallet
+    /// once it is delegated to `calibur` (EIP-7702).
+    signing: &'static str,
+    /// Batch only: the token's address and decimals, and the Calibur delegate.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    token_address: Option<Address>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    decimals: Option<u8>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    calibur: Option<Address>,
 }
 
 /// The source lock a cross-chain quote plans: stored as `quotes.leg`, read back by `/legs`.
@@ -111,6 +129,16 @@ pub struct PlannedLeg {
     /// `quotes.typed_data`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub typed_data: Option<Value>,
+    /// A lock through the customer's Calibur account: the batch's nonce and deadline.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub batch: Option<PlannedBatch>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PlannedBatch {
+    pub nonce: U256,
+    pub deadline: u64,
 }
 
 /// The source locks a quote plans: one object for a cross-chain quote, a list for a split.
@@ -202,6 +230,27 @@ pub async fn quote(
         order_expires_at: order.expires_at,
         now,
     };
+    let paid_with = body.token.as_deref().filter(|symbol| *symbol != USDC);
+    if let Some(symbol) = paid_with {
+        let Some(hashlock) = hashlock else {
+            return Err(ApiError::bad_request("bad_token", "a token is paid from a customer chain: send hashlock and chainId"));
+        };
+        if body.legs.is_some() {
+            return Err(ApiError::bad_request("bad_token", "a split is paid in USDC"));
+        }
+        let chain = source_chain(&state, body.chain_id)?;
+        let token = chain
+            .tokens
+            .get(symbol)
+            .filter(|token| token.price_id.is_some())
+            .ok_or_else(|| ApiError::bad_request("bad_token", format!("{symbol} is not a token customers can pay with on chain {}", chain.chain_id)))?;
+        let price_id = token.price_id.as_deref().unwrap_or_default();
+        let price = state.prices.micro_usd(price_id).await.map_err(|error| {
+            ApiError::conflict("price_unavailable", format!("no price for {symbol} right now ({error}); try again"))
+        })?;
+        let priced = token_lock(&state, &quoting, hashlock, chain, symbol, token, price)?;
+        return store_and_reply(&state, &quoting, priced).await;
+    }
     let priced = match (hashlock, body.legs) {
         (None, None) => direct(&state, &quoting)?,
         (None, Some(_)) => return Err(ApiError::bad_request("bad_legs", "a split needs a hashlock")),
@@ -235,17 +284,21 @@ fn direct(state: &AppState, quoting: &Quoting) -> Result<Priced, ApiError> {
             quoting.payer,
         ),
     };
-    let typed_data = direct_pay::typed_data(usdt, chain.chain_id, &note);
+    let typed_data = direct_pay::typed_data(usdt, chain.chain_id, &note)?;
     let total = quoting.amount.to_decimal(usdt.decimals);
     Ok(Priced {
         path: PayPath::Direct,
         notes: vec![Planned {
             to_sign: ToSign {
                 chain_id: chain.chain_id,
-                token: USDT,
+                token: USDT.into(),
                 amount: total.clone(),
                 typed_data: typed_data.clone(),
                 lock_id: None,
+                signing: "note",
+                token_address: None,
+                decimals: None,
+                calibur: None,
             },
             typed_data,
             note,
@@ -275,6 +328,94 @@ fn crosschain(state: &AppState, quoting: &Quoting, hashlock: B256, chain_id: Opt
         fee: Amount(amount.0 - quoting.amount.0).to_decimal(USDC_DECIMALS),
         hashlock: Some(hashlock),
     })
+}
+
+/// Path B with any listed ERC-20: a Calibur batch (approve + lock) that opens a SourceLock for Bob
+/// holding enough of the token, at its market price, to cover the order plus his fee.
+fn token_lock(
+    state: &AppState,
+    quoting: &Quoting,
+    hashlock: B256,
+    chain: &Chain,
+    symbol: &str,
+    token: &Token,
+    price_micro_usd: u64,
+) -> Result<Priced, ApiError> {
+    let provider = provider(state)?;
+    let source_lock = chain.contracts.source_lock.ok_or_else(|| ApiError::internal("checked by source_chain"))?;
+    let calibur_address = chain.contracts.calibur.ok_or_else(|| {
+        ApiError::conflict("bad_token", format!("chain {} cannot take tokens without EIP-3009 yet", chain.chain_id))
+    })?;
+    let usd = total_with_fee(state, quoting)?;
+    let amount = token_amount(usd, token.decimals, price_micro_usd)
+        .ok_or_else(|| ApiError::bad_request("bad_amount", "the order amount is too large"))?;
+    let params = SourceLockParams {
+        order_id: quoting.order_bytes,
+        receiver: provider,
+        min_usdc_out: usd,
+        hashlock,
+        expiry: lock_expiry(state, quoting)?,
+        out_token: Address::ZERO,
+    };
+    let lock_id = source_lock_id(chain.chain_id, source_lock, &params, quoting.payer, token.address, amount);
+    let nonce = calibur::nonce_for(lock_id);
+    let deadline = quoting.now + LOCK_NOTE_LIFETIME_SECONDS;
+    let deadline_u64 = u64::try_from(deadline).map_err(ApiError::internal)?;
+    let batch = calibur::signed_batch(calibur::lock_calls(source_lock, &params, token.address, amount), nonce, deadline_u64);
+    let typed_data = calibur::typed_data(&batch, chain.chain_id, quoting.payer, calibur_address);
+    // Stored like a note: from the customer to SourceLock, under the lock id.
+    let note = Note {
+        from: quoting.payer,
+        to: source_lock,
+        value: amount,
+        valid_after: quoting.now - CLOCK_SLACK_SECONDS,
+        valid_before: deadline,
+        nonce: lock_id,
+    };
+    let total = amount.to_decimal(token.decimals);
+    Ok(Priced {
+        path: PayPath::CrossChain,
+        notes: vec![Planned {
+            to_sign: ToSign {
+                chain_id: chain.chain_id,
+                token: symbol.to_owned(),
+                amount: total.clone(),
+                typed_data: typed_data.clone(),
+                lock_id: Some(lock_id),
+                signing: "batch",
+                token_address: Some(token.address),
+                decimals: Some(token.decimals),
+                calibur: Some(calibur_address),
+            },
+            leg: Some(PlannedLeg {
+                chain_id: chain.chain_id,
+                token: token.address,
+                amount,
+                params,
+                lock_id,
+                typed_data: None,
+                batch: Some(PlannedBatch { nonce, deadline: deadline_u64 }),
+            }),
+            typed_data,
+            note,
+        }],
+        total,
+        fee: Amount(usd.0 - quoting.amount.0).to_decimal(USDC_DECIMALS),
+        hashlock: Some(hashlock),
+    })
+}
+
+/// How much of a token is worth `usd` (6 decimals) at `price_micro_usd` per whole token, plus the
+/// quote buffer, rounded up: `ceil(usd × 10^decimals × 10000 / (price × (10000 − buffer)))`.
+pub fn token_amount(usd: Amount, decimals: u8, price_micro_usd: u64) -> Option<Amount> {
+    if price_micro_usd == 0 {
+        return None;
+    }
+    let scale = U256::from(10u64).checked_pow(U256::from(decimals))?;
+    let top = usd.0.checked_mul(scale)?.checked_mul(U256::from(10_000u64))?;
+    let bottom = U256::from(price_micro_usd).checked_mul(U256::from(10_000 - QUOTE_BUFFER_BPS))?;
+    let amount = top.div_ceil(bottom);
+    (amount > U256::ZERO).then_some(Amount(amount))
 }
 
 /// Path C: one USDC note per chain, each opening a SourceLock for Bob under the same hashlock and
@@ -374,14 +515,18 @@ fn plan_lock(
         valid_before: quoting.now + LOCK_NOTE_LIFETIME_SECONDS,
         nonce: lock_id,
     };
-    let typed_data = direct_pay::typed_data(usdc, chain.chain_id, &note);
+    let typed_data = direct_pay::typed_data(usdc, chain.chain_id, &note)?;
     Ok(Planned {
         to_sign: ToSign {
             chain_id: chain.chain_id,
-            token: USDC,
+            token: USDC.into(),
             amount: amount.to_decimal(usdc.decimals),
             typed_data: typed_data.clone(),
             lock_id: Some(lock_id),
+            signing: "note",
+            token_address: None,
+            decimals: None,
+            calibur: None,
         },
         leg: Some(PlannedLeg {
             chain_id: chain.chain_id,
@@ -390,6 +535,7 @@ fn plan_lock(
             params,
             lock_id,
             typed_data: Some(typed_data.clone()),
+            batch: None,
         }),
         typed_data,
         note,
@@ -672,6 +818,75 @@ mod tests {
         assert_eq!((path.as_str(), hashlock.as_str()), ("crosschain", HASHLOCK));
         assert_eq!(leg["lockId"], lock_id.to_string());
         assert_eq!(leg["params"]["receiver"], format!("{:#x}", crate::routes::test_support::PROVIDER));
+    }
+
+    #[test]
+    fn a_token_amount_covers_the_order_at_the_price_plus_the_buffer() {
+        // 12.036 USD of WBTC at 100,000 USD: 0.00012036 WBTC, /0.97 and rounded up.
+        let amount = super::token_amount(Amount::from(12_036_000u64), 8, 100_000_000_000).unwrap();
+        assert_eq!(amount, Amount::from(12_409u64));
+        // Worth at least 12.036 USD at the Matchmaker's 1% discount.
+        let value = amount.0 * alloy::primitives::U256::from(100_000_000_000u64) * alloy::primitives::U256::from(9_900u64)
+            / (alloy::primitives::U256::from(100_000_000u64) * alloy::primitives::U256::from(10_000u64));
+        assert!(value >= alloy::primitives::U256::from(12_036_000u64), "{value}");
+        // WETH at 4,000 USD, 18 decimals.
+        let weth = super::token_amount(Amount::from(12_036_000u64), 18, 4_000_000_000).unwrap();
+        assert_eq!(weth, Amount::from(3_102_061_855_670_104u64));
+        assert_eq!(super::token_amount(Amount::from(1u64), 8, 0), None);
+    }
+
+    #[sqlx::test]
+    async fn a_wbtc_quote_is_a_calibur_batch_that_approves_and_locks_for_bob(pool: PgPool) {
+        use common::calibur;
+        use common::locks::{SourceLockParams, source_lock_id};
+
+        let test = test_app(pool).await;
+        let id = new_order(&test).await;
+        let body = json!({ "payer": PAYER, "hashlock": HASHLOCK, "chainId": 11155111, "token": "WBTC" });
+        let (status, reply) = call(&test.app, quote(&id, body)).await;
+        assert_eq!(status, StatusCode::OK, "{reply}");
+        assert_eq!((reply["path"].as_str(), reply["total"].as_str(), reply["fee"].as_str()), (Some("crosschain"), Some("0.00012409"), Some("0.036000")));
+
+        let chains = common::chains::Chains::from_json(include_str!("../../../../shared/chains.json")).unwrap();
+        let eth = chains.by_id(11155111).unwrap();
+        let (source_lock, wbtc, calibur_address) = (eth.contracts.source_lock.unwrap(), eth.tokens["WBTC"].address, eth.contracts.calibur.unwrap());
+        let note = &reply["toSign"][0];
+        assert_eq!((note["signing"].as_str(), note["token"].as_str(), note["amount"].as_str()), (Some("batch"), Some("WBTC"), Some("0.00012409")));
+        assert_eq!(note["calibur"], format!("{calibur_address:#x}"));
+
+        // Exactly what the Gas Payer will rebuild: approve then lock, for Bob, under the lock id.
+        let typed = &note["typedData"];
+        let expiry: u64 = typed["message"]["deadline"].as_str().unwrap().parse::<u64>().unwrap() - 300 + 1200;
+        let params = SourceLockParams {
+            order_id: id.parse().unwrap(),
+            receiver: crate::routes::test_support::PROVIDER,
+            min_usdc_out: Amount::from(12_036_000u64),
+            hashlock: HASHLOCK.parse().unwrap(),
+            expiry,
+            out_token: Address::ZERO,
+        };
+        let payer: Address = PAYER.parse().unwrap();
+        let lock_id = source_lock_id(11155111, source_lock, &params, payer, wbtc, Amount::from(12_409u64));
+        assert_eq!(note["lockId"], lock_id.to_string());
+        let batch = calibur::signed_batch(
+            calibur::lock_calls(source_lock, &params, wbtc, Amount::from(12_409u64)),
+            calibur::nonce_for(lock_id),
+            expiry - 1200 + 300,
+        );
+        assert_eq!(typed, &calibur::typed_data(&batch, 11155111, payer, calibur_address));
+    }
+
+    #[sqlx::test]
+    async fn unknown_or_unpriced_tokens_are_refused(pool: PgPool) {
+        let test = test_app(pool).await;
+        let id = new_order(&test).await;
+        for (token, chain) in [("WBTC", 84532), ("EURC", 11155111), ("DOGE", 11155111)] {
+            let body = json!({ "payer": PAYER, "hashlock": HASHLOCK, "chainId": chain, "token": token });
+            let (status, reply) = call(&test.app, quote(&id, body)).await;
+            assert_eq!((status, reply["error"]["code"].as_str()), (StatusCode::BAD_REQUEST, Some("bad_token")), "{token} on {chain}");
+        }
+        let (status, _) = call(&test.app, quote(&id, json!({ "payer": PAYER, "token": "WBTC" }))).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
     }
 
     #[sqlx::test]

@@ -12,7 +12,11 @@ Deadline: Sat Nov 7, 09:00 IST. Feature freeze: Sat 02:00.
 - [x] **A8: split payments** (part on Base, part on Ethereum Sepolia; see the A8 plan). The pay
   page (B5) must send `legs` in `POST /quote` and `signatures` in `POST /legs`, and sign every
   note behind one **Pay** click with Privy's `showWalletUIs: false` (see the A8 plan). (A + B)
-- [ ] **A9: merchant refunds** on the cross-chain path. (A)
+- [x] **Merchant refunds of cross-chain and split payments**: always USDT on Whitechain, to the
+  address that paid. The payout wallet signs a `TransferWithAuthorization` to the customer; the Gas
+  Payer sends it (`transfer_refund`).
+- [ ] **A9: refunds back in the customer's own token and chain** (USDC on Base or Ethereum
+  Sepolia, through the provider). After the hackathon. (A)
 - [ ] **A10: Earn page.** (A)
 
 ## Safety and correctness

@@ -134,6 +134,10 @@ Rules for the Order Desk and Gas Payer (from the security review):
 - Before sending, simulate with `eth_call` and check `authorizationState(payer, nonce)` and the payer's balance, so cancelled or front-run authorizations don't waste gas.
 - Check Tether's `isBlocked` for the merchant and payer.
 - Refund signatures depend on the amount refunded so far, so sign one partial refund at a time.
+- A cross-chain or split payment never went through DirectPay. Its merchant refund is USDT on
+  Whitechain to the address that paid: a `TransferWithAuthorization` from the payout wallet to the
+  customer, nonce `keccak256(abi.encode(keccak256("uniform.refund.transfer.v1"), chainId, usdt,
+  orderId, customer, amount, refundedBefore))`, sent by the Gas Payer.
 - Known limitation: only 65-byte EOA signatures (no ERC-1271 smart wallets).
 
 ### SourceLock (Base Sepolia, Ethereum Sepolia) — USDC and EURC

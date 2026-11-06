@@ -3,7 +3,8 @@
 //! A job is typed arguments, never raw calldata: the Relayer builds each call itself, so it can
 //! only send the calls listed here. That is its drain protection.
 
-use alloy::primitives::{Address, B256, Bytes};
+use alloy::primitives::{Address, B256, Bytes, U256, keccak256};
+use alloy::sol_types::SolValue;
 use serde::{Deserialize, Serialize};
 
 use crate::{amount::Amount, locks::SourceLockParams, status::UnknownValue};
@@ -37,8 +38,13 @@ pub enum Job {
         valid_before: u64,
         /// `lockIdFor(params, payer, token, amount)`: the note's nonce. The Relayer recomputes it.
         lock_id: B256,
-        /// 65 bytes: r, s, v.
+        /// 65 bytes: r, s, v. Over the EIP-3009 note, or over the Calibur batch when `batch` is set.
         signature: Bytes,
+        /// For a token without EIP-3009: the lock goes through the customer's Calibur account
+        /// (`customer.execute(batch, signature)`) instead of `lockWithAuthorization`. Then
+        /// `valid_after` and `valid_before` are 0 and the batch's deadline applies.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        batch: Option<crate::calibur::Batch>,
     },
     /// Path B, step 3: `DestinationLock.claim(lockId, secret)` on the shop chain. The secret pays
     /// the shop, so the Relayer sends it only to a lock that pays `merchant` at least `min_amount`.
@@ -73,6 +79,52 @@ pub enum Job {
         /// 65 bytes: r, s, v.
         signature: Bytes,
     },
+    /// A shop refund of a cross-chain or split payment: USDT `transferWithAuthorization(from,
+    /// to, value, validAfter, validBefore, nonce, v, r, s)` on the shop chain, from the note the
+    /// shop's payout wallet signed. However the customer paid, the refund is USDT on the shop chain,
+    /// to the address that paid (an embedded wallet has the same address on every chain).
+    TransferRefund {
+        order_id: B256,
+        /// The shop's payout address: the note's `from`.
+        merchant: Address,
+        /// The customer who paid: the note's `to`.
+        customer: Address,
+        amount: Amount,
+        /// What had been refunded of this order when the note was made. The nonce commits to it.
+        refunded_before: Amount,
+        valid_after: u64,
+        valid_before: u64,
+        /// `transfer_refund_nonce(..)`. The Relayer computes it again.
+        nonce: B256,
+        /// 65 bytes: r, s, v.
+        signature: Bytes,
+    },
+}
+
+/// Tag of the nonce in a shop's USDT refund note.
+const TRANSFER_REFUND_TAG: &str = "uniform.refund.transfer.v1";
+
+/// The nonce of a shop's USDT refund note: it commits to the chain, token, order, customer, amount
+/// and what was refunded before, so each note pays one refund of one order, once.
+pub fn transfer_refund_nonce(
+    chain_id: u64,
+    usdt: Address,
+    order_id: B256,
+    customer: Address,
+    amount: Amount,
+    refunded_before: Amount,
+) -> B256 {
+    let encoded = (
+        keccak256(TRANSFER_REFUND_TAG),
+        U256::from(chain_id),
+        usdt,
+        order_id,
+        customer,
+        amount.0,
+        refunded_before.0,
+    )
+        .abi_encode();
+    keccak256(encoded)
 }
 
 impl Job {
@@ -84,6 +136,7 @@ impl Job {
             Job::DestinationClaim { .. } => "destination_claim",
             Job::SourceRefund { .. } => "source_refund",
             Job::DirectRefund { .. } => "direct_refund",
+            Job::TransferRefund { .. } => "transfer_refund",
         }
     }
 }
@@ -188,6 +241,7 @@ mod tests {
                 valid_before: 1_793_914_240,
                 lock_id: B256::repeat_byte(0x11),
                 signature: Bytes::from(vec![7u8; 65]),
+                batch: None,
             },
             Job::DestinationClaim {
                 lock_id: B256::repeat_byte(0x22),

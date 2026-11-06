@@ -1,15 +1,20 @@
-//! Shop refunds of Path A payments, signed by the merchant's payout wallet in the dashboard.
+//! Shop refunds, signed by the merchant's payout wallet in the dashboard. A refund is always USDT
+//! on the shop chain, to the address that paid, however the customer paid.
 //!
-//! 1. `POST /v1/orders/{id}/refund-note {amount}`: the note to sign. It is a USDT
-//!    `ReceiveWithAuthorization` from the shop to DirectPay; its nonce is
-//!    `refundNonceFor(paymentId, amount, refundedBefore)`, so it works for this refund only.
+//! 1. `POST /v1/orders/{id}/refund-note {amount}`: the note to sign.
+//!    - A USDT payment (`direct`): a `ReceiveWithAuthorization` from the shop to DirectPay, with
+//!      nonce `refundNonceFor(paymentId, amount, refundedBefore)`. DirectPay pays the customer.
+//!    - A cross-chain or split payment: a `TransferWithAuthorization` from the shop to the
+//!      customer, with nonce `transfer_refund_nonce(..)`.
+//!
+//!    Either nonce commits to what was refunded before, so a note works for one refund only.
 //! 2. The owner signs it in their wallet.
 //! 3. `POST /v1/orders/{id}/refunds {amount, validAfter, validBefore, signature}`: the Order Desk
 //!    rebuilds the same note, checks the signature is the payout wallet's, and writes a
-//!    `direct_refund` job. The Relayer sends `DirectPay.refund`, which returns the USDT to the
-//!    customer who paid. Once mined the order is `partially_refunded` or `refunded`.
+//!    `direct_refund` or `transfer_refund` job for the Relayer. Once mined the order is
+//!    `partially_refunded` or `refunded`.
 //!
-//! Both steps need a dashboard session. Cross-chain payments cannot be refunded yet (needs A9).
+//! Both steps need a dashboard session.
 
 use alloy::primitives::{Address, B256};
 use axum::{
@@ -17,14 +22,14 @@ use axum::{
     extract::{Path, State, rejection::JsonRejection},
     http::StatusCode,
 };
-use common::{amount::Amount, jobs::Job};
+use common::{amount::Amount, jobs::{Job, transfer_refund_nonce}};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use super::{AppState, direct::recover_check, normalize_order_id, now};
 use crate::{
     auth::Owner,
-    direct_pay::{self, Note, payment_id_for, refund_nonce_for},
+    direct_pay::{self, Note, payment_id_for, refund_nonce_for, transfer_typed_data},
     error::ApiError,
 };
 
@@ -39,8 +44,11 @@ const MAX_WINDOW_SECONDS: i64 = 3600;
 /// What a refund of this order is built from, checked against the shop.
 struct Refundable {
     order_id: B256,
-    payment_id: B256,
+    /// The DirectPay payment for a USDT payment; `None` for a cross-chain or split one, refunded
+    /// with a plain transfer.
+    payment_id: Option<B256>,
     merchant: Address,
+    customer: Address,
     amount: Amount,
     refunded: Amount,
 }
@@ -61,9 +69,11 @@ async fn refundable(state: &AppState, merchant_id: i64, id: &str) -> Result<Refu
     let basis: Basis = sqlx::query_as(
         "SELECT o.amount::text AS amount, o.status, o.path, o.payer, m.payout_address,
                 COALESCE((SELECT SUM((j.args->>'amount')::numeric) FROM relayer_jobs j
-                          WHERE j.order_id = o.id AND j.kind = 'direct_refund' AND j.status = 'confirmed'), 0)::text
+                          WHERE j.order_id = o.id AND j.kind IN ('direct_refund', 'transfer_refund')
+                            AND j.status = 'confirmed'), 0)::text
                     AS refunded,
-                EXISTS (SELECT 1 FROM relayer_jobs j WHERE j.order_id = o.id AND j.kind = 'direct_refund'
+                EXISTS (SELECT 1 FROM relayer_jobs j WHERE j.order_id = o.id
+                        AND j.kind IN ('direct_refund', 'transfer_refund')
                         AND j.status IN ('pending', 'sending', 'sent')) AS live
          FROM orders o JOIN merchants m ON m.id = o.merchant_id
          WHERE o.id = $1 AND o.merchant_id = $2",
@@ -74,11 +84,13 @@ async fn refundable(state: &AppState, merchant_id: i64, id: &str) -> Result<Refu
     .await?
     .ok_or_else(|| ApiError::not_found("order"))?;
 
-    // Only a Path A payment went through DirectPay, which is what refunds it. Cross-chain and split
-    // payments need A9.
-    if basis.path.as_deref() != Some("direct") {
-        return Err(ApiError::conflict("refund_unavailable", "only USDT payments can be refunded from here yet"));
-    }
+    // A USDT payment went through DirectPay, which refunds it; a cross-chain or split one is
+    // refunded with a plain USDT transfer.
+    let direct = match basis.path.as_deref() {
+        Some("direct") => true,
+        Some("crosschain" | "split") => false,
+        _ => return Err(ApiError::conflict("refund_unavailable", "this order has no payment to refund")),
+    };
     if !matches!(basis.status.as_str(), "paid" | "partially_refunded") {
         return Err(ApiError::conflict("not_refundable", format!("the order is {}", basis.status)));
     }
@@ -89,12 +101,18 @@ async fn refundable(state: &AppState, merchant_id: i64, id: &str) -> Result<Refu
     let merchant: Address = basis.payout_address.parse().map_err(ApiError::internal)?;
     let amount: Amount = basis.amount.parse().map_err(ApiError::internal)?;
     let order_id: B256 = order_id.parse().map_err(ApiError::internal)?;
-    let chain = state.chains.shop_chain();
-    let direct_pay = chain.contracts.direct_pay.ok_or_else(|| ApiError::internal("chains.json has no DirectPay"))?;
+    let payment_id = if direct {
+        let chain = state.chains.shop_chain();
+        let direct_pay = chain.contracts.direct_pay.ok_or_else(|| ApiError::internal("chains.json has no DirectPay"))?;
+        Some(payment_id_for(chain.chain_id, direct_pay, order_id, merchant, amount, payer))
+    } else {
+        None
+    };
     Ok(Refundable {
         order_id,
-        payment_id: payment_id_for(chain.chain_id, direct_pay, order_id, merchant, amount, payer),
+        payment_id,
         merchant,
+        customer: payer,
         amount,
         refunded: basis.refunded.parse().map_err(ApiError::internal)?,
     })
@@ -115,11 +133,16 @@ fn refund_amount(text: &str, order: &Refundable) -> Result<Amount, ApiError> {
 /// The note, exactly as signed and as checked.
 fn note_json(state: &AppState, order: &Refundable, amount: Amount, valid_after: i64, valid_before: i64) -> Result<(Value, B256), ApiError> {
     let chain = state.chains.shop_chain();
-    let direct_pay = chain.contracts.direct_pay.ok_or_else(|| ApiError::internal("chains.json has no DirectPay"))?;
     let token = chain.tokens.get("USDT").ok_or_else(|| ApiError::internal("chains.json has no USDT"))?;
-    let nonce = refund_nonce_for(chain.chain_id, direct_pay, order.payment_id, amount, order.refunded);
+    let Some(payment_id) = order.payment_id else {
+        let nonce = transfer_refund_nonce(chain.chain_id, token.address, order.order_id, order.customer, amount, order.refunded);
+        let note = Note { from: order.merchant, to: order.customer, value: amount, valid_after, valid_before, nonce };
+        return Ok((transfer_typed_data(token, chain.chain_id, &note)?, nonce));
+    };
+    let direct_pay = chain.contracts.direct_pay.ok_or_else(|| ApiError::internal("chains.json has no DirectPay"))?;
+    let nonce = refund_nonce_for(chain.chain_id, direct_pay, payment_id, amount, order.refunded);
     let note = Note { from: order.merchant, to: direct_pay, value: amount, valid_after, valid_before, nonce };
-    Ok((direct_pay::typed_data(token, chain.chain_id, &note), nonce))
+    Ok((direct_pay::typed_data(token, chain.chain_id, &note)?, nonce))
 }
 
 #[derive(Debug, Deserialize)]
@@ -187,16 +210,31 @@ pub async fn submit(
     let signature = recover_check(&body.signature, &typed_data, order.merchant)
         .map_err(|_| ApiError::bad_request("bad_signature", "the refund must be signed by the merchant's payout wallet; sign again"))?;
 
-    let job = Job::DirectRefund {
-        order_id: order.order_id,
-        payment_id: order.payment_id,
-        merchant: order.merchant,
-        amount,
-        refunded_before: order.refunded,
-        valid_after: u64::try_from(body.valid_after).map_err(ApiError::internal)?,
-        valid_before: u64::try_from(body.valid_before).map_err(ApiError::internal)?,
-        nonce,
-        signature,
+    let valid_after = u64::try_from(body.valid_after).map_err(ApiError::internal)?;
+    let valid_before = u64::try_from(body.valid_before).map_err(ApiError::internal)?;
+    let job = match order.payment_id {
+        Some(payment_id) => Job::DirectRefund {
+            order_id: order.order_id,
+            payment_id,
+            merchant: order.merchant,
+            amount,
+            refunded_before: order.refunded,
+            valid_after,
+            valid_before,
+            nonce,
+            signature,
+        },
+        None => Job::TransferRefund {
+            order_id: order.order_id,
+            merchant: order.merchant,
+            customer: order.customer,
+            amount,
+            refunded_before: order.refunded,
+            valid_after,
+            valid_before,
+            nonce,
+            signature,
+        },
     };
     let chain_id = i64::try_from(state.chains.shop_chain().chain_id).map_err(ApiError::internal)?;
     let mut tx = state.pool.begin().await?;
@@ -305,14 +343,40 @@ mod tests {
     }
 
     #[sqlx::test]
-    async fn only_a_usdt_payment_can_be_refunded(pool: PgPool) {
+    async fn a_cross_chain_or_split_payment_is_refunded_in_usdt_to_the_customer(pool: PgPool) {
         let app = test_app(pool).await;
-        let (id, _, token) = paid_order(&app).await;
+        let (id, wallet, token) = paid_order(&app).await;
         for path in ["crosschain", "split"] {
             sqlx::query("UPDATE orders SET path = $1").bind(path).execute(&app.pool).await.unwrap();
-            let (status, reply) = post(&app, &format!("/v1/orders/{id}/refund-note"), &token, json!({ "amount": "1" })).await;
-            assert_eq!((status, reply["error"]["code"].as_str()), (StatusCode::CONFLICT, Some("refund_unavailable")), "{path}");
+            sqlx::query("DELETE FROM relayer_jobs").execute(&app.pool).await.unwrap();
+            let (status, note) = post(&app, &format!("/v1/orders/{id}/refund-note"), &token, json!({ "amount": "12" })).await;
+            assert_eq!(status, StatusCode::OK, "{path}: {note}");
+            assert_eq!(note["typedData"]["primaryType"], "TransferWithAuthorization", "{path}");
+            assert_eq!(note["typedData"]["message"]["from"], format!("{:#x}", wallet.address()));
+            assert_eq!(note["typedData"]["message"]["to"], "0xa917000000000000000000000000000000000001");
+
+            let body = json!({
+                "amount": "12",
+                "validAfter": note["validAfter"],
+                "validBefore": note["validBefore"],
+                "signature": sign(&wallet, &note["typedData"]),
+            });
+            let (status, reply) = post(&app, &format!("/v1/orders/{id}/refunds"), &token, body).await;
+            assert_eq!(status, StatusCode::ACCEPTED, "{path}: {reply}");
+            let args: Value =
+                sqlx::query_scalar("SELECT args FROM relayer_jobs WHERE kind = 'transfer_refund'").fetch_one(&app.pool).await.unwrap();
+            assert_eq!(args["customer"], "0xa917000000000000000000000000000000000001", "{path}");
+            assert_eq!(args["amount"], "12000000", "{path}");
         }
+    }
+
+    #[sqlx::test]
+    async fn an_unpaid_path_cannot_be_refunded(pool: PgPool) {
+        let app = test_app(pool).await;
+        let (id, _, token) = paid_order(&app).await;
+        sqlx::query("UPDATE orders SET path = NULL").execute(&app.pool).await.unwrap();
+        let (status, reply) = post(&app, &format!("/v1/orders/{id}/refund-note"), &token, json!({ "amount": "1" })).await;
+        assert_eq!((status, reply["error"]["code"].as_str()), (StatusCode::CONFLICT, Some("refund_unavailable")));
     }
 
     #[sqlx::test]
