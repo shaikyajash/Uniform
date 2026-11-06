@@ -180,34 +180,48 @@ Rules for the Matchmaker and Gas Payer (from the security review):
 - For A6 (multi-token): the lock holds the token the customer paid with and never swaps. Each lock stores `{token, amount}`; allowed tokens are USDC and EURC (EIP-3009) and ETH (`lockWithETH`, payable). `claim` gives the receiver the raw token; `claimAndSwap(lockId, secret, swapData, minOut)` is callable only by the receiver and swaps to USDC on Uniswap with the receiver's own route and minimum; `refund` returns the exact token and amount. The relayer never chooses a swap route.
 - Before filling an EURC or ETH lock, the Matchmaker checks that the live Uniswap price still covers the order (the quote includes a small buffer); if not, it does not fill and the customer is refunded in the same token.
 
-### PayoutPool (Whitechain, AquaApp)
+### PayoutPool (Whitechain, AquaApp) — built
 
 ```solidity
-struct Strategy { address maker; address token; uint16 feeBps; uint128 maxPerOrder;
-                  address filler; bytes32 salt; }
-function fill(Strategy s, bytes32 orderId, address merchant, uint256 amount, bytes32 hashlock,
-              uint64 expiry, uint256 srcChainId, bytes32 srcLockId) external returns (bytes32 destinationLockId);
-// only s.filler, amount <= s.maxPerOrder,
-// AQUA.pull(s.maker, keccak256(abi.encode(s)), USDT, amount, destinationLock), then destinationLock.openFromPool(...)
-event Filled(bytes32 indexed orderId, address indexed maker, uint256 amount, bytes32 destinationLockId);
+struct Strategy { address maker; address token; address filler; uint128 maxPerOrder;
+                  uint16 feeBps; bytes32 salt; }
+// Bob ships it: Aqua.ship(payoutPool, abi.encode(strategy), [USDT], [allowance]);
+// strategyHash = keccak256(abi.encode(strategy)). feeBps is read off-chain when quoting.
+struct Fill { bytes32 orderId; address merchant; uint256 amount; bytes32 hashlock;
+              uint64 expiry; uint256 srcChainId; bytes32 srcLockId; }
+function fill(Strategy s, Fill f) external returns (bytes32 lockId);
+// only s.filler, s.token == USDT, amount <= s.maxPerOrder;
+// opens the DestinationLock, then AQUA.pull(maker, strategyHash, USDT, amount, destinationLock)
+function strategyHashOf(Strategy s) pure returns (bytes32);
+function destinationLock() view returns (DestinationLock);   // deployed by the pool's constructor
+event Filled(bytes32 indexed orderId, address indexed maker, bytes32 indexed strategyHash,
+             uint256 amount, bytes32 lockId);
 ```
 
-### DestinationLock (Whitechain)
+### DestinationLock (Whitechain) — built (payout direction; `openRefund` comes in A9)
 
 ```solidity
-function openFromPool(...) external;           // only PayoutPool
-function claim(bytes32 lockId, bytes32 secret) external;
-// destination redeem: payout lock pays USDT to merchant, emits Settled (onchain receipt)
-// refund lock: aqua.push(maker, payoutPool, strategyHash, USDT, amount) back to the provider
-function refund(bytes32 lockId) external;       // after expiry
-function openRefund(bytes32 orderId, address merchant, uint256 amount, bytes32 hashlock, uint64 expiry,
-        address maker, bytes32 strategyHash, uint256 validAfter, uint256 validBefore,
-        uint8 v, bytes32 r, bytes32 s) external;
-event Settled(bytes32 indexed orderId, address merchant, uint256 amount, uint256 srcChainId, bytes32 srcLockId);
-event RefundLocked(bytes32 indexed orderId, bytes32 lockId, uint256 amount);
+function lockIdFor(uint256 srcChainId, bytes32 srcLockId, address maker) view returns (bytes32);
+function open(OpenParams p) external returns (bytes32 lockId);   // only the PayoutPool
+function claim(bytes32 lockId, bytes32 secret) external;         // destination redeem: USDT to merchant
+function refund(bytes32 lockId) external;                         // at or after expiry, anyone:
+// aqua.push back into Bob's strategy (allowance restored); if that reverts (docked), plain transfer to Bob
+event Opened(bytes32 indexed lockId, bytes32 indexed orderId, address indexed merchant, address maker,
+             uint256 amount, bytes32 hashlock, uint64 expiry, uint256 srcChainId, bytes32 srcLockId,
+             bytes32 strategyHash);
+event Settled(bytes32 indexed lockId, bytes32 indexed orderId, address indexed merchant, uint256 amount,
+              uint256 srcChainId, bytes32 srcLockId, bytes32 secret);   // the receipt; reveals the secret
+event Refunded(bytes32 indexed lockId, address indexed maker, uint256 amount, bool backToAqua);
 ```
 
-If the provider has docked the strategy, `aqua.push` reverts and DestinationLock falls back to a plain transfer.
+Contract limits: lock time 5 min to 2 h · amount above zero, at most `maxPerOrder` and uint96 · merchant is not zero, the lock, the pool or USDT · hashlock not zero · each (source lock, maker) filled once.
+
+Rules from the security review:
+- **Watchers trust only our contracts and exact ids.** Accept events only from `payoutPool.destinationLock()`, and only the lock id recomputed with `lockIdFor(srcChainId, srcLockId, Bob)`. Anyone can ship a strategy and open locks of their own.
+- **Before revealing the secret** (Pay Button, B5): read `locks(lockId)` and check maker = the source lock's receiver, merchant, amount at least the order amount, hashlock, and an expiry earlier than the source lock's with time to spare.
+- **Before sending a claim** (Gas Payer): keep a margin of at least 2 minutes before `expiry`, simulate with `eth_call`, and check Tether's `isBlocked(destinationLock)`. A claim that reverts still exposes the secret in its calldata, so Bob could redeem the source lock while also being refunded here.
+- Tether's blocklist checks the sender, not the recipient. A blocked merchant is still paid (the funds are frozen in its wallet), so checking `isBlocked(merchant)` before quoting is a courtesy, not a safety rule.
+- **The filler key can spend Bob's whole shipped allowance** (it chooses the merchant and hashlock). Ship a small allowance, refill it as needed, and `dock` the strategy to stop everything at once.
 
 ## Order Desk API (owner B)
 
