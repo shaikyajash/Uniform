@@ -5,8 +5,12 @@ import { HeroCanvas } from "./_home/hero-canvas";
 import { LiveLog } from "./_home/live-log";
 import styles from "./_home/home.module.css";
 
-/** What Uniform runs on today, as plain wordmarks. */
-const WORDMARKS = ["USDT", "USDC", "Whitechain", "Base", "1inch Aqua"];
+/** Partners, Whitechain first. */
+const PARTNERS: { alt: string; src: string; label?: string; height: number }[] = [
+  { alt: "Whitechain", src: "/logos/whitechain.svg", height: 26 },
+  { alt: "1inch", src: "/logos/1inch.svg", height: 16 },
+  { alt: "Uniswap", src: "/logos/uniswap.svg", label: "Uniswap", height: 34 },
+];
 
 export default function Home() {
   return (
@@ -33,8 +37,8 @@ function Hero() {
           <span className={styles.fade}>Meet Uniform.</span>
         </h1>
         <p className={styles.heroLede}>
-          <span className={styles.line}>Let your users pay with whatever they have</span>{" "}
-          <span className={styles.line}>You receive USDT on Whitechain.</span>
+          <span className={styles.line}>Let your users pay with what they want and get paid in what you want.</span>{" "}
+          <span className={styles.line}>Powered by trustless atomic swaps. You Trust no one.</span>
         </p>
         <div id={HERO_CTA_ID} className={styles.heroActions}>
           <SolidButton href="/demo">Try the demo store</SolidButton>
@@ -43,14 +47,14 @@ function Hero() {
           </StarButton>
         </div>
       </div>
-      <div className={styles.marquee} aria-label="Works with">
-        <div className={styles.marqueeTrack}>
-          {[...WORDMARKS, ...WORDMARKS, ...WORDMARKS, ...WORDMARKS].map((name, i) => (
-            <span key={i} aria-hidden={i >= WORDMARKS.length}>
-              {name}
-            </span>
-          ))}
-        </div>
+      <div className={styles.partners} aria-label="Partners">
+        {PARTNERS.map((partner) => (
+          <span key={partner.alt} className={styles.partner}>
+            {/* eslint-disable-next-line @next/next/no-img-element */}
+            <img src={partner.src} alt={partner.alt} className={styles.partnerLogo} style={{ height: partner.height }} />
+            {partner.label ? <span className={styles.partnerName}>{partner.label}</span> : null}
+          </span>
+        ))}
       </div>
     </section>
   );
@@ -66,40 +70,39 @@ function Features() {
     <section id="features" className={styles.features}>
       <div className={styles.sectionHead}>
         <h2 className={styles.sectionTitle}>
-          Built for stablecoins.
+          Stablecoin checkout.
           <span className={styles.dim}>Settled on Whitechain.</span>
         </h2>
         <p className={styles.sectionLede}>
-          Customers pay with USDT on Whitechain or USDC on Base. The merchant receives USDT on Whitechain, and the customer
-          pays no gas.
+          Customers pay in USDT or USDC. Merchants receive USDT on Whitechain. Customers pay no gas.
         </p>
       </div>
 
       <div className={styles.grid}>
         <Block
-          title="Cross-chain in one tap"
-          text="The customer locks on their chain, a liquidity provider pays the merchant on Whitechain, and one secret settles both."
+          title="Pay from another chain"
+          text="Customers lock USDC on Base. A liquidity provider pays the merchant on Whitechain. One secret settles both."
         >
           <PipelineMock />
         </Block>
         <Block
           id="paths"
           title="Pay with what you hold"
-          text="USDT on Whitechain directly, or USDC from Base through a liquidity provider. EURC and ETH are next."
+          text="USDT on Whitechain, or USDC from Base. EURC and ETH are next."
         >
           <PathsMock />
         </Block>
         <Block
           id="guardrails"
-          title="Built-in guardrails"
-          text="Gas budgets, order caps and a dry run before every send keep the Relayer bounded and safe."
+          title="Guardrails"
+          text="Daily gas limits, order caps, and a dry run before each send."
         >
           <GuardrailsMock />
         </Block>
         <Block
           id="checkout"
-          title="Checkout with an email"
-          text="The customer logs in with an email and gets a wallet. They sign once, and Uniform pays the gas."
+          title="Email checkout"
+          text="Customers log in with an email. No wallet setup, no gas, one signature."
         >
           <CheckoutMock />
         </Block>
@@ -127,7 +130,7 @@ function PipelineMock() {
     <div className={styles.panel}>
       <div className={styles.panelBar}>
         <span>
-          <i className={styles.liveDot} /> CROSS-CHAIN PAYMENT · EXAMPLE
+          CROSS-CHAIN PAYMENT · EXAMPLE
         </span>
         <span className={styles.faint}>Base → Whitechain</span>
       </div>
@@ -315,7 +318,8 @@ function Footer() {
       <HalftoneWordmarkFooter
         wordmark="uniform"
         label="Uniform"
-        meta="© 2026 · Built at ETHGlobal Mumbai"
+        meta="Stablecoin checkout for Whitechain."
+        footnote="© 2026 · Built at ETHGlobal Mumbai"
         columns={FOOTER_COLUMNS}
         fill={0.94}
         palette={{ background: "#050506", ink: "#f2f2f3", warm: "#5a8cff" }}

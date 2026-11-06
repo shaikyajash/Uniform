@@ -101,30 +101,48 @@
   }
 }
 
-.marquee {
+/* Partner logos along the bottom of the hero: grey, so they sit quietly under the headline. */
+.partners {
   position: absolute;
   left: var(--gutter);
   right: var(--gutter);
   bottom: 28px;
-  overflow: hidden;
-  -webkit-mask-image: linear-gradient(90deg, transparent, #000 12%, #000 88%, transparent);
-  mask-image: linear-gradient(90deg, transparent, #000 12%, #000 88%, transparent);
-}
-
-.marqueeTrack {
   display: flex;
-  gap: 72px;
-  width: max-content;
-  animation: slide 40s linear infinite;
-  font-size: 22px;
-  font-weight: 200;
-  letter-spacing: 0;
-  color: rgba(255, 255, 255, 0.55);
+  align-items: center;
+  justify-content: center;
+  gap: clamp(40px, 6vw, 96px);
 }
 
-@keyframes slide {
-  to {
-    transform: translateX(calc(-50% - 36px));
+.partner {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.partnerLogo {
+  display: block;
+  height: 28px;
+  width: auto;
+  opacity: 0.75;
+  filter: grayscale(1) brightness(1.4);
+}
+
+.partnerName {
+  font-family: var(--font-geist-mono), ui-monospace, monospace;
+  font-size: 12px;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: rgba(255, 255, 255, 0.6);
+  white-space: nowrap;
+}
+
+@media (max-width: 720px) {
+  .partners {
+    gap: 32px;
+  }
+
+  .partnerLogo {
+    height: 22px;
   }
 }
 
@@ -700,7 +718,6 @@
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .marqueeTrack,
   .bar,
   .dots i,
   .heroTitle,

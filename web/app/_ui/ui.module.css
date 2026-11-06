@@ -44,7 +44,8 @@
   top: 12px;
   left: 0;
   right: 0;
-  z-index: 50;
+  /* Above everything on the page, guide lines included; Privy's own windows still sit above it. */
+  z-index: 9999;
 }
 
 .headerBox {
@@ -55,6 +56,8 @@
   display: flex;
   align-items: center;
   justify-content: space-between;
+  /* A matte strip: a soft dark tint over the page scrolling under it. */
+  background: rgba(16, 16, 18, 0.5);
 }
 
 /* The nav's right side. "How it works" comes first: while it waits for the hero's button to
