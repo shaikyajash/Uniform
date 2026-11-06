@@ -88,7 +88,10 @@ pub async fn quote(
     .ok_or_else(|| ApiError::not_found("order"))?;
 
     let status: OrderStatus = order.status.parse().map_err(ApiError::internal)?;
-    if !status.can_move(OrderStatus::Quoted) {
+    if status == OrderStatus::Paying {
+        return Err(ApiError::conflict("already_submitted", "a payment for this order is being sent"));
+    }
+    if !can_quote(status) {
         return Err(ApiError::conflict("order_not_payable", format!("order is {status}")));
     }
     let now = now();
@@ -117,11 +120,11 @@ pub async fn quote(
     let timeout = i64::try_from(state.chains.timeouts_seconds.quote).map_err(ApiError::internal)?;
     let expires_at = (now + timeout).min(order.expires_at);
 
-    // Only from a status that may move to `quoted`, checked again inside the update so two quotes
-    // racing on one order cannot both pass.
+    // Only from a status that may be quoted, checked again inside the update so two quotes racing
+    // on one order cannot both pass, and a quote cannot slip in while a payment is being sent.
     let from_statuses: Vec<&str> = OrderStatus::ALL
         .iter()
-        .filter(|status| status.can_move(OrderStatus::Quoted))
+        .filter(|status| can_quote(**status))
         .map(|status| status.as_str())
         .collect();
     let mut tx = state.pool.begin().await?;
@@ -163,6 +166,12 @@ pub async fn quote(
         to_sign: vec![ToSign { chain_id: chain.chain_id, token: USDT, amount: total.clone(), typed_data }],
         total,
     }))
+}
+
+/// `paying -> quoted` is allowed, but only for the Relayer when a payment fails. A new quote while
+/// a payment is being sent would let a second payer sign for the same order.
+fn can_quote(status: OrderStatus) -> bool {
+    status != OrderStatus::Paying && status.can_move(OrderStatus::Quoted)
 }
 
 #[cfg(test)]

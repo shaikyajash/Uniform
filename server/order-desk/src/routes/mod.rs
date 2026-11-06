@@ -1,5 +1,6 @@
 //! The HTTP API: shared state and the route table.
 
+pub mod direct;
 pub mod events;
 pub mod orders;
 pub mod quote;
@@ -39,6 +40,7 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/orders", post(orders::create))
         .route("/v1/orders/{id}", get(orders::read))
         .route("/v1/orders/{id}/quote", post(quote::quote))
+        .route("/v1/orders/{id}/direct", post(direct::direct))
         .route("/internal/events", post(events::report))
         .with_state(state)
 }
