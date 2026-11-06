@@ -608,3 +608,44 @@ async fn a_refund_never_runs_out_so_a_slow_one_keeps_waiting(pool: PgPool) {
     assert_eq!(outcome(&pool, &chain, NOW + 86_400 + RECEIPT_POLL_SECONDS).await, Some(Outcome::Confirmed(hash)));
     assert_eq!(statuses(&pool, job).await, ("confirmed".into(), "source_locked".into()));
 }
+
+#[sqlx::test(migrations = "../order-desk/migrations")]
+async fn a_refund_is_sent_even_when_the_shop_has_spent_its_gas_budget(pool: PgPool) {
+    let job = add_order_and_job(&pool, 1, AMOUNT, "source_locked", &Job::SourceRefund { lock_id: note(1) }).await;
+    sqlx::query("INSERT INTO gas_budget (merchant_id, chain_id, day, spent) SELECT id, $1, $2, $3::numeric FROM merchants")
+        .bind(i64::try_from(CHAIN_ID).unwrap())
+        .bind(i64::try_from(NOW / 86_400).unwrap())
+        .bind(limits().daily_gas_wei.to_string())
+        .execute(&pool)
+        .await
+        .unwrap();
+    let chain = FakeChain::new();
+    let hash = sent(&pool, &chain, NOW).await;
+    chain.mine(hash, false);
+    assert_eq!(outcome(&pool, &chain, NOW + RECEIPT_POLL_SECONDS).await, Some(Outcome::Confirmed(hash)));
+    assert_eq!(statuses(&pool, job).await.0, "confirmed");
+}
+
+#[sqlx::test(migrations = "../order-desk/migrations")]
+async fn a_claim_is_sent_even_when_the_shop_has_spent_its_gas_budget(pool: PgPool) {
+    let claim = Job::DestinationClaim {
+        lock_id: note(1),
+        secret: B256::repeat_byte(7),
+        merchant: SHOP,
+        min_amount: Amount::from(AMOUNT),
+        deadline: NOW + 1_200,
+    };
+    let job = add_order_and_job(&pool, 1, AMOUNT, "destination_locked", &claim).await;
+    sqlx::query("INSERT INTO gas_budget (merchant_id, chain_id, day, spent) SELECT id, $1, $2, $3::numeric FROM merchants")
+        .bind(i64::try_from(CHAIN_ID).unwrap())
+        .bind(i64::try_from(NOW / 86_400).unwrap())
+        .bind(limits().daily_gas_wei.to_string())
+        .execute(&pool)
+        .await
+        .unwrap();
+    let chain = FakeChain::new();
+    let hash = sent(&pool, &chain, NOW).await;
+    chain.mine(hash, false);
+    assert_eq!(outcome(&pool, &chain, NOW + RECEIPT_POLL_SECONDS).await, Some(Outcome::Confirmed(hash)));
+    assert_eq!(statuses(&pool, job).await.0, "confirmed");
+}

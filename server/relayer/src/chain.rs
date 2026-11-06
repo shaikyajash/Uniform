@@ -249,6 +249,13 @@ impl Call {
         }
     }
 
+    /// Whether the shop's daily gas budget can stop this call. It can stop only a call that starts
+    /// a payment, while the customer's money is still in their wallet. A claim or a refund finishes
+    /// money already locked, so it is sent even when the shop has spent its budget.
+    pub fn uses_shop_budget(&self) -> bool {
+        matches!(self, Call::DirectPay(_) | Call::SourceLock(_))
+    }
+
     /// The amount checked against the Relayer's order limit, in 6-decimal units. A lock carries
     /// Bob's fee on top of the order, so it is allowed 1% more.
     pub fn amount_for_limit(&self) -> Option<U256> {
