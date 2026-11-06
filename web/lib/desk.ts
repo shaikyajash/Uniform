@@ -33,7 +33,29 @@ export type Order = {
   createdAt: number;
   expiresAt: number;
   paidAt: number | null;
+  /** The customer's payment (Path A) or lock (cross-chain), as the Relayer sends it. */
   payment: Payment | null;
+  /** Cross-chain: keccak256 of the customer's secret. */
+  hashlock: string | null;
+  /** Cross-chain: the customer's locks. `lockId` is the only id to trust. */
+  legs: Leg[];
+  /** Cross-chain: Bob's lock for the shop, once filled. */
+  destinationLockId: string | null;
+  /** Cross-chain: the Relayer claiming the shop's lock with the secret. */
+  claim: Payment | null;
+};
+
+export type Leg = {
+  chainId: number;
+  token: string;
+  /** Base units (6 decimals). */
+  amount: string;
+  lockId: string;
+  expiry: number;
+  status: "pending" | "locked" | "claimed" | "returned";
+  lockTx: string | null;
+  claimTx: string | null;
+  refundTx: string | null;
 };
 
 export type TypedData = {
@@ -45,11 +67,11 @@ export type TypedData = {
 
 export type Quote = {
   quoteId: string;
-  path: "direct";
+  path: "direct" | "crosschain";
   expiresAt: number;
   total: string;
   fee: string;
-  toSign: { chainId: number; token: string; amount: string; typedData: TypedData }[];
+  toSign: { chainId: number; token: string; amount: string; typedData: TypedData; lockId?: string }[];
 };
 
 /** An error the Order Desk answered with: `{ error: { code, message } }`. */
@@ -78,8 +100,21 @@ async function call<T>(path: string, init?: RequestInit): Promise<T> {
 
 export const getOrder = (orderId: string) => call<Order>(`/orders/${orderId}`);
 
-export const getQuote = (orderId: string, payer: string) =>
-  call<Quote>(`/orders/${orderId}/quote`, { method: "POST", body: JSON.stringify({ payer }) });
+/** Path A without `crosschain`; with it, a USDC note on that chain under the hashlock. */
+export const getQuote = (orderId: string, payer: string, crosschain?: { hashlock: string; chainId: number }) =>
+  call<Quote>(`/orders/${orderId}/quote`, { method: "POST", body: JSON.stringify({ payer, ...crosschain }) });
+
+export const submitLegs = (orderId: string, quoteId: string, signature: string) =>
+  call<{ status: OrderStatus; jobId: number; lockId: string }>(`/orders/${orderId}/legs`, {
+    method: "POST",
+    body: JSON.stringify({ quoteId, signature }),
+  });
+
+export const revealSecret = (orderId: string, secret: string) =>
+  call<{ status: OrderStatus; jobId: number }>(`/orders/${orderId}/secret`, {
+    method: "POST",
+    body: JSON.stringify({ secret }),
+  });
 
 export const submitDirect = (orderId: string, quoteId: string, signature: string) =>
   call<{ status: OrderStatus; jobId: number }>(`/orders/${orderId}/direct`, {
@@ -103,6 +138,10 @@ export function explain(error: unknown): string {
         return "The signature didn't match. Tap Pay to try again.";
       case "not_found":
         return "We couldn't find this order. Check the link.";
+      case "crosschain_unavailable":
+        return "Paying from another chain isn't available right now. Pay with USDT on Whitechain instead.";
+      case "wrong_secret":
+        return "That key doesn't match this payment. Sign again with the same wallet.";
       default:
         return error.message;
     }
