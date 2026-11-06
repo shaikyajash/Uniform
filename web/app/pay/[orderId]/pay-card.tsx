@@ -39,6 +39,7 @@ import {
 } from "@/lib/desk";
 import { secretFromSignature, secretTypedData } from "@/lib/secret";
 import { useEmbedded } from "@/app/_ui/embedded";
+import { EmailLogin } from "./email-login";
 import { Badge } from "@/components/ui/badge";
 import { CardContent, CardHeader } from "@/components/ui/card";
 import { Separator } from "@/components/ui/separator";
@@ -85,8 +86,8 @@ type Balances = { owner: Address; units: Record<string, bigint | null> };
 
 export function PayCard({ orderId }: { orderId: string }) {
   const embedded = useEmbedded();
-  const { ready, authenticated, login, logout } = usePrivy();
-  const { wallets } = useWallets();
+  const { ready, authenticated, login, logout, user } = usePrivy();
+  const { wallets, ready: walletsReady } = useWallets();
   const { signTypedData } = useSignTypedData();
 
   const [order, setOrder] = useState<Order | null>(null);
@@ -210,6 +211,8 @@ export function PayCard({ orderId }: { orderId: string }) {
     const { signature } = await signTypedData(secretTypedData(order.orderId as Hex, units), {
       address,
       uiOptions: {
+        // In the widget's card our own button is the confirmation: no Privy window over the card.
+        showWalletUIs: !embedded,
         title: "Confirm this payment",
         description: "This signature makes a one-time key for this payment. It moves no money and costs nothing.",
         buttonText: "Confirm",
@@ -218,7 +221,7 @@ export function PayCard({ orderId }: { orderId: string }) {
     const made = { orderId: order.orderId, ...secretFromSignature(signature as Hex) };
     setKey(made);
     return made;
-  }, [address, units, order, signTypedData]);
+  }, [address, units, order, signTypedData, embedded]);
 
   // Cross-chain: once the provider has locked USDT for the shop, check that lock on chain and
   // hand over the key. Runs again on every poll until the claim is under way.
@@ -256,7 +259,7 @@ export function PayCard({ orderId }: { orderId: string }) {
   async function signNote(typedData: TypedData, title: string, description: string): Promise<string> {
     if (!address) throw new Error("no wallet");
     const data = { ...typedData, domain: { ...typedData.domain, chainId: Number(typedData.domain.chainId) } };
-    const options = { address, uiOptions: { title, description, buttonText: "Sign and pay" } };
+    const options = { address, uiOptions: { showWalletUIs: !embedded, title, description, buttonText: "Sign and pay" } };
     try {
       return (await signTypedData(data, options)).signature;
     } catch (problem) {
@@ -382,7 +385,7 @@ export function PayCard({ orderId }: { orderId: string }) {
       <Swap id="order">
         <div className="flex flex-col gap-5 embedded:gap-4">
           {embedded ? (
-            <CompactSummary shop={order.shop.name} reference={order.reference} amount={amount} />
+            <CompactSummary shop={order.shop.name} reference={order.reference} amount={amount} secondsLeft={secondsLeft} />
           ) : (
             <CardHeader className="gap-4">
               <div className="flex justify-between gap-3 font-mono text-[10.5px] tracking-[0.08em] text-label">
@@ -441,14 +444,15 @@ export function PayCard({ orderId }: { orderId: string }) {
                   <Notice>The time to pay this order has run out. Ask the shop for a new link.</Notice>
                 )}
                 {view === "starting" && <PrimaryButton disabled>Loading…</PrimaryButton>}
-                {view === "log-in" && (
+                {view === "log-in" && embedded && <EmailLogin />}
+                {view === "log-in" && !embedded && (
                   <>
                     <PrimaryButton onClick={login}>Log in with email to pay</PrimaryButton>
                     <FinePrint>We create a wallet for you. Nothing to install.</FinePrint>
                   </>
                 )}
                 {view === "creating-wallet" && (
-                  <p className="text-[14.5px] leading-[1.7] text-muted-foreground">Creating your wallet…</p>
+                  <WalletWait accountWallet={user?.wallet?.address ?? null} walletsReady={walletsReady} embedded={embedded} />
                 )}
                 {view === "pay" && address && (
                   <>
@@ -566,7 +570,18 @@ function Returned({ order }: { order: Order }) {
 }
 
 /** The widget card's header and body: shop and order, the amount, and what the customer should know. */
-function CompactSummary({ shop, reference, amount }: { shop: string; reference: string; amount: string }) {
+function CompactSummary({
+  shop,
+  reference,
+  amount,
+  secondsLeft,
+}: {
+  shop: string;
+  reference: string;
+  amount: string;
+  secondsLeft: number;
+}) {
+  const payWith = customerChains.length > 0 ? "USDT or USDC" : "USDT";
   return (
     <div className="grid gap-4 px-(--card-spacing)">
       <div className="flex items-baseline justify-between gap-3">
@@ -579,14 +594,68 @@ function CompactSummary({ shop, reference, amount }: { shop: string; reference: 
       </p>
       <dl className="grid gap-2 text-[12.5px]">
         <div className="flex justify-between gap-3">
-          <dt className="text-muted-foreground">Shop is paid on</dt>
-          <dd>Whitechain</dd>
+          <dt className="text-muted-foreground">Pay with</dt>
+          <dd>{payWith}</dd>
         </div>
         <div className="flex justify-between gap-3">
           <dt className="text-muted-foreground">Network fee</dt>
           <dd>None, we cover it</dd>
         </div>
+        <div className="flex justify-between gap-3">
+          <dt className="text-muted-foreground">Time to pay</dt>
+          <dd className="tabular-nums">{secondsLeft > 0 ? formatCountdown(secondsLeft) : "Expired"}</dd>
+        </div>
       </dl>
+    </div>
+  );
+}
+
+/** How long the wallet may take before the page says what is missing and offers a way out. */
+const WALLET_WAIT_MS = 8000;
+
+/**
+ * After login, until Privy hands us the customer's wallet. Says "creating" only when the account
+ * has no wallet yet; if it takes too long, shows what is missing and offers to retry or, inside
+ * the widget's card, to open the pay page in its own tab.
+ */
+function WalletWait({
+  accountWallet,
+  walletsReady,
+  embedded,
+}: {
+  accountWallet: string | null;
+  walletsReady: boolean;
+  embedded: boolean;
+}) {
+  const [slow, setSlow] = useState(false);
+  useEffect(() => {
+    const timer = setTimeout(() => setSlow(true), WALLET_WAIT_MS);
+    return () => clearTimeout(timer);
+  }, []);
+
+  const text = accountWallet ? "Opening your wallet…" : "Creating your wallet…";
+  if (!slow) {
+    return (
+      <p className="flex items-center gap-2 text-[14.5px] leading-[1.7] text-muted-foreground embedded:text-[13px]">
+        <Loader2 className="size-3.5 animate-spin" /> {text}
+      </p>
+    );
+  }
+  return (
+    <div className="grid gap-3">
+      <Notice>
+        Your wallet is taking longer than it should.{" "}
+        {accountWallet
+          ? `Your account has wallet ${shortAddress(accountWallet as Address)}, but it hasn't opened in this ${embedded ? "window" : "page"} yet.`
+          : "Your account has no wallet yet, and creating one hasn't finished."}{" "}
+        {walletsReady ? "" : "The wallet service is still loading."}
+      </Notice>
+      <PrimaryButton onClick={() => window.location.reload()}>Try again</PrimaryButton>
+      {embedded && (
+        <TextButton onClick={() => window.open(window.location.href, "_blank", "noopener")}>
+          Open in a new tab instead
+        </TextButton>
+      )}
     </div>
   );
 }
