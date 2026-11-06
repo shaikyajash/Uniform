@@ -13,7 +13,7 @@ mod routes;
 
 use std::{env, sync::Arc};
 
-use common::chains::Chains;
+use common::{amount::Amount, chains::Chains};
 use sqlx::PgPool;
 
 const DEFAULT_PORT: u16 = 4000;
@@ -21,6 +21,9 @@ const DEFAULT_PAY_BASE_URL: &str = "http://localhost:3000";
 /// Relative to `server/`, where `cargo run` starts.
 const DEFAULT_CHAINS_JSON: &str = "../shared/chains.json";
 const MIN_INTERNAL_TOKEN_LENGTH: usize = 32;
+/// The same setting and default as the Relayer's: it will not pay gas for a larger order.
+const DEFAULT_MAX_ORDER_USDT: &str = "100";
+const USDT_DECIMALS: u8 = 6;
 
 #[tokio::main]
 async fn main() {
@@ -57,7 +60,16 @@ async fn serve(pool: PgPool) -> Result<(), String> {
              (the Matchmaker sends it), e.g. openssl rand -hex 32"
         ));
     }
-    let app = routes::router(routes::AppState { pool, chains: Arc::new(chains), pay_base_url, internal_token });
+    let max_order_text = env::var("RELAYER_MAX_ORDER_USDT").unwrap_or_else(|_| DEFAULT_MAX_ORDER_USDT.to_owned());
+    let max_order = Amount::from_decimal(&max_order_text, USDT_DECIMALS)
+        .map_err(|_| format!("RELAYER_MAX_ORDER_USDT must be a number of USDT, got {max_order_text:?}"))?;
+    let app = routes::router(routes::AppState {
+        pool,
+        chains: Arc::new(chains),
+        pay_base_url,
+        internal_token,
+        max_order,
+    });
     // 0.0.0.0, not 127.0.0.1: a host like Railway reaches the server from outside the container.
     let listener = tokio::net::TcpListener::bind(("0.0.0.0", port))
         .await
