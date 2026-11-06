@@ -23,7 +23,12 @@ pub struct Prices {
 
 impl Prices {
     pub fn coingecko() -> Prices {
-        let http = reqwest::Client::builder().timeout(Duration::from_secs(8)).build().expect("http client");
+        // CoinGecko refuses requests without a User-Agent.
+        let http = reqwest::Client::builder()
+            .user_agent(concat!("uniform-order-desk/", env!("CARGO_PKG_VERSION")))
+            .timeout(Duration::from_secs(8))
+            .build()
+            .expect("http client");
         Prices { http: Some(http), fixed: HashMap::new(), cache: Mutex::new(HashMap::new()) }
     }
 
