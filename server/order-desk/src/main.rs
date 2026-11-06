@@ -1,5 +1,6 @@
 //! Order Desk: the API and database. Built in B1.
 
+mod auth;
 mod db;
 mod error;
 

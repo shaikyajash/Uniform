@@ -3881,6 +3881,7 @@ dependencies = [
  "alloy",
  "axum",
  "common",
+ "getrandom 0.4.3",
  "serde",
  "serde_json",
  "sha2 0.11.1",
