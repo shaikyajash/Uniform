@@ -297,4 +297,34 @@ mod tests {
         let (status, reply) = call(&test.app, submit(&id, &quote, &signature)).await;
         assert_eq!((status, reply["error"]["code"].as_str()), (StatusCode::CONFLICT, Some("already_submitted")));
     }
+
+    #[sqlx::test]
+    async fn the_order_shows_its_payment_as_the_relayer_works(pool: PgPool) {
+        let test = test_app(pool).await;
+        let alice = PrivateKeySigner::random();
+        let (id, quote) = quoted(&test, &alice).await;
+        let read = || Request::get(format!("/v1/orders/{id}")).body(Body::empty()).unwrap();
+        assert_eq!(call(&test.app, read()).await.1["payment"], Value::Null);
+
+        call(&test.app, submit(&id, &quote, &sign(&alice, &quote))).await;
+        let payment = call(&test.app, read()).await.1["payment"].clone();
+        assert_eq!(payment, json!({ "status": "pending", "txHash": null, "explorerUrl": null, "failedReason": null }));
+
+        let hash = format!("0x{}", "ab".repeat(32));
+        sqlx::query("UPDATE relayer_jobs SET status = 'sent', tx_hash = $1, raw_tx = '\\x02'")
+            .bind(&hash)
+            .execute(&test.pool)
+            .await
+            .unwrap();
+        let payment = call(&test.app, read()).await.1["payment"].clone();
+        assert_eq!(payment["txHash"], hash.as_str());
+        assert_eq!(payment["explorerUrl"], format!("https://explorer.testnet.whitechain.io/tx/{hash}"));
+
+        sqlx::query("UPDATE relayer_jobs SET status = 'failed', last_error = 'the payer does not have enough USDT'")
+            .execute(&test.pool)
+            .await
+            .unwrap();
+        let payment = call(&test.app, read()).await.1["payment"].clone();
+        assert_eq!(payment["failedReason"], "the payer does not have enough USDT");
+    }
 }

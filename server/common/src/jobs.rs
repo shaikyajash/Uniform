@@ -6,7 +6,7 @@
 use alloy::primitives::{Address, B256, Bytes};
 use serde::{Deserialize, Serialize};
 
-use crate::amount::Amount;
+use crate::{amount::Amount, status::UnknownValue};
 
 /// What to send. Stored as JSON in `relayer_jobs.args`; `kind` is also its own column.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -71,11 +71,27 @@ impl JobStatus {
     }
 }
 
+impl std::str::FromStr for JobStatus {
+    type Err = UnknownValue;
+
+    fn from_str(text: &str) -> Result<JobStatus, UnknownValue> {
+        JobStatus::ALL.into_iter().find(|status| status.as_str() == text).ok_or_else(|| UnknownValue(text.to_owned()))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use alloy::primitives::address;
     use serde_json::json;
+
+    #[test]
+    fn job_statuses_read_back_from_their_text() {
+        for status in JobStatus::ALL {
+            assert_eq!(status.as_str().parse::<JobStatus>(), Ok(status));
+        }
+        assert!("lost".parse::<JobStatus>().is_err());
+    }
 
     fn direct_pay() -> Job {
         Job::DirectPay {

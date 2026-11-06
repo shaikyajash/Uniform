@@ -8,6 +8,7 @@ use axum::{
 };
 use common::{
     amount::Amount,
+    jobs::JobStatus,
     status::{OrderStatus, PayPath},
 };
 use serde::{Deserialize, Serialize};
@@ -110,6 +111,29 @@ pub struct OrderView {
     created_at: i64,
     expires_at: i64,
     paid_at: Option<i64>,
+    /// The Relayer's latest attempt to send this order's payment, if any.
+    payment: Option<PaymentView>,
+}
+
+/// What the pay page shows while the Relayer works: `pending -> sending -> sent -> confirmed`, or
+/// `failed`. `confirmed` means the transaction succeeded on chain; the order itself becomes `paid`
+/// when the `Paid` event is reported.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PaymentView {
+    status: JobStatus,
+    /// Only once a node has the transaction (`sent` and later).
+    tx_hash: Option<String>,
+    explorer_url: Option<String>,
+    /// Only when `failed`: why, in words the customer can act on.
+    failed_reason: Option<String>,
+}
+
+#[derive(sqlx::FromRow)]
+struct PaymentRow {
+    status: String,
+    tx_hash: Option<String>,
+    last_error: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -150,6 +174,7 @@ pub async fn read(State(state): State<AppState>, Path(id): Path<String>) -> Resu
     let amount: Amount = row.amount.parse().map_err(ApiError::internal)?;
     let status: OrderStatus = row.status.parse().map_err(ApiError::internal)?;
     let path = row.path.map(|path| path.parse::<PayPath>()).transpose().map_err(ApiError::internal)?;
+    let payment = latest_payment(&state, &id).await?;
     Ok(Json(OrderView {
         order_id: row.id,
         shop: ShopView { name: row.shop_name, address: row.shop_address },
@@ -161,6 +186,27 @@ pub async fn read(State(state): State<AppState>, Path(id): Path<String>) -> Resu
         created_at: row.created_at,
         expires_at: row.expires_at,
         paid_at: row.paid_at,
+        payment,
+    }))
+}
+
+async fn latest_payment(state: &AppState, order_id: &str) -> Result<Option<PaymentView>, ApiError> {
+    let row: Option<PaymentRow> = sqlx::query_as(
+        "SELECT status, tx_hash, last_error FROM relayer_jobs WHERE order_id = $1 ORDER BY id DESC LIMIT 1",
+    )
+    .bind(order_id)
+    .fetch_optional(&state.pool)
+    .await?;
+    let Some(row) = row else { return Ok(None) };
+    let status: JobStatus = row.status.parse().map_err(ApiError::internal)?;
+    // `sending` has a hash that may never reach a node; show it once a node accepted it.
+    let tx_hash = row.tx_hash.filter(|_| matches!(status, JobStatus::Sent | JobStatus::Confirmed));
+    let explorer = state.chains.shop_chain().explorer.trim_end_matches('/');
+    Ok(Some(PaymentView {
+        status,
+        explorer_url: tx_hash.as_ref().map(|hash| format!("{explorer}/tx/{hash}")),
+        tx_hash,
+        failed_reason: row.last_error.filter(|_| status == JobStatus::Failed),
     }))
 }
 
