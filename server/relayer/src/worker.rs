@@ -264,7 +264,7 @@ impl Taken<'_> {
     ) -> Step<Outcome> {
         match chain.receipt(ours.hash).await {
             Err(error) => self.retry(&error.to_string()).await,
-            Ok(Some(mined)) if mined.success => self.confirm(chain, merchant_id, limits, mined, ours.hash).await,
+            Ok(Some(mined)) if mined.success => self.confirm(chain, call, merchant_id, limits, mined, ours.hash).await,
             Ok(Some(mined)) => {
                 self.record_reverted(chain, merchant_id, limits, mined).await?;
                 self.after_revert(chain, call).await
@@ -394,6 +394,7 @@ impl Taken<'_> {
     async fn confirm(
         &self,
         chain: &impl Chain,
+        call: &Call,
         merchant_id: i64,
         limits: &Limits,
         mined: Mined,
@@ -411,8 +412,54 @@ impl Taken<'_> {
         .execute(&mut *tx)
         .await;
         held(result)?;
+        self.apply_to_order(&mut tx, call, limits.chain_id, hash).await?;
         tx.commit().await?;
         Ok(Outcome::Confirmed(hash))
+    }
+
+    /// What a mined claim or refund means for the order, written at once so the order is right
+    /// even when the Matchmaker is down and never reports the event. Its later report changes
+    /// nothing more. `paid` is written here and by the Order Desk's `Settled`, so whatever reacts
+    /// to a paid order (the shop's webhook) must watch the order's status, not one of the two.
+    /// - A destination claim: the shop has the USDT, so the order is `paid`.
+    /// - A source refund: the customer has their tokens back, so the leg and the order are
+    ///   `returned`, unless the shop was paid.
+    async fn apply_to_order(&self, tx: &mut PgConnection, call: &Call, chain_id: u64, hash: B256) -> Step<()> {
+        match call {
+            Call::DestinationClaim(_) => {
+                sqlx::query(
+                    "UPDATE orders SET status = 'paid', paid_at = $2
+                     WHERE id = (SELECT order_id FROM relayer_jobs WHERE id = $1) AND status = 'destination_locked'",
+                )
+                .bind(self.id)
+                .bind(seconds(self.now))
+                .execute(&mut *tx)
+                .await?;
+            }
+            Call::SourceRefund { lock_id } => {
+                let order_id: Option<String> = sqlx::query_scalar(
+                    "UPDATE legs SET status = 'returned', refund_tx = $3
+                     WHERE chain_id = $1 AND lock_id = $2 AND status IN ('pending', 'locked')
+                     RETURNING order_id",
+                )
+                .bind(seconds(chain_id))
+                .bind(lock_id.to_string())
+                .bind(hex(hash))
+                .fetch_optional(&mut *tx)
+                .await?;
+                if let Some(order_id) = order_id {
+                    sqlx::query(
+                        "UPDATE orders SET status = 'returned'
+                         WHERE id = $1 AND status IN ('paying', 'source_locked', 'destination_locked')",
+                    )
+                    .bind(order_id)
+                    .execute(&mut *tx)
+                    .await?;
+                }
+            }
+            Call::DirectPay(_) | Call::SourceLock(_) => {}
+        }
+        Ok(())
     }
 
     async fn record_reverted(&self, chain: &impl Chain, merchant_id: i64, limits: &Limits, mined: Mined) -> Step<()> {
