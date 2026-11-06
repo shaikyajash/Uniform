@@ -43,6 +43,15 @@ alloy::sol!(
 );
 
 alloy::sol!(
+    /// The parts of an ERC-20 token (USDT on the shop chain) the server reads.
+    #[sol(rpc)]
+    interface IERC20 {
+        function balanceOf(address account) external view returns (uint256);
+        function allowance(address owner, address spender) external view returns (uint256);
+    }
+);
+
+alloy::sol!(
     /// The parts of 1inch Aqua the server reads.
     #[sol(rpc)]
     interface IAqua {
