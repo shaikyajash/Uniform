@@ -28,6 +28,7 @@ import {
   explorerTx,
   formatUsdt,
   providerFeeBps,
+  providerFeeRange,
   shopChain,
   shortAddress,
 } from "@/lib/chain";
@@ -36,6 +37,7 @@ import {
   WBT_FAUCET,
   addLiquidity,
   estimatedFees,
+  feeAllowed,
   payableNow,
   readPosition,
   startProviding,
@@ -45,7 +47,8 @@ import {
   type Shipped,
 } from "@/lib/earn";
 
-const FEE = `${providerFeeBps / 100}%`;
+/** "0.1% to 1%": the fees a provider may ask. */
+const FEE_RANGE = `${providerFeeRange.min / 100}% to ${providerFeeRange.max / 100}%`;
 const PILL =
   "h-10 rounded-full font-mono text-[11px] tracking-[0.08em] uppercase";
 
@@ -85,8 +88,9 @@ function Connect({
         </h1>
         <p className="text-[14.5px] leading-[1.7] text-muted-foreground">
           Your USDT stays in your wallet. Uniform takes it only to pay a
-          merchant for a customer payment that is already locked, and you earn{" "}
-          {FEE} each time.
+          merchant for a customer payment that is already locked, and you earn
+          the fee you set ({FEE_RANGE}) each time. Each payment goes to the
+          lowest fee that can cover it.
         </p>
       </div>
 
@@ -214,7 +218,7 @@ function Provider({
             <CopyIcon text={address} label="Copy wallet address" />
           </div>
           <p className="text-[13px] text-muted-foreground">
-            USDT on Whitechain · {FEE} on every payout
+            USDT on Whitechain · your fee on every payout
           </p>
         </div>
         <Button
@@ -255,7 +259,7 @@ function Provider({
         <Stat
           label="Fees earned"
           value={position ? estimatedFees(position) : null}
-          hint={`${FEE} of what you paid out`}
+          hint="Your fee on what you paid out"
         />
       </dl>
 
@@ -296,7 +300,8 @@ function Provider({
         ) : position.fills.length === 0 ? (
           <p className="px-5 py-8 text-[14px] leading-[1.7] text-muted-foreground">
             No payouts yet. When a customer pays from Base or Ethereum, Uniform
-            pays the merchant from your USDT and you earn {FEE}.
+            pays the merchant from your USDT and you earn your fee, when yours
+            is the lowest that can cover the payment.
           </p>
         ) : (
           <ul className="divide-y divide-hair">
@@ -405,19 +410,48 @@ function Start({
   position: Position;
   onDone: () => void;
 }) {
+  const [feeText, setFeeText] = useState(String(providerFeeBps / 100));
+  const feeBps = Math.round(Number(feeText) * 100);
+  const feeOk = feeText.trim() !== "" && feeAllowed(feeBps);
   return (
     <div className="grid gap-4 px-5 py-6">
       <p className="max-w-[560px] text-[14px] leading-[1.7] text-muted-foreground">
-        Choose how much USDT Uniform may use. It stays in your wallet; you can
-        withdraw the permission at any time.
+        Choose how much USDT Uniform may use and the fee you ask. It stays in
+        your wallet; you can withdraw the permission at any time. Each payment
+        goes to the lowest fee that can cover it, so a lower fee wins more
+        payments.
       </p>
+      <div className="grid max-w-[420px] gap-2">
+        <div className="relative">
+          <Input
+            inputMode="decimal"
+            value={feeText}
+            onChange={(event) => setFeeText(event.target.value)}
+            aria-label="Your fee in percent"
+            aria-invalid={!feeOk}
+            className="h-10 rounded-full border-hair-strong pr-24 pl-4 font-mono aria-invalid:border-bad/60"
+          />
+          <span className="pointer-events-none absolute top-1/2 right-4 -translate-y-1/2 font-mono text-[11px] text-faint">
+            % FEE
+          </span>
+        </div>
+        <p
+          className={`pl-4 text-[12.5px] ${feeOk ? "text-faint" : "text-bad"}`}
+          aria-live="polite"
+        >
+          {feeOk
+            ? `You earn ${feeBps / 100}% of each payout · allowed ${FEE_RANGE}`
+            : `Set a fee from ${FEE_RANGE}`}
+        </p>
+      </div>
       <AmountForm
         action="Lend"
         busyText="Lending…"
         max={position.walletUsdt}
         gas={position.walletGas}
+        disabled={!feeOk}
         run={(amount, onStep) =>
-          startProviding(wallet, position, amount, onStep)
+          startProviding(wallet, position, amount, feeBps, onStep)
         }
         done={(amount) => `Lent ${formatUsdt(amount)} USDT to Uniform`}
         onDone={onDone}
@@ -506,6 +540,7 @@ function AmountForm({
   busyText,
   max,
   gas,
+  disabled = false,
   run,
   done,
   onDone,
@@ -516,6 +551,8 @@ function AmountForm({
   max: bigint;
   /** WBT in the wallet: without it the wallet can't send the transaction. */
   gas: bigint;
+  /** Another field on the page is not valid yet. */
+  disabled?: boolean;
   /** Sends the transactions, reporting each step as its wallet window opens. */
   run: (amount: bigint, onStep: OnStep) => Promise<unknown>;
   done: (amount: bigint) => string;
@@ -526,7 +563,7 @@ function AmountForm({
   const [step, setStep] = useState<string | null>(null);
   const amount = toUnits(text);
   const problem = amountProblem(text, amount, max);
-  const usable = amount !== null && problem === null && gas >= MIN_GAS_WBT;
+  const usable = !disabled && amount !== null && problem === null && gas >= MIN_GAS_WBT;
   if (max < MIN_LEND) {
     return (
       <p className="text-[13.5px] leading-[1.6] text-muted-foreground">
