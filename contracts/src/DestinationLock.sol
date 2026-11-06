@@ -14,8 +14,10 @@ import {IAqua} from "@1inch/aqua/contracts/interfaces/IAqua.sol";
 ///   - refund(lockId) at or after expiry returns the USDT to the provider. It is pushed back into
 ///     the provider's Aqua strategy, restoring the allowance; if the strategy has been docked, the
 ///     push reverts and the USDT is transferred to the provider's wallet instead.
-/// Each source lock can be filled once: lockId = keccak256(abi.encode(LOCK_TAG, chainid, this,
-/// srcChainId, srcLockId)).
+/// Each provider can fill a source lock once: lockId = keccak256(abi.encode(LOCK_TAG, chainid, this,
+/// srcChainId, srcLockId, maker)). The maker is part of the id so that a lock opened by someone
+/// else for the same source lock cannot block the provider's fill. Watchers must trust only locks
+/// whose id they recompute with the expected maker, emitted by this contract.
 contract DestinationLock {
     using SafeERC20 for IERC20;
 
@@ -70,7 +72,8 @@ contract DestinationLock {
         bytes32 hashlock,
         uint64 expiry,
         uint256 srcChainId,
-        bytes32 srcLockId
+        bytes32 srcLockId,
+        bytes32 strategyHash
     );
     event Settled(
         bytes32 indexed lockId,
@@ -103,8 +106,8 @@ contract DestinationLock {
         pool = msg.sender;
     }
 
-    function lockIdFor(uint256 srcChainId, bytes32 srcLockId) public view returns (bytes32) {
-        return keccak256(abi.encode(LOCK_TAG, block.chainid, address(this), srcChainId, srcLockId));
+    function lockIdFor(uint256 srcChainId, bytes32 srcLockId, address maker) public view returns (bytes32) {
+        return keccak256(abi.encode(LOCK_TAG, block.chainid, address(this), srcChainId, srcLockId, maker));
     }
 
     /// @notice Records a lock. The pool moves the USDT in right after, in the same transaction.
@@ -123,7 +126,7 @@ contract DestinationLock {
         }
         if (p.srcChainId > type(uint64).max) revert ChainIdTooLarge(p.srcChainId);
 
-        lockId = lockIdFor(p.srcChainId, p.srcLockId);
+        lockId = lockIdFor(p.srcChainId, p.srcLockId, p.maker);
         if (locks[lockId].state != State.None) revert LockExists(lockId);
 
         locks[lockId] = Lock({
@@ -138,7 +141,18 @@ contract DestinationLock {
             srcLockId: p.srcLockId,
             srcChainId: uint64(p.srcChainId)
         });
-        emit Opened(lockId, p.orderId, p.merchant, p.maker, p.amount, p.hashlock, p.expiry, p.srcChainId, p.srcLockId);
+        emit Opened(
+            lockId,
+            p.orderId,
+            p.merchant,
+            p.maker,
+            p.amount,
+            p.hashlock,
+            p.expiry,
+            p.srcChainId,
+            p.srcLockId,
+            p.strategyHash
+        );
     }
 
     /// @notice Destination redeem: pays the merchant if `secret` matches the hashlock before expiry.

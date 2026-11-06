@@ -10,7 +10,7 @@
 - `PayoutPool` deploys its own `DestinationLock` in its constructor, so each knows the other with no admin or setter.
 - `DestinationLock.claim(lockId, secret)` (destination redeem) pays the merchant set at fill time and emits `Settled` with the secret, which the Matchmaker reads to redeem on the source chain.
 - `DestinationLock.refund(lockId)` after expiry returns the USDT to Bob with `Aqua.push`, which restores his strategy allowance. If Bob has docked the strategy, `push` reverts, so the USDT goes to his wallet with a plain transfer instead.
-- One destination lock per source lock: `lockId = keccak256(abi.encode(TAG, chainid, this, srcChainId, srcLockId))`, so Bob can never fill the same customer lock twice.
+- One destination lock per source lock and provider: `lockId = keccak256(abi.encode(TAG, chainid, this, srcChainId, srcLockId, maker))`, so Bob can never fill the same customer lock twice, and nobody else's lock can block his. The maker was added after the security review.
 
 **Out of scope (A9):** the refund direction (`openRefund`, where the shop's USDT is locked for Bob).
 
@@ -20,7 +20,7 @@
 
 **Rules for the Matchmaker and Order Desk:**
 - Fill only the exact source lock id recomputed from the quote, with at least 15 minutes left on it, and set the destination expiry earlier (demo: 10 minutes).
-- Before quoting, check Tether's `isBlocked` for the merchant. A blocked merchant can't be paid, and its failed redeem would still expose the secret.
+- Before sending a claim, keep at least 2 minutes before expiry, simulate it, and check that Tether hasn't blocked the destination lock. A reverted claim still exposes the secret. (Tether only blocks senders, so a blocked merchant is still paid.)
 - Read the secret from `Settled` and redeem on the source chain at once.
 
 ---
