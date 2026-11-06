@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Starts the forks (A's setup), then our Order Desk and Relayer and A's Matchmaker against them.
+# Starts the forks (A's setup), then our Order Desk, Relayer and Notifier and A's Matchmaker against
+# them, plus a stand-in shop server that checks webhook signatures.
 set -euo pipefail
 cd "$(dirname "$0")"
 HERE=$PWD
@@ -30,10 +31,10 @@ DATABASE_URL=$DB ./target/debug/order-desk add-shop --name "Kettle & Co" --payou
   | awk '/API key:/ {print $3}' > "$STATE/shop.key"
 
 # Only our own earlier run: a dev Order Desk or Relayer started elsewhere keeps running.
-for name in order-desk relayer matchmaker; do
+for name in order-desk relayer matchmaker notifier webhooks; do
   [ -f "$STATE/$name.pid" ] && kill "$(cat "$STATE/$name.pid")" 2>/dev/null || true
 done
-rm -f "$STATE/matchmaker.db"
+rm -f "$STATE/matchmaker.db" "$STATE/webhooks.jsonl" "$STATE/webhook.secret"
 sleep 1
 
 DATABASE_URL=$DB PORT=$PORT INTERNAL_EVENTS_TOKEN=$(cat "$STATE/token") PROVIDER_ADDRESS=$BOB \
@@ -48,5 +49,10 @@ CHAINS_PATH=../shared/chains.json ORDER_DESK_URL=http://127.0.0.1:$PORT INTERNAL
   RPC_84532=$BASE RPC_1874=$WC DB_PATH="$STATE/matchmaker.db" POLL_SECONDS=2 \
   nohup ./target/debug/matchmaker > "$STATE/matchmaker.log" 2>&1 &
 echo $! > "$STATE/matchmaker.pid"
+DATABASE_URL=$DB CHAINS_JSON=../shared/chains.json NOTIFIER_POLL_SECONDS=1 \
+  nohup ./target/debug/notifier > "$STATE/notifier.log" 2>&1 &
+echo $! > "$STATE/notifier.pid"
+nohup python3 "$HERE/webhook_receiver.py" 4199 "$STATE" > "$STATE/webhooks.log" 2>&1 &
+echo $! > "$STATE/webhooks.pid"
 sleep 3
-echo "relayer $RELAYER; order desk on :$PORT; logs in $STATE"
+echo "relayer $RELAYER; order desk on :$PORT; shop server on :4199; logs in $STATE"
