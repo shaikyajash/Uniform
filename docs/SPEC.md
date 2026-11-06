@@ -147,7 +147,7 @@ function lockIdFor(LockParams p, address payer, address tokenIn, uint256 amountI
 function lockWithAuthorization(LockParams p, address payer, address tokenIn, uint256 amountIn,
         uint256 validAfter, uint256 validBefore, uint8 v, bytes32 r, bytes32 s,
         bytes swapData) external returns (bytes32 lockId);
-// USDC only for now: swapData must be empty, outToken 0 or USDC (the Uniswap swap comes in A6)
+// USDC only for now: swapData must be empty, outToken 0 or USDC (multi-token comes in A6)
 function lockFromProvider(LockParams p, uint256 usdcAmount) external returns (bytes32 lockId);
 // caller's own approved USDC, used by the provider for the refund direction
 function claim(bytes32 lockId, bytes32 secret) external;  // source redeem: before expiry, to receiver
@@ -177,7 +177,8 @@ Rules for the Matchmaker and Gas Payer (from the security review):
 - Before filling, check that Circle has not blacklisted Bob (`isBlacklisted`); a blacklisted receiver cannot claim, and the customer would be refunded after Bob has paid.
 - Claim as soon as the secret appears on Whitechain; do not wait near expiry.
 - Known limit: if Circle blacklists the customer after locking, refund reverts and the USDC stays in the contract.
-- For A6 (swaps): the relayer must not choose the route. Bind `swapData` (or a route hash) into the lock id, measure the USDC received by balance difference, and open the lock with that amount.
+- For A6 (multi-token): the lock holds the token the customer paid with and never swaps. Each lock stores `{token, amount}`; allowed tokens are USDC and EURC (EIP-3009) and ETH (`lockWithETH`, payable). `claim` gives the receiver the raw token; `claimAndSwap(lockId, secret, swapData, minOut)` is callable only by the receiver and swaps to USDC on Uniswap with the receiver's own route and minimum; `refund` returns the exact token and amount. The relayer never chooses a swap route.
+- Before filling an EURC or ETH lock, the Matchmaker checks that the live Uniswap price still covers the order (the quote includes a small buffer); if not, it does not fill and the customer is refunded in the same token.
 
 ### PayoutPool (Whitechain, AquaApp)
 

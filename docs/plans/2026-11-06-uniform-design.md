@@ -43,7 +43,7 @@ Every address lives in `shared/chains.json`.
 Timeout: each lock refunds whoever locked it. The destination lock (10 min) expires before the source lock (20 min).
 ```
 
-- EURC and ETH are swapped to USDC on Uniswap v4 inside the Source Lock (A6), so Bob always receives USDC.
+- The Source Lock holds the token the customer paid with (USDC, EURC or ETH). Bob swaps it to USDC on Uniswap v4 only when he redeems, so a successful payment swaps once and a failed one refunds the exact token with no swap and no fee (A6). Uniswap's Quoter also prices every quote.
 - Bob's USDT reaches the Shop Lock through 1inch Aqua: the Payout Pool `pull`s it from Bob's shipped strategy.
 - Why nobody can cheat: Bob cannot redeem without the secret, and the secret is first used on the Shop Lock, which can only pay the shop. Mei reveals only after her browser has checked the Shop Lock itself.
 
@@ -138,7 +138,7 @@ paid → partially_refunded → refunded
 | **A3** | **SourceLock, USDC only, Base Sepolia** | S1 | **next**, see [the A3 plan](2026-11-06-a3-source-lock.md) |
 | A4 | PayoutPool and ShopLock | A1 | to do |
 | A5 | Matchmaker v1 | A3, A4 | to do (M2) |
-| A6 | Uniswap swap and pools | A3 | to do |
+| A6 | Multi-token Source Lock, Uniswap swap at redeem, pools | A3 | to do |
 | A7 | Ethereum Sepolia | A6 | to do (M3) |
 | A8 | Split payments | A5, A7 | to do |
 | A9 | Refunds, chain side | A5, A6 | to do |
@@ -159,5 +159,6 @@ Milestones: M1 Path A in the browser · M2 Path B with USDC from Base · M3 EURC
 | Privy for email login | Reown embedded wallets do not support Whitechain; B0 passed |
 | Rust for every server service | Team choice; `alloy` covers RPC, signing and contract bindings |
 | Uniswap only where a swap is needed (EURC or ETH to USDC) | Use sponsors only where they fit |
+| Swap at redeem, not at lock | A failed payment refunds the original token with no swap fee; only the receiver swaps, with its own route and minimum |
 | Secret from a signature, no storage | Recoverable without keeping a secret in the browser |
 | Lock ids include payer, token, amount, chain and contract | Lesson from the DirectPay security review: stops squatting and replay |
