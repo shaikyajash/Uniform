@@ -10,6 +10,9 @@ except Exception: d={}
 d[sys.argv[1]]={"shop":{"name":"Kettle & Co","address":"0x15d34AAf54267DB7D7c367839AAf71A00a2C6A65"},"amount":"1.000000","status":"quoted"}
 json.dump(d,open(p,'w'))
 PY
+# CHAIN=ethereum locks on the Ethereum Sepolia fork instead of Base (default USDC there too).
+if [ "${CHAIN:-base}" = ethereum ]; then RPC=http://127.0.0.1:8604; LOCK=0xAc9A2525624B8b56E664bdAE9f8C06387B93b9Ec; USDC=0x1c7D4B196Cb0C7B01d743Fbc6116a902379C7238
+else RPC=http://127.0.0.1:8601; LOCK=0x02dF2659B5B4956EAFEe3293584C2aaefC114871; USDC=0x036CbD53842c5426634e7929541eC2318f3dCF7e; fi
 HERE=$PWD; cd ../../../contracts
-SOURCE_LOCK=0x02dF2659B5B4956EAFEe3293584C2aaefC114871 CUSTOMER_PRIVATE_KEY=$(cat $HERE/.state/customer.key) GAS_PAYER_PRIVATE_KEY=0x7c852118294e51e653712a81e05800f419141751be58f605c371e15141b007a6 BOB_ADDRESS=0x70997970C51812dc3A010C7d01b50e0d17dc79C8 ORDER_ID=$ORDER SECRET=$SECRET TOKEN=${TOKEN:-0x036CbD53842c5426634e7929541eC2318f3dCF7e} AMOUNT=${AMOUNT:-1003000} MIN_USDC_OUT=${MIN_USDC_OUT:-0} \
-  forge script script/LockForBob.s.sol --rpc-url http://127.0.0.1:8601 --broadcast 2>&1 | grep -A1 "source lockId" | tail -1
+SOURCE_LOCK=$LOCK CUSTOMER_PRIVATE_KEY=$(cat $HERE/.state/customer.key) GAS_PAYER_PRIVATE_KEY=0x7c852118294e51e653712a81e05800f419141751be58f605c371e15141b007a6 BOB_ADDRESS=0x70997970C51812dc3A010C7d01b50e0d17dc79C8 ORDER_ID=$ORDER SECRET=$SECRET TOKEN=${TOKEN:-$USDC} AMOUNT=${AMOUNT:-1003000} MIN_USDC_OUT=${MIN_USDC_OUT:-0} \
+  forge script script/LockForBob.s.sol --rpc-url $RPC --broadcast 2>&1 | grep -A1 "source lockId" | tail -1
