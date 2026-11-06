@@ -12,6 +12,8 @@ Built at ETHGlobal Mumbai 2026.
 
 ## Repository layout
 
+Contracts are Solidity (Foundry), the server is Rust (one Cargo workspace in `server/`), and the web apps are TypeScript (Next.js with Privy).
+
 | Folder | Contents | Owner |
 |---|---|---|
 | `contracts/` | Foundry: DirectPay, CustomerLock, PayoutPool, ShopLock | A |

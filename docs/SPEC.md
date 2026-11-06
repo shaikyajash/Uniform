@@ -2,6 +2,26 @@
 
 Shared interfaces both owners build against. Change only by agreement between A (chain side) and B (app side).
 
+## Who owns what
+
+Every folder has exactly one owner.
+
+| Folder | Owner |
+|---|---|
+| `contracts/`, `server/bindings/`, `server/matchmaker/`, `web/app/earn/` | A |
+| `server/Cargo.toml` (lists all 6 members from the start), `server/common/`, `server/order-desk/`, `server/gas-payer/`, `server/notifier/`, `web/` (except `app/earn/`), `demo-shop/` | B |
+| `shared/`, `docs/SPEC.md` | Both, by agreement (A writes `abis/` and contract addresses, B writes `types.ts`) |
+
+## Stack
+
+| Part | Language | Main libraries |
+|---|---|---|
+| `contracts/` | Solidity 0.8.30 | Foundry, OpenZeppelin 5.4, 1inch Aqua |
+| `server/` (Order Desk, Gas Payer, Shop Notifier, Matchmaker) | **Rust** (stable), one Cargo workspace | `tokio`, `axum` (HTTP), `sqlx` (SQLite, migrations), `alloy` (RPC, `sol!` bindings from `shared/abis`, signing, EIP-712), `serde`, `reqwest` (webhooks, internal events), `hmac` + `sha2` (webhook signature), `tracing` |
+| `web/`, `demo-shop/` | TypeScript | Next.js, Privy, viem |
+
+Server layout: `server/Cargo.toml` is a workspace with one binary crate per service (`order-desk`, `gas-payer`, `notifier`, `matchmaker`) plus two library crates: `server/common` (B: status enums and `can_move`, `ChainEvent`, the `chains.json` loader, config) and `server/bindings` (A: `alloy::sol!` contract bindings from `shared/abis/`). `shared/types.ts` stays as the web's copy of the same types, and the two must match.
+
 ## Chains and tokens
 
 | Chain | Id | Role | Tokens |
@@ -50,7 +70,7 @@ The customer only reveals the secret. The Shop Lock pays only the merchant set w
 
 ## Order statuses
 
-Defined once in `shared/types.ts` (`ORDER_STATUSES`, `ORDER_TRANSITIONS`, `canMove`). The Order Desk rejects any move not in the table.
+Defined in `shared/types.ts` (`ORDER_STATUSES`, `ORDER_TRANSITIONS`, `canMove`) for the web, and mirrored in `server/common` as a Rust enum with `can_move` for the server; keep both lists identical. The Order Desk rejects any move not in the table.
 
 ```
 created → quoted → paying → paid                                   (Path A)
@@ -181,7 +201,7 @@ If the provider has docked the strategy, `aqua.push` reverts and ShopLock falls 
 | `POST /v1/orders/:id/refunds` | Shop Dashboard | `{amount, hashlock, signature}` → refund flow |
 | `POST /v1/refunds/:id/secret` | Shop Dashboard | Releases the refund to the customer |
 | `GET /v1/payments.csv` | Shop Dashboard | Accountant export |
-| `POST /internal/events` | Matchmaker | Chain events (`ChainEvent` in `shared/types.ts`) |
+| `POST /internal/events` | Matchmaker | Chain events (`ChainEvent` in `server/common`, mirrored in `shared/types.ts`) |
 
 ### Webhook
 
