@@ -8,6 +8,7 @@
 mod config;
 mod events;
 mod order_desk;
+mod price;
 mod rules;
 mod store;
 mod worker;

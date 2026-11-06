@@ -38,6 +38,7 @@ alloy::sol!(
     #[sol(rpc)]
     interface IFiatToken {
         function isBlacklisted(address account) external view returns (bool);
+        function decimals() external view returns (uint8);
     }
 );
 
