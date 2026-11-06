@@ -56,7 +56,7 @@
 
 .heroTitle {
   margin-bottom: 24px;
-  font-family: var(--font-display), system-ui, sans-serif;
+  font-family: var(--font-google-sans), system-ui, sans-serif;
   font-weight: 400;
   font-size: clamp(2rem, 4.6vw, 4.5rem);
   line-height: 0.92;
@@ -171,7 +171,7 @@
 .sectionLede {
   font-size: 15px;
   line-height: 1.7;
-  color: var(--muted);
+  color: var(--muted-foreground);
   max-width: 420px;
   justify-self: end;
 }
@@ -218,7 +218,7 @@
   max-width: 440px;
   font-size: 14.5px;
   line-height: 1.7;
-  color: var(--muted);
+  color: var(--muted-foreground);
 }
 
 /* ---------- Mock panels ---------- */
@@ -597,7 +597,7 @@
 }
 
 .checkoutAmount {
-  font-family: var(--font-display), sans-serif;
+  font-family: var(--font-google-sans), sans-serif;
   font-size: 34px;
   letter-spacing: -0.03em;
   line-height: 1.1;
@@ -605,7 +605,7 @@
 
 .checkoutAmount span {
   font-size: 14px;
-  color: var(--muted);
+  color: var(--muted-foreground);
 }
 
 .checkoutButton {
@@ -639,7 +639,7 @@
   max-width: 300px;
   font-size: 13px;
   line-height: 1.7;
-  color: var(--muted);
+  color: var(--muted-foreground);
 }
 
 .footerBottom {
