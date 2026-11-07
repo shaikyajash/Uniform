@@ -12,7 +12,7 @@
 //   (approve, then lock) signed by the wallet itself, with an EIP-7702 authorization to Calibur
 //   the first time. Both are signed silently behind the one Pay click; the Gas Payer sends them.
 
-import { usePrivy, useSign7702Authorization, useSignTypedData, useWallets } from "@privy-io/react-auth";
+import { useCreateWallet, usePrivy, useSign7702Authorization, useSignTypedData, useWallets } from "@privy-io/react-auth";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { decodeFunctionData, erc20Abi, formatUnits, parseUnits, zeroAddress, type Address, type Hex } from "viem";
 import { Check, Loader2 } from "lucide-react";
@@ -149,6 +149,20 @@ export function PayCard({ orderId }: { orderId: string }) {
 
   const wallet = wallets.find((candidate) => candidate.walletClientType === "privy") ?? null;
   const address = (wallet?.address ?? null) as Address | null;
+
+  // Privy makes a wallet at login, but never again if that was cut short (a closed tab, a reload
+  // mid-login): a logged-in account with no wallet would wait forever. Make it here, once.
+  const { createWallet } = useCreateWallet();
+  const creating = useRef(false);
+  const hasWallet = user?.wallet !== undefined;
+  useEffect(() => {
+    if (!ready || !authenticated || !user || hasWallet || creating.current) return;
+    creating.current = true;
+    createWallet().catch((problem: unknown) => {
+      creating.current = false;
+      console.error("creating the wallet failed", problem);
+    });
+  }, [ready, authenticated, user, hasWallet, createWallet]);
   const units = order ? parseUnits(order.amount, shopChain.usdtDecimals) : null;
 
   const refresh = useCallback(async () => {
