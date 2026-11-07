@@ -31,6 +31,8 @@ export type SourceOption = {
   /** What the wallet holds there; `null` while it is being read. */
   balance: bigint | null;
   note?: string;
+  /** Why this way can't be used right now, though the wallet may hold enough (no provider can take it). */
+  unavailable?: string;
   /** A split row: how much comes from each chain, e.g. "6.00 on Base + 4.03 on Ethereum Sepolia". */
   detail?: string;
 };
@@ -73,6 +75,7 @@ export function SourcePicker({
         {options.map((option) => {
           const id = `source-${encodeSource(option.source)}`;
           const short = option.balance !== null && option.balance < option.cost;
+          const blocked = short || option.unavailable !== undefined;
           return (
             <label
               key={id}
@@ -80,10 +83,10 @@ export function SourcePicker({
               className={cn(
                 "flex cursor-pointer items-center gap-3 border-b border-hair bg-muted/40 px-3.5 py-3 transition-colors last:border-b-0 hover:bg-muted",
                 "has-[[data-state=checked]]:bg-white/[0.045]",
-                short && "cursor-not-allowed opacity-45 hover:bg-muted/40",
+                blocked && "cursor-not-allowed opacity-45 hover:bg-muted/40",
               )}
             >
-              <RadioGroupItem id={id} value={encodeSource(option.source)} disabled={short || disabled} />
+              <RadioGroupItem id={id} value={encodeSource(option.source)} disabled={blocked || disabled} />
               <span className="grid min-w-0 flex-1 gap-0.5">
                 <span className="font-mono text-[13px] text-foreground">{option.token}</span>
                 <span className="truncate text-[12.5px] text-muted-foreground">
@@ -95,8 +98,9 @@ export function SourcePicker({
                   {option.approx ? "≈" : ""}
                   {formatTokenAmount(option.cost, option.decimals)}
                 </span>
-                <span className={cn("font-mono text-[10.5px] tracking-[0.04em]", short ? "text-warn" : "text-faint")}>
-                  {option.balance === null ? "reading balance…" : `balance ${formatTokenAmount(option.balance, option.decimals)}`}
+                <span className={cn("font-mono text-[10.5px] tracking-[0.04em]", blocked ? "text-warn" : "text-faint")}>
+                  {option.unavailable ??
+                    (option.balance === null ? "reading balance…" : `balance ${formatTokenAmount(option.balance, option.decimals)}`)}
                 </span>
               </span>
             </label>

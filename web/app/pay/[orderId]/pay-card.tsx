@@ -72,6 +72,7 @@ import {
   PrimaryButton,
   Problem,
   Reveal,
+  LoadingBody,
   SkeletonBody,
   Stat,
   Swap,
@@ -104,6 +105,9 @@ const STEP_LABEL: Record<Exclude<Step, "idle">, string> = {
 
 /** The Order Desk's smallest split leg: 0.1 USDC (A8). */
 const MIN_SPLIT_LEG = BigInt(100_000);
+/** A way to pay the wallet holds enough for, and that can be used right now. */
+const usable = (option: SourceOption) =>
+  option.unavailable === undefined && option.balance !== null && option.balance >= option.cost;
 /** Providers set their own fee: the order says the cheapest one now, else the highest allowed. */
 const feeNote = (feeBps: number | null) =>
   feeBps === null ? `incl. provider fee, at most ${providerFeeRange.max / 100}%` : `incl. ${feeBps / 100}% provider fee`;
@@ -201,13 +205,15 @@ export function PayCard({ orderId }: { orderId: string }) {
     };
   }, []);
 
-  const anyEnough = options.some((option) => option.balance !== null && option.balance >= option.cost);
-  const firstEnough = options.find((option) => option.balance !== null && option.balance >= option.cost);
+  const anyEnough = options.some((option) => usable(option));
+  // Paying from another chain needs a provider who can cover this order now; the order says.
+  const noProvider = order !== null && options.length > 0 && (order.providerFeeBps ?? null) === null;
+  const firstEnough = options.find((option) => usable(option));
   // The picked row as built from the latest balances: a split's parts follow them.
   const pickedNow = picked ? (options.find((option) => sameSource(option.source, picked))?.source ?? null) : null;
   const source = pickedNow ?? firstEnough?.source ?? options[0]?.source ?? null;
   const chosen = options.find((option) => sameSource(option.source, source)) ?? null;
-  const chosenEnough = chosen !== null && chosen.balance !== null && chosen.balance >= chosen.cost;
+  const chosenEnough = chosen !== null && usable(chosen);
 
   const readBalances = useCallback(async () => {
     if (!address) return;
@@ -219,6 +225,8 @@ export function PayCard({ orderId }: { orderId: string }) {
         tokenBalance(chain.id, token.address, address),
       ]),
     ];
+    // Shown together once every chain has answered (one batched request per chain); a failed read
+    // keeps the last value.
     const settled = await Promise.allSettled(reads.map(([, read]) => read));
     setBalances((previous) => {
       const next: Record<string, bigint | null> = {};
@@ -618,6 +626,10 @@ export function PayCard({ orderId }: { orderId: string }) {
                       <TextButton onClick={logout}>Not you?</TextButton>
                     </div>
 
+                    {balances?.owner !== address ? (
+                      <LoadingBody text="Reading your balances…" />
+                    ) : (
+                      <>
                     <SourcePicker
                       options={options}
                       value={source}
@@ -630,7 +642,13 @@ export function PayCard({ orderId }: { orderId: string }) {
                       }
                     />
 
-                    <Reveal show={balances !== null && !anyEnough}>
+                    <Reveal show={noProvider}>
+                      <Notice>
+                        Paying from another chain isn&apos;t available for this amount right now: no provider has enough
+                        USDT free. Pay with USDT on Whitechain, or try again in a few minutes.
+                      </Notice>
+                    </Reveal>
+                    <Reveal show={balances !== null && !anyEnough && !noProvider}>
                       <Notice>
                         Your wallet doesn&apos;t hold enough yet. Send USDT on Whitechain, or USDC on{" "}
                         {customerChains.map((chain) => chainName(chain.id)).join(" or ")}, to{" "}
@@ -669,6 +687,8 @@ export function PayCard({ orderId }: { orderId: string }) {
                     <FinePrint>
                       {oneClickNote(chosen?.source ?? null)}Expires in {formatCountdown(secondsLeft)}
                     </FinePrint>
+                      </>
+                    )}
                   </>
                 )}
               </div>
@@ -1003,6 +1023,8 @@ function paymentOptions(
 ): SourceOption[] {
   if (units === null) return [];
   const withFee = (amount: bigint) => withProviderFee(amount, feeBps ?? undefined);
+  // No provider can take the order from another chain right now: those ways are shown, not offered.
+  const unavailable = feeBps === null ? "no provider right now" : undefined;
   const mine = balances && balances.owner === address ? balances.units : {};
   const usdt: SourceOption = {
     source: { kind: "usdt" },
@@ -1021,6 +1043,7 @@ function paymentOptions(
       decimals: chain.usdcDecimals,
       balance: mine[`usdc:${chain.id}`] ?? null,
       note: feeNote(feeBps),
+      unavailable,
     }),
   );
   const parts = planSplit(
@@ -1037,6 +1060,7 @@ function paymentOptions(
           decimals: 6,
           balance: parts.reduce((sum, part) => sum + (mine[`usdc:${part.chainId}`] ?? BigInt(0)), BigInt(0)),
           note: feeNote(feeBps),
+          unavailable,
           detail: parts.map((part) => `${formatUsdc(part.amount)} on ${chainName(part.chainId)}`).join(" + "),
         },
       ]
@@ -1054,6 +1078,7 @@ function paymentOptions(
         cost: estimateTokenUnits(withFee(units), price, token.decimals),
         decimals: token.decimals,
         approx: true,
+        unavailable,
         balance,
       },
     ];

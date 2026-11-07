@@ -5,13 +5,11 @@
 
 import { AnimatePresence, MotionConfig, motion } from "motion/react";
 import { useEffect, useRef, useState, type ReactNode } from "react";
-import { ArrowUpRight, Check, CircleAlert, Copy, TriangleAlert } from "lucide-react";
+import { ArrowUpRight, Check, CircleAlert, Copy, Loader2, TriangleAlert } from "lucide-react";
 import { shortAddress } from "@/lib/chain";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
-import { Card, CardContent, CardHeader } from "@/components/ui/card";
-import { Separator } from "@/components/ui/separator";
-import { Skeleton } from "@/components/ui/skeleton";
+import { Card, CardContent } from "@/components/ui/card";
 
 /* ---------- Motion, as on Garden: the card glides to its new height and its contents crossfade ---------- */
 
@@ -74,11 +72,7 @@ export function Reveal({ show, children }: { show: boolean; children: ReactNode 
   );
 }
 
-/**
- * The card while the order loads: the same shell, gaps and heights as the logged-out card
- * (bar 15px, title 32px, amount 56px, network line 24.6px, button 44px, small print 15px),
- * so nothing jumps when the real card arrives.
- */
+/** The card while the order loads: the same shell, with one loader inside. */
 export function PayCardSkeleton() {
   return (
     <PayShell busy>
@@ -88,25 +82,18 @@ export function PayCardSkeleton() {
 }
 
 export function SkeletonBody() {
+  return <LoadingBody text="Loading checkout…" />;
+}
+
+/** One loader for the card while something it shows is still on its way. */
+export function LoadingBody({ text }: { text: string }) {
   return (
-    <div className="flex flex-col gap-5">
-      <CardHeader className="gap-4">
-        <div className="flex justify-between">
-          <Skeleton className="h-[15px] w-8" />
-          <Skeleton className="h-[15px] w-28" />
-        </div>
-        <Separator className="bg-hair" />
-        <Skeleton className="h-8 w-40" />
-      </CardHeader>
-      <CardContent className="grid gap-4">
-        <div className="grid gap-2">
-          <Skeleton className="h-14 w-36" />
-          <Skeleton className="h-[24.6px] w-56" />
-        </div>
-        <Skeleton className="h-11 w-full rounded-full" />
-        <Skeleton className="mx-auto h-[15px] w-64" />
-      </CardContent>
-    </div>
+    <CardContent className="grid min-h-[260px] place-items-center">
+      <div className="grid justify-items-center gap-3" role="status">
+        <Loader2 className="size-6 animate-spin text-muted-foreground" aria-hidden="true" />
+        <p className="font-mono text-[11px] tracking-[0.08em] text-faint uppercase">{text}</p>
+      </div>
+    </CardContent>
   );
 }
 

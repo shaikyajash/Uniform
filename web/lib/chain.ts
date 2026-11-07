@@ -89,11 +89,16 @@ export const customerViemChains = customerChains.map((chain) =>
   }),
 );
 
-const shopClient = createPublicClient({ chain: shopViemChain, transport: http(shopChain.rpc) });
+/**
+ * Reads go to public RPCs from the browser: calls made together go as one batched request per
+ * chain, and a slow node is given up on quickly (the page shows what it has and reads again).
+ */
+const rpc = (url: string) => http(url, { batch: { wait: 16 }, timeout: 6_000, retryCount: 1 });
+const shopClient = createPublicClient({ chain: shopViemChain, transport: rpc(shopChain.rpc) });
 const customerClients = new Map<number, PublicClient>(
   customerChains.map((chain, index) => [
     chain.id,
-    createPublicClient({ chain: customerViemChains[index], transport: http(chain.rpc) }) as PublicClient,
+    createPublicClient({ chain: customerViemChains[index], transport: rpc(chain.rpc) }) as PublicClient,
   ]),
 );
 
