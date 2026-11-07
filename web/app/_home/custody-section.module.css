@@ -1,0 +1,166 @@
+/* "Why would anyone hand their balance to you?": a typeset exchange, then a two-column ledger.
+   Type and hairlines only, like the earn section above it. */
+
+.eyebrow {
+  margin: 0 0 28px;
+  font-family: var(--font-geist-mono), ui-monospace, monospace;
+  font-size: 10.5px;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: rgba(242, 242, 243, 0.45);
+}
+
+.question {
+  margin: 0;
+  max-width: 900px;
+}
+
+.question p {
+  margin: 0;
+  font-family: var(--font-display);
+  font-weight: 400;
+  font-size: clamp(30px, 4vw, 58px);
+  line-height: 1.08;
+  letter-spacing: -0.035em;
+  color: #7f7f88;
+  text-indent: -0.42em; /* hang the opening quote in the margin */
+}
+
+.reply {
+  display: grid;
+  gap: 10px;
+  margin: 40px 0 0;
+  padding-left: clamp(0px, 8vw, 120px);
+}
+
+.answer {
+  margin: 0;
+  font-family: var(--font-display);
+  font-size: clamp(30px, 4vw, 58px);
+  line-height: 1.08;
+  letter-spacing: -0.035em;
+  color: #f2f2f3;
+}
+
+.concede {
+  margin: 0;
+  max-width: 440px;
+  font-size: 15px;
+  line-height: 1.7;
+  color: var(--muted-foreground);
+}
+
+/* ----- The turn: what Uniform does instead ----- */
+
+.turn {
+  display: grid;
+  grid-template-columns: minmax(0, 0.85fr) minmax(0, 1.15fr);
+  gap: 72px;
+  margin-top: 88px;
+  padding-top: 40px;
+  border-top: 1px solid var(--hair-strong);
+  align-items: start;
+}
+
+.turnTitle {
+  margin: 0 0 18px;
+  font-weight: 400;
+  font-size: clamp(22px, 2.2vw, 30px);
+  line-height: 1.2;
+  letter-spacing: -0.025em;
+}
+
+.turnText {
+  margin: 0 0 14px;
+  max-width: 420px;
+  font-size: 15px;
+  line-height: 1.75;
+  color: var(--muted-foreground);
+}
+
+/* ----- The ledger ----- */
+
+.compare {
+  margin: 0;
+  border-top: 1px solid rgba(242, 242, 243, 0.6);
+  border-bottom: 1px solid rgba(242, 242, 243, 0.6);
+}
+
+.cRow {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) minmax(0, 1.2fr);
+  gap: 20px;
+  padding: 14px 0;
+  border-bottom: 1px solid var(--hair);
+  font-size: 14px;
+  line-height: 1.5;
+}
+
+.cRow:last-of-type {
+  border-bottom: 0;
+}
+
+.cHead {
+  padding: 12px 0;
+  border-bottom-color: var(--hair-strong);
+  font-family: var(--font-geist-mono), ui-monospace, monospace;
+  font-size: 10px;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: rgba(242, 242, 243, 0.45);
+}
+
+.topic {
+  font-family: var(--font-geist-mono), ui-monospace, monospace;
+  font-size: 11px;
+  letter-spacing: 0.04em;
+  line-height: 1.7;
+  color: rgba(242, 242, 243, 0.45);
+}
+
+.pool {
+  color: #6c6c74;
+}
+
+.ours {
+  color: #f2f2f3;
+}
+
+.cHead .ours {
+  color: #f2f2f3;
+}
+
+.caption {
+  padding: 12px 0;
+  border-top: 1px solid var(--hair-strong);
+  font-family: var(--font-geist-mono), ui-monospace, monospace;
+  font-size: 10.5px;
+  letter-spacing: 0.06em;
+  color: rgba(242, 242, 243, 0.45);
+}
+
+@media (max-width: 1000px) {
+  .turn {
+    grid-template-columns: 1fr;
+    gap: 40px;
+  }
+}
+
+@media (max-width: 560px) {
+  .reply {
+    padding-left: 0;
+  }
+
+  .cRow {
+    grid-template-columns: 1fr 1fr;
+    gap: 6px 14px;
+  }
+
+  .topic {
+    grid-column: 1 / -1;
+  }
+
+  .cHead span:first-child {
+    display: none;
+  }
+}

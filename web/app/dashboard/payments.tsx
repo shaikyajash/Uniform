@@ -4,7 +4,7 @@
 
 import { useWallets } from "@privy-io/react-auth";
 import { useMemo, useState } from "react";
-import { ArrowUpRight, Download, Loader2, Undo2 } from "lucide-react";
+import { Download, Loader2, ReceiptText, Undo2 } from "lucide-react";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import {
@@ -17,7 +17,14 @@ import {
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
+import {
+  Table,
+  TableBody,
+  TableCell,
+  TableHead,
+  TableHeader,
+  TableRow,
+} from "@/components/ui/table";
 import { chainName, shortAddress } from "@/lib/chain";
 import {
   downloadCsv,
@@ -28,15 +35,36 @@ import {
   type OrderRow,
   type Session,
 } from "@/lib/dashboard";
+import { ReceiptDetails, useLiveOrder } from "@/app/receipt/[orderId]/receipt";
+import { Problem } from "@/app/pay/[orderId]/parts";
 import type { OrderStatus } from "@/lib/desk";
 import { cn } from "@/lib/utils";
-import { Dot, Eyebrow, ORDER_STATUS, Panel, formatTime, signTypedDataWith, usdt, usePolling, walletFor } from "./bits";
+import {
+  Dot,
+  Eyebrow,
+  ORDER_STATUS,
+  Panel,
+  formatTime,
+  signTypedDataWith,
+  usdt,
+  usePolling,
+  walletFor,
+} from "./bits";
 
 const FILTERS: { label: string; statuses: OrderStatus[] }[] = [
   { label: "All", statuses: [] },
   { label: "Paid", statuses: ["paid", "partially_refunded"] },
   { label: "Refunded", statuses: ["partially_refunded", "refunded"] },
-  { label: "In progress", statuses: ["created", "quoted", "paying", "source_locked", "destination_locked"] },
+  {
+    label: "In progress",
+    statuses: [
+      "created",
+      "quoted",
+      "paying",
+      "source_locked",
+      "destination_locked",
+    ],
+  },
   { label: "Not paid", statuses: ["expired", "returned"] },
 ];
 
@@ -45,10 +73,12 @@ const REFRESH_MS = 4000;
 export function Payments({ session }: { session: Session }) {
   const [filter, setFilter] = useState(0);
   const [refunding, setRefunding] = useState<OrderRow | null>(null);
-  const [page, reload] = usePolling(() => listOrders(session.token, FILTERS[filter].statuses), REFRESH_MS, [
-    session.token,
-    filter,
-  ]);
+  const [viewing, setViewing] = useState<string | null>(null);
+  const [page, reload] = usePolling(
+    () => listOrders(session.token, FILTERS[filter].statuses),
+    REFRESH_MS,
+    [session.token, filter],
+  );
   const orders = page?.orders ?? null;
 
   return (
@@ -62,14 +92,20 @@ export function Payments({ session }: { session: Session }) {
             size="sm"
             className="font-mono text-[10.5px] tracking-[0.08em] text-muted-foreground uppercase hover:text-foreground"
             onClick={() =>
-              downloadCsv(session.token).catch((error) => toast.error(explainDashboard(error)))
+              downloadCsv(session.token).catch((error) =>
+                toast.error(explainDashboard(error)),
+              )
             }
           >
             <Download /> CSV
           </Button>
         }
       >
-        <div className="flex flex-wrap gap-1 border-b border-hair px-3 py-2.5" role="tablist" aria-label="Filter">
+        <div
+          className="flex flex-wrap gap-1 border-b border-hair px-3 py-2.5"
+          role="tablist"
+          aria-label="Filter"
+        >
           {FILTERS.map((option, index) => (
             <button
               key={option.label}
@@ -79,15 +115,22 @@ export function Payments({ session }: { session: Session }) {
               onClick={() => setFilter(index)}
               className={cn(
                 "rounded-full px-3 py-1 text-[12.5px] transition-colors",
-                filter === index ? "bg-white/[0.08] text-foreground" : "text-muted-foreground hover:text-foreground",
+                filter === index
+                  ? "bg-white/[0.08] text-foreground"
+                  : "text-muted-foreground hover:text-foreground",
               )}
             >
               {option.label}
             </button>
           ))}
         </div>
-        <OrdersTable orders={orders} onRefund={setRefunding} />
+        <OrdersTable
+          orders={orders}
+          onRefund={setRefunding}
+          onView={setViewing}
+        />
       </Panel>
+      <ReceiptDialog orderId={viewing} onClose={() => setViewing(null)} />
       <RefundDialog
         session={session}
         order={refunding}
@@ -103,32 +146,70 @@ export function Payments({ session }: { session: Session }) {
 
 /** Three numbers across all paid orders: what came in, how many, and what went back. */
 function Summary({ token }: { token: string }) {
-  const [page] = usePolling(() => listOrders(token, ["paid", "partially_refunded", "refunded"]), REFRESH_MS * 2, [token]);
+  const [page] = usePolling(
+    () => listOrders(token, ["paid", "partially_refunded", "refunded"]),
+    REFRESH_MS * 2,
+    [token],
+  );
   const totals = useMemo(() => {
     if (!page) return null;
     const units = (text: string) => {
       const [whole, fraction = ""] = text.split(".");
-      return BigInt(whole) * BigInt(1_000_000) + BigInt(fraction.padEnd(6, "0").slice(0, 6) || "0");
+      return (
+        BigInt(whole) * BigInt(1_000_000) +
+        BigInt(fraction.padEnd(6, "0").slice(0, 6) || "0")
+      );
     };
-    const toText = (value: bigint) => `${value / BigInt(1_000_000)}.${(value % BigInt(1_000_000)).toString().padStart(6, "0")}`;
-    const received = page.orders.reduce((sum, order) => sum + units(order.amount), BigInt(0));
-    const refunded = page.orders.reduce((sum, order) => sum + units(order.refunded), BigInt(0));
-    return { received: toText(received), count: page.orders.length, refunded: toText(refunded) };
+    const toText = (value: bigint) =>
+      `${value / BigInt(1_000_000)}.${(value % BigInt(1_000_000)).toString().padStart(6, "0")}`;
+    const received = page.orders.reduce(
+      (sum, order) => sum + units(order.amount),
+      BigInt(0),
+    );
+    const refunded = page.orders.reduce(
+      (sum, order) => sum + units(order.refunded),
+      BigInt(0),
+    );
+    return {
+      received: toText(received),
+      count: page.orders.length,
+      refunded: toText(refunded),
+    };
   }, [page]);
 
   const stats = [
-    { label: "Received", value: totals ? usdt(totals.received) : "—", unit: "USDT" },
+    {
+      label: "Received",
+      value: totals ? usdt(totals.received) : "—",
+      unit: "USDT",
+    },
     { label: "Payments", value: totals ? String(totals.count) : "—", unit: "" },
-    { label: "Refunded", value: totals ? usdt(totals.refunded) : "—", unit: "USDT" },
+    {
+      label: "Refunded",
+      value: totals ? usdt(totals.refunded) : "—",
+      unit: "USDT",
+    },
   ];
   return (
     <div className="grid grid-cols-1 overflow-hidden rounded-2xl border border-hair sm:grid-cols-3">
       {stats.map((stat, index) => (
-        <div key={stat.label} className={cn("grid gap-2 px-5 py-5", index > 0 && "border-t border-hair sm:border-t-0 sm:border-l")}>
+        <div
+          key={stat.label}
+          className={cn(
+            "grid gap-2 px-5 py-5",
+            index > 0 && "border-t border-hair sm:border-t-0 sm:border-l",
+          )}
+        >
           <Eyebrow>{stat.label}</Eyebrow>
           <p className="flex items-baseline gap-2">
-            <span className="font-display text-[32px] leading-none tracking-[-0.03em]">{stat.value}</span>
-            {stat.unit && <span className="font-mono text-[11px] text-muted-foreground">{stat.unit}</span>}
+            <span className="font-display text-[32px] leading-none tracking-[-0.03em]">
+              {stat.value}
+            </span>
+            {stat.unit && (
+              <span className="font-mono text-[11px] text-muted-foreground">
+                {stat.unit}
+              </span>
+            )}
           </p>
         </div>
       ))}
@@ -136,7 +217,15 @@ function Summary({ token }: { token: string }) {
   );
 }
 
-function OrdersTable({ orders, onRefund }: { orders: OrderRow[] | null; onRefund: (order: OrderRow) => void }) {
+function OrdersTable({
+  orders,
+  onRefund,
+  onView,
+}: {
+  orders: OrderRow[] | null;
+  onRefund: (order: OrderRow) => void;
+  onView: (orderId: string) => void;
+}) {
   if (!orders) {
     return (
       <div className="grid place-items-center py-16">
@@ -149,7 +238,8 @@ function OrdersTable({ orders, onRefund }: { orders: OrderRow[] | null; onRefund
       <div className="grid justify-items-center gap-1.5 px-6 py-16 text-center">
         <p className="text-[14.5px]">No payments here yet</p>
         <p className="max-w-sm text-[13px] leading-[1.6] text-muted-foreground">
-          Orders you create with your API key show up here as soon as they exist.
+          Orders you create with your API key show up here as soon as they
+          exist.
         </p>
       </div>
     );
@@ -158,7 +248,15 @@ function OrdersTable({ orders, onRefund }: { orders: OrderRow[] | null; onRefund
     <Table>
       <TableHeader>
         <TableRow className="border-hair hover:bg-transparent">
-          {["Date", "Reference", "Amount", "Route", "Status", "Customer", ""].map((head, index) => (
+          {[
+            "Date",
+            "Reference",
+            "Amount",
+            "Route",
+            "Status",
+            "Customer",
+            "",
+          ].map((head, index) => (
             <TableHead
               key={index}
               className={cn(
@@ -173,14 +271,27 @@ function OrdersTable({ orders, onRefund }: { orders: OrderRow[] | null; onRefund
       </TableHeader>
       <TableBody>
         {orders.map((order) => (
-          <OrderLine key={order.orderId} order={order} onRefund={onRefund} />
+          <OrderLine
+            key={order.orderId}
+            order={order}
+            onRefund={onRefund}
+            onView={onView}
+          />
         ))}
       </TableBody>
     </Table>
   );
 }
 
-function OrderLine({ order, onRefund }: { order: OrderRow; onRefund: (order: OrderRow) => void }) {
+function OrderLine({
+  order,
+  onRefund,
+  onView,
+}: {
+  order: OrderRow;
+  onRefund: (order: OrderRow) => void;
+  onView: (orderId: string) => void;
+}) {
   const status = ORDER_STATUS[order.status];
   const refundable =
     order.path !== null &&
@@ -188,15 +299,24 @@ function OrderLine({ order, onRefund }: { order: OrderRow; onRefund: (order: Ord
     order.refundStatus !== "pending" &&
     order.refundStatus !== "sending" &&
     order.refundStatus !== "sent";
-  const refundLive = order.refundStatus === "pending" || order.refundStatus === "sending" || order.refundStatus === "sent";
+  const refundLive =
+    order.refundStatus === "pending" ||
+    order.refundStatus === "sending" ||
+    order.refundStatus === "sent";
   return (
     <TableRow className="border-hair text-[13.5px] hover:bg-white/[0.02]">
-      <TableCell className="pl-5 text-muted-foreground tabular-nums">{formatTime(order.createdAt)}</TableCell>
-      <TableCell className="max-w-[180px] truncate font-mono text-[12.5px]">{order.reference}</TableCell>
+      <TableCell className="pl-5 text-muted-foreground tabular-nums">
+        {formatTime(order.createdAt)}
+      </TableCell>
+      <TableCell className="max-w-[180px] truncate font-mono text-[12.5px]">
+        {order.reference}
+      </TableCell>
       <TableCell className="text-right tabular-nums">
         {usdt(order.amount)}
         {Number(order.refunded) > 0 && (
-          <span className="block text-[11.5px] text-warn/80">−{usdt(order.refunded)}</span>
+          <span className="block text-[11.5px] text-warn/80">
+            −{usdt(order.refunded)}
+          </span>
         )}
       </TableCell>
       <TableCell className="text-muted-foreground">
@@ -214,7 +334,10 @@ function OrderLine({ order, onRefund }: { order: OrderRow; onRefund: (order: Ord
           {refundLive ? "Refunding" : status.text}
         </span>
         {order.refundStatus === "failed" && (
-          <span className="block max-w-[220px] truncate text-[11.5px] text-bad" title={order.refundError ?? ""}>
+          <span
+            className="block max-w-[220px] truncate text-[11.5px] text-bad"
+            title={order.refundError ?? ""}
+          >
             Refund failed{order.refundError ? `: ${order.refundError}` : ""}
           </span>
         )}
@@ -234,14 +357,59 @@ function OrderLine({ order, onRefund }: { order: OrderRow; onRefund: (order: Ord
               <Undo2 /> Refund
             </Button>
           )}
-          <Button variant="ghost" size="icon-sm" className="text-muted-foreground hover:text-foreground" asChild>
-            <a href={`/receipt/${order.orderId}`} target="_blank" rel="noreferrer" aria-label={`Receipt for ${order.reference}`}>
-              <ArrowUpRight />
-            </a>
+          <Button
+            variant="ghost"
+            size="icon-sm"
+            className="text-muted-foreground hover:text-foreground"
+            aria-label={`Receipt for ${order.reference}`}
+            title="Receipt"
+            onClick={() => onView(order.orderId)}
+          >
+            <ReceiptText />
           </Button>
         </div>
       </TableCell>
     </TableRow>
+  );
+}
+
+/** One order's receipt over the dashboard, with its PDF download; no new page or tab. */
+function ReceiptDialog({
+  orderId,
+  onClose,
+}: {
+  orderId: string | null;
+  onClose: () => void;
+}) {
+  return (
+    <Dialog open={orderId !== null} onOpenChange={(open) => !open && onClose()}>
+      <DialogContent className="max-h-[calc(100dvh-2rem)] gap-0 overflow-y-auto rounded-2xl bg-gradient-to-b from-panel-2 to-panel p-0 py-6 ring-hair-strong [--card-spacing:--spacing(6)] sm:max-w-[440px]">
+        <DialogTitle className="sr-only">Receipt</DialogTitle>
+        <DialogDescription className="sr-only">
+          Payment details and transactions.
+        </DialogDescription>
+        {orderId && <ReceiptView orderId={orderId} />}
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+function ReceiptView({ orderId }: { orderId: string }) {
+  const { order, problem } = useLiveOrder(orderId);
+  if (order) return <ReceiptDetails order={order} />;
+  if (problem)
+    return (
+      <div className="px-6">
+        <Problem>{problem}</Problem>
+      </div>
+    );
+  return (
+    <div className="grid place-items-center py-16 text-muted-foreground">
+      <Loader2
+        className="size-4 animate-spin"
+        aria-label="Loading the receipt"
+      />
+    </div>
   );
 }
 
@@ -277,13 +445,19 @@ function RefundDialog({
   async function refund() {
     if (!order) return;
     if (!wallet) {
-      setProblem(`Connect the payout wallet ${shortAddress(session.merchant.payoutAddress)} to sign the refund.`);
+      setProblem(
+        `Connect the payout wallet ${shortAddress(session.merchant.payoutAddress)} to sign the refund.`,
+      );
       return;
     }
     setBusy(true);
     setProblem(null);
     try {
-      const note = await refundNote(session.token, order.orderId, amount.trim());
+      const note = await refundNote(
+        session.token,
+        order.orderId,
+        amount.trim(),
+      );
       const signature = await signTypedDataWith(wallet, note.typedData);
       await submitRefund(session.token, order.orderId, note, signature);
       toast.success(`Refunding ${usdt(note.amount)} USDT`, {
@@ -310,11 +484,15 @@ function RefundDialog({
       <DialogContent className="border-hair-strong bg-gradient-to-b from-panel-2 to-panel sm:max-w-[420px]">
         <DialogHeader>
           <Eyebrow>Refund · {order?.reference}</Eyebrow>
-          <DialogTitle className="font-display text-2xl font-normal tracking-[-0.02em]">Send money back</DialogTitle>
+          <DialogTitle className="font-display text-2xl font-normal tracking-[-0.02em]">
+            Send money back
+          </DialogTitle>
           <DialogDescription className="leading-[1.65]">
-            The USDT goes from your payout wallet back to the customer who paid. Your wallet signs a note; Uniform sends
-            it and pays the gas.
-            {order && order.path !== "direct" && " They paid in USDC; the refund is USDT on Whitechain, to the same address."}
+            The USDT goes from your payout wallet back to the customer who paid.
+            Your wallet signs a note; Uniform sends it and pays the gas.
+            {order &&
+              order.path !== "direct" &&
+              " They paid in USDC; the refund is USDT on Whitechain, to the same address."}
           </DialogDescription>
         </DialogHeader>
         <form
@@ -324,7 +502,10 @@ function RefundDialog({
             void refund();
           }}
         >
-          <Label htmlFor="refund-amount" className="font-mono text-[10px] font-normal tracking-[0.1em] text-faint uppercase">
+          <Label
+            htmlFor="refund-amount"
+            className="font-mono text-[10px] font-normal tracking-[0.1em] text-faint uppercase"
+          >
             Amount · up to {usdt(left.toFixed(6))} USDT
           </Label>
           <div className="relative">
@@ -336,15 +517,21 @@ function RefundDialog({
               onChange={(event) => setAmount(event.target.value)}
               className="h-12 border-hair-strong bg-black/30 pr-16 font-display text-xl tracking-[-0.02em]"
             />
-            <span className="absolute top-1/2 right-4 -translate-y-1/2 font-mono text-[11px] text-muted-foreground">USDT</span>
+            <span className="absolute top-1/2 right-4 -translate-y-1/2 font-mono text-[11px] text-muted-foreground">
+              USDT
+            </span>
           </div>
           {!wallet && (
             <p className="text-[12.5px] leading-[1.6] text-warn">
-              Your payout wallet {shortAddress(session.merchant.payoutAddress)} isn&apos;t connected in this browser.
+              Your payout wallet {shortAddress(session.merchant.payoutAddress)}{" "}
+              isn&apos;t connected in this browser.
             </p>
           )}
           {problem && (
-            <p role="alert" className="border-l-2 border-bad pl-3 text-[13px] leading-[1.6] text-label">
+            <p
+              role="alert"
+              className="border-l-2 border-bad pl-3 text-[13px] leading-[1.6] text-label"
+            >
               {problem}
             </p>
           )}

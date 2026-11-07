@@ -5,6 +5,7 @@ import { HeroCanvas } from "./_home/hero-canvas";
 import { FlowDiagram } from "./_home/flow-diagram";
 import { TrustlessFlow } from "./_home/trustless-flow";
 import { EarnSection } from "./_home/earn-section";
+import { CustodySection } from "./_home/custody-section";
 import styles from "./_home/home.module.css";
 
 /** Partners, Whitechain first. All grey, the same as each other. */
@@ -26,6 +27,8 @@ export default function Home() {
         <Trustless />
         <Hatch />
         <EarnSection />
+        <Hatch />
+        <CustodySection />
         <Hatch />
       </main>
       <Footer />
