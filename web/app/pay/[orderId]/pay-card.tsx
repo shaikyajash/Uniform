@@ -618,7 +618,17 @@ export function PayCard({ orderId }: { orderId: string }) {
                       <TextButton onClick={logout}>Not you?</TextButton>
                     </div>
 
-                    <SourcePicker options={options} value={source} onChange={setPicked} disabled={step !== "idle"} />
+                    <SourcePicker
+                      options={options}
+                      value={source}
+                      onChange={setPicked}
+                      disabled={step !== "idle"}
+                      feeNote={
+                        feeBps === null
+                          ? `the provider's fee, at most ${providerFeeRange.max / 100}%`
+                          : `the provider's ${feeBps / 100}% fee`
+                      }
+                    />
 
                     <Reveal show={balances !== null && !anyEnough}>
                       <Notice>

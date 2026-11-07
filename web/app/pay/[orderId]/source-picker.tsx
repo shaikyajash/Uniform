@@ -49,11 +49,14 @@ export function SourcePicker({
   value,
   onChange,
   disabled,
+  feeNote,
 }: {
   options: SourceOption[];
   value: Source | null;
   onChange: (source: Source) => void;
   disabled?: boolean;
+  /** What USDC prices include: the cheapest provider's fee now, else the highest allowed. */
+  feeNote: string;
 }) {
   return (
     <div className="grid gap-2">
@@ -101,7 +104,7 @@ export function SourcePicker({
         })}
       </RadioGroup>
       {options.some((option) => option.note) && (
-        <p className="font-mono text-[10px] tracking-[0.06em] text-faint">USDC prices include the provider&apos;s 0.3% fee.</p>
+        <p className="font-mono text-[10px] tracking-[0.06em] text-faint">USDC prices include {feeNote}.</p>
       )}
       {options.some((option) => option.approx) && (
         <p className="font-mono text-[10px] tracking-[0.06em] text-faint">
