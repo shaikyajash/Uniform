@@ -88,10 +88,26 @@ export function SourcePicker({
             >
               <RadioGroupItem id={id} value={encodeSource(option.source)} disabled={blocked || disabled} />
               <span className="grid min-w-0 flex-1 gap-0.5">
-                <span className="font-mono text-[13px] text-foreground">{option.token}</span>
-                <span className="truncate text-[12.5px] text-muted-foreground">
-                  {option.detail ?? `on ${option.chain}`}
+                <span className="flex items-center gap-2 font-mono text-[13px] text-foreground">
+                  {option.token}
+                  {option.source.kind === "split" && (
+                    <span className="rounded-full border border-hair-strong px-1.5 py-px text-[9px] tracking-[0.1em] text-muted-foreground">
+                      SPLIT
+                    </span>
+                  )}
                 </span>
+                {option.source.kind === "split" && option.detail ? (
+                  // One line per chain, so neither part is cut off.
+                  option.detail.split(" + ").map((part) => (
+                    <span key={part} className="text-[12.5px] text-muted-foreground">
+                      {part}
+                    </span>
+                  ))
+                ) : (
+                  <span className="truncate text-[12.5px] text-muted-foreground">
+                    {option.detail ?? `on ${option.chain}`}
+                  </span>
+                )}
               </span>
               <span className="grid justify-items-end gap-0.5 text-right">
                 <span className="font-mono text-[13px] text-foreground">
