@@ -1,0 +1,26 @@
+#!/usr/bin/env bash
+# lock.sh <order-label> <secret-label>: add a 1 USDT order to the mock Order Desk, then the customer locks for Bob.
+# Locks 1.003 USDC by default; TOKEN=<address> AMOUNT=<units> locks another token (for EURC, about 0.905 EURC covers it).
+set -e; cd "$(dirname "$0")"
+ORDER=$(cast keccak "$1"); SECRET=$(cast keccak "$2")
+python3 - "$ORDER" <<'PY'
+import json,sys; p='.state/orders.json'
+try: d=json.load(open(p))
+except Exception: d={}
+d[sys.argv[1]]={"merchant":{"name":"Kettle & Co","address":"0x15d34AAf54267DB7D7c367839AAf71A00a2C6A65"},"amount":"1.000000","status":"quoted"}
+json.dump(d,open(p,'w'))
+PY
+# CHAIN=ethereum locks on the Ethereum Sepolia fork instead of Base (default USDC there too).
+if [ "${CHAIN:-base}" = ethereum ]; then RPC=http://127.0.0.1:8604; LOCK=0x3aCDE874Eeb36dD28507B5b1FF29219Ba262F5d9; USDC=0x1c7D4B196Cb0C7B01d743Fbc6116a902379C7238
+else RPC=http://127.0.0.1:8601; LOCK=0x02dF2659B5B4956EAFEe3293584C2aaefC114871; USDC=0x036CbD53842c5426634e7929541eC2318f3dCF7e; fi
+HERE=$PWD; cd ../../../contracts
+SOURCE_LOCK=$LOCK CUSTOMER_PRIVATE_KEY=$(cat $HERE/.state/customer.key) GAS_PAYER_PRIVATE_KEY=0x7c852118294e51e653712a81e05800f419141751be58f605c371e15141b007a6 BOB_ADDRESS=0x70997970C51812dc3A010C7d01b50e0d17dc79C8 ORDER_ID=$ORDER SECRET=$SECRET TOKEN=${TOKEN:-$USDC} AMOUNT=${AMOUNT:-1003000} MIN_USDC_OUT=${MIN_USDC_OUT:-0} \
+  forge script script/LockForBob.s.sol --rpc-url $RPC --broadcast 2>&1 | grep -A1 "source lockId" | tail -1 > $HERE/.state/last_lock
+cd $HERE; LOCK_ID=$(tr -d '[:space:]' < .state/last_lock); echo "$LOCK_ID"
+# The Order Desk lists the locks signed for an order; the Matchmaker fills only those.
+EXPIRY=$(cast call $LOCK "locks(bytes32)(address,uint64,uint8,address,uint96,bytes32,bytes32,address)" "$LOCK_ID" --rpc-url $RPC | sed -n 2p | awk '{print $1}')
+python3 - "$ORDER" "$(cast chain-id --rpc-url $RPC)" "$LOCK_ID" "$EXPIRY" <<'PY'
+import json,sys; p='.state/orders.json'; d=json.load(open(p))
+d[sys.argv[1]]["legs"]=[{"chainId":int(sys.argv[2]),"lockId":sys.argv[3],"expiry":int(sys.argv[4])}]
+json.dump(d,open(p,'w'))
+PY

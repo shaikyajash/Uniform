@@ -2,11 +2,22 @@
   "whitechainSepolia": {
     "chainId": 1874,
     "role": "shop",
-    "rpc": "https://rpc.testnet.whitechain.io",
+    "rpc": "https://rpc.ankr.com/whitechain_testnet",
     "explorer": "https://explorer.testnet.whitechain.io",
-    "tokens": { "USDT": { "address": "0xcedfB56113143d55b2358b8CFbB0dEB5Ad2f55a7", "decimals": 6 } },
+    "tokens": {
+      "USDT": {
+        "address": "0xcedfB56113143d55b2358b8CFbB0dEB5Ad2f55a7",
+        "decimals": 6,
+        "eip712": { "name": "Tether USD", "version": "1" }
+      }
+    },
     "permit2": "0x000000000022D473030F116dDEE9F6B43aC78BA3",
-    "contracts": { "aqua": "", "directPay": "", "payoutPool": "", "shopLock": "" },
+    "contracts": {
+      "aqua": "0x02dF2659B5B4956EAFEe3293584C2aaefC114871",
+      "directPay": "0x9DF1C7C32Ce3f1322e1c7bAEc30664b1c472DaE9",
+      "payoutPool": "0x3D79F7D2366D26c7325F58bEADbf7ECcB1d13E01",
+      "destinationLock": "0x669c928135B848C828144360aD7a73391968BDA3"
+    },
     "confirmations": 1
   },
   "baseSepolia": {
@@ -15,13 +26,30 @@
     "rpc": "https://sepolia.base.org",
     "explorer": "https://sepolia.basescan.org",
     "tokens": {
-      "USDC": { "address": "0x036CbD53842c5426634e7929541eC2318f3dCF7e", "decimals": 6 },
-      "EURC": { "address": "0x808456652fdb597867f38412077A9182bf77359F", "decimals": 6 }
+      "USDC": {
+        "address": "0x036CbD53842c5426634e7929541eC2318f3dCF7e",
+        "decimals": 6,
+        "eip712": { "name": "USDC", "version": "2" }
+      },
+      "EURC": {
+        "address": "0x808456652fdb597867f38412077A9182bf77359F",
+        "decimals": 6,
+        "eip712": { "name": "EURC", "version": "2" }
+      },
+      "WETH": { "address": "0x4200000000000000000000000000000000000006", "decimals": 18, "priceId": "ethereum" }
     },
-    "uniswap": { "poolManager": "0x05E73354cFDd6745C338b50BcFDfA3Aa6fA03408", "universalRouter": "0x492e6456d9528771018deb9e87ef7750ef184104", "positionManager": "0x4b2c77d209d3405f41a037ec6c77f7f5b8e2ca80", "quoter": "0x4a6513c898fe1b2d0e78d3b0e0a4a151589b1cba" },
+    "uniswap": {
+      "poolManager": "0x05E73354cFDd6745C338b50BcFDfA3Aa6fA03408",
+      "universalRouter": "0x492e6456d9528771018deb9e87ef7750ef184104",
+      "positionManager": "0x4b2c77d209d3405f41a037ec6c77f7f5b8e2ca80",
+      "quoter": "0x4a6513c898fe1b2d0e78d3b0e0a4a151589b1cba"
+    },
     "permit2": "0x000000000022D473030F116dDEE9F6B43aC78BA3",
-    "contracts": { "customerLock": "" },
-    "confirmations": 2
+    "contracts": {
+      "sourceLock": "0x3D79F7D2366D26c7325F58bEADbf7ECcB1d13E01",
+      "calibur": "0x000000005c84F8Fd50b21CAC312528A64437030e"
+    },
+    "confirmations": 10
   },
   "ethereumSepolia": {
     "chainId": 11155111,
@@ -29,14 +57,38 @@
     "rpc": "https://ethereum-sepolia-rpc.publicnode.com",
     "explorer": "https://sepolia.etherscan.io",
     "tokens": {
-      "USDC": { "address": "0x1c7D4B196Cb0C7B01d743Fbc6116a902379C7238", "decimals": 6 },
-      "EURC": { "address": "0x08210F9170F89Ab7658F0B5E3fF39b0E03C594D4", "decimals": 6 }
+      "USDC": {
+        "address": "0x1c7D4B196Cb0C7B01d743Fbc6116a902379C7238",
+        "decimals": 6,
+        "eip712": { "name": "USDC", "version": "2" }
+      },
+      "EURC": {
+        "address": "0x08210F9170F89Ab7658F0B5E3fF39b0E03C594D4",
+        "decimals": 6,
+        "eip712": { "name": "EURC", "version": "2" }
+      },
+      "WETH": { "address": "0xfFf9976782d46CC05630D1f6eBAb18b2324d6B14", "decimals": 18, "priceId": "ethereum" },
+      "WBTC": { "address": "0x29f2D40B0605204364af54EC677bD022dA425d03", "decimals": 8, "priceId": "bitcoin" }
     },
-    "uniswap": { "poolManager": "0xE03A1074c86CFeDd5C142C4F04F1a1536e203543", "universalRouter": "", "positionManager": "", "quoter": "" },
+    "uniswap": {
+      "poolManager": "0xE03A1074c86CFeDd5C142C4F04F1a1536e203543",
+      "universalRouter": "",
+      "positionManager": "",
+      "quoter": ""
+    },
     "permit2": "0x000000000022D473030F116dDEE9F6B43aC78BA3",
-    "contracts": { "customerLock": "" },
+    "contracts": {
+      "sourceLock": "0x7ff2630DD4620d7052eDD52B89e9248Bab878CB1",
+      "calibur": "0x000000005c84F8Fd50b21CAC312528A64437030e"
+    },
     "confirmations": 3
   },
-  "timeoutsSeconds": { "customerLock": 1200, "shopLock": 600, "fillCutoff": 900, "quote": 120 },
-  "providerFeeBps": 30
+  "timeoutsSeconds": {
+    "sourceLock": 1200,
+    "destinationLock": 600,
+    "fillCutoff": 900,
+    "quote": 120
+  },
+  "providerFeeBps": 30,
+  "providerFeeBpsRange": { "min": 10, "max": 100 }
 }

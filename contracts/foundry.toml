@@ -1,0 +1,20 @@
+[profile.default]
+src = "src"
+out = "out"
+libs = ["lib", "node_modules"]
+solc_version = "0.8.30"
+evm_version = "prague"
+via_ir = true
+optimizer = true
+optimizer_runs = 10000000
+remappings = [
+  "@1inch/aqua/=node_modules/@1inch/aqua/",
+  "@1inch/solidity-utils/=node_modules/@1inch/solidity-utils/",
+  "@openzeppelin/contracts/=node_modules/@openzeppelin/contracts/",
+  "forge-std/=lib/forge-std/src/",
+]
+
+[rpc_endpoints]
+whitechain = "https://rpc.ankr.com/whitechain_testnet"
+base_sepolia = "https://sepolia.base.org"
+sepolia = "https://ethereum-sepolia-rpc.publicnode.com"

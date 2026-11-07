@@ -1,0 +1,746 @@
+/* Home page: the hero and the feature blocks (the footer is components/ui/halftone-wordmark-footer). Colours and fonts come from globals.css. */
+
+.home {
+  position: relative;
+  min-height: 100vh;
+  overflow-x: hidden;
+}
+
+/* ---------- Hero ---------- */
+
+.hero {
+  position: relative;
+  min-height: max(720px, 100vh);
+  display: grid;
+  place-items: center;
+  /* More room below than above: the copy sits a little above the middle, clear of the rays. */
+  padding: 96px 24px 300px;
+  overflow: hidden;
+  isolation: isolate;
+}
+
+/* Edge to edge: the rays cross the whole window, over the side margins. */
+.heroStage {
+  position: absolute;
+  inset: 0;
+  z-index: -1;
+  overflow: hidden;
+  background: #000;
+}
+
+.heroCanvas {
+  display: block;
+  width: 100%;
+  height: 100%;
+}
+
+/* A light fade at the bottom so the logo strip reads. No side shade: the rainbow is on the left. */
+.heroShadeDown {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+}
+
+.heroShadeDown {
+  background: linear-gradient(180deg, transparent 70%, rgba(0, 0, 0, 0.6));
+}
+
+.heroCopy {
+  text-align: center;
+  display: grid;
+  justify-items: center;
+}
+
+.heroTitle {
+  margin-bottom: 24px;
+  font-family: var(--font-google-sans), system-ui, sans-serif;
+  font-weight: 400;
+  font-size: clamp(2rem, 4.6vw, 4.5rem);
+  line-height: 0.92;
+  letter-spacing: -0.025em;
+  color: #fff;
+  white-space: nowrap;
+  animation: rise 1000ms cubic-bezier(0.4, 0, 0.2, 1) both;
+}
+
+.fade {
+  display: block;
+  background: linear-gradient(180deg, #ffffff, #d4d4d8, #71717a);
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+}
+
+.heroLede {
+  margin-bottom: 40px;
+  font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+  font-size: 18px;
+  line-height: 1.625;
+  color: #fff;
+  --rise: 1rem;
+  animation: rise 700ms 150ms cubic-bezier(0.4, 0, 0.2, 1) both;
+}
+
+.line {
+  display: block;
+}
+
+.heroActions {
+  display: flex;
+  gap: 12px;
+  flex-wrap: wrap;
+  justify-content: center;
+  --rise: 1rem;
+  animation: rise 700ms 200ms cubic-bezier(0.4, 0, 0.2, 1) both;
+}
+
+@keyframes rise {
+  from {
+    opacity: 0;
+    transform: translateY(var(--rise, 2rem));
+  }
+}
+
+/* Partner logos along the bottom of the hero: grey, so they sit quietly under the headline. */
+.partners {
+  position: absolute;
+  left: var(--gutter);
+  right: var(--gutter);
+  bottom: 28px;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: center;
+  gap: 18px clamp(28px, 6vw, 96px);
+}
+
+/* Logos keep their own shape: on a narrow screen the row wraps rather than squeezing them. */
+.partner {
+  display: flex;
+  flex: none;
+  align-items: center;
+  gap: 12px;
+}
+
+.partnerLogo {
+  display: block;
+  flex: none;
+  max-width: none;
+  height: 28px;
+  width: auto;
+  opacity: 0.75;
+  filter: grayscale(1) brightness(1.4);
+}
+
+.partnerName {
+  font-family: var(--font-geist-mono), ui-monospace, monospace;
+  font-size: 12px;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: rgba(255, 255, 255, 0.6);
+  white-space: nowrap;
+}
+
+@media (max-width: 720px) {
+  .partners {
+    gap: 32px;
+  }
+
+  .partnerLogo {
+    height: 22px;
+  }
+}
+
+/* ---------- Hatched band ---------- */
+
+.hatch {
+  height: 40px;
+  margin: 0 var(--gutter);
+  border-top: 1px solid var(--hair);
+  border-bottom: 1px solid var(--hair);
+  background: repeating-linear-gradient(135deg, rgba(255, 255, 255, 0.06) 0 1px, transparent 1px 10px);
+}
+
+/* ---------- Features ---------- */
+
+.features {
+  margin: 0 var(--gutter);
+  padding: 96px 48px 120px;
+}
+
+.sectionHead {
+  display: grid;
+  grid-template-columns: 1.2fr 1fr;
+  gap: 40px;
+  align-items: end;
+  margin-bottom: 32px;
+}
+
+.sectionTitle {
+  font-weight: 400;
+  font-size: clamp(30px, 3.3vw, 48px);
+  line-height: 1.12;
+  letter-spacing: -0.03em;
+}
+
+.dim {
+  display: block;
+  color: #7f7f88;
+}
+
+.sectionLede {
+  font-size: 15px;
+  line-height: 1.7;
+  color: var(--muted-foreground);
+  max-width: 420px;
+  justify-self: end;
+}
+
+/* ---------- How it works: the flow diagram ---------- */
+
+.flowWrap {
+  margin-top: 56px;
+  border-top: 1px solid var(--hair);
+  padding-top: 40px;
+}
+
+.flow {
+  position: relative;
+  display: grid;
+  grid-template-columns: 1fr 1fr 1fr;
+  align-items: center;
+  height: 320px;
+}
+
+.flowColumn {
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  align-items: center;
+  gap: 96px;
+  height: 100%;
+}
+
+.flowNodeWrap {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 12px;
+}
+
+.flowNode {
+  position: relative;
+  z-index: 1;
+  width: 60px;
+  height: 60px;
+  border-radius: 50%;
+  border: 1px solid var(--hair-strong);
+  background: var(--panel);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: border-color 0.4s ease, box-shadow 0.4s ease;
+}
+
+.flowNodeOn {
+  border-color: rgba(111, 155, 255, 0.7);
+  box-shadow: 0 0 28px -6px rgba(111, 155, 255, 0.6);
+}
+
+.flowLogo {
+  display: block;
+  width: 30px;
+  height: 30px;
+  object-fit: contain;
+}
+
+
+.flowPair {
+  display: flex;
+  align-items: center;
+  flex-shrink: 0;
+}
+
+.flowToken,
+.flowChain {
+  display: block;
+  width: 26px;
+  height: 26px;
+  object-fit: contain;
+}
+
+.flowToken {
+  position: relative;
+  z-index: 10;
+}
+
+.flowChain {
+  position: relative;
+  z-index: 0;
+  margin-left: -8px;
+}
+
+.flowLabel {
+  font-family: var(--font-geist-mono), ui-monospace, monospace;
+  font-size: 11px;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: rgba(242, 242, 243, 0.62);
+  white-space: nowrap;
+}
+
+.flowDetail {
+  height: 168px;
+  margin-top: 28px;
+  max-width: 60ch;
+  overflow: hidden;
+}
+
+.flowDetailTitle {
+  margin: 0 0 8px;
+  font-size: 18px;
+  font-weight: 500;
+  color: #f2f2f3;
+}
+
+.flowDetailText {
+  margin: 0;
+  font-size: 16px;
+  line-height: 1.6;
+  color: rgba(242, 242, 243, 0.62);
+}
+
+.flowHint {
+  margin: 0;
+  font-size: 15px;
+  color: rgba(242, 242, 243, 0.4);
+}
+
+@media (max-width: 720px) {
+  .flow {
+    height: 280px;
+  }
+
+  .flowColumn {
+    gap: 64px;
+  }
+
+  .flowDetail {
+    height: 200px;
+  }
+
+  .flowNode {
+    width: 48px;
+    height: 48px;
+  }
+
+  .flowLabel {
+    font-size: 9px;
+  }
+}
+
+/* ---------- How we are trustless: the HTLC flow ---------- */
+
+.trustGrid {
+  display: grid;
+  grid-template-columns: minmax(0, 0.8fr) minmax(0, 1.2fr);
+  gap: 64px;
+  margin-top: 56px;
+  align-items: center;
+}
+
+/* ----- The steps: a plain list between hairlines ----- */
+
+.trustSteps {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  border-bottom: 1px solid var(--hair);
+}
+
+.trustFallback {
+  margin-top: 28px;
+}
+
+.trustDivider {
+  display: block;
+  padding-bottom: 10px;
+  font-family: var(--font-geist-mono), ui-monospace, monospace;
+  font-size: 10px;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: rgba(242, 242, 243, 0.35);
+}
+
+.trustStep {
+  position: relative;
+  width: 100%;
+  display: grid;
+  grid-template-columns: 36px 1fr;
+  align-items: baseline;
+  padding: 16px 0;
+  border: 0;
+  border-top: 1px solid var(--hair);
+  border-radius: 0;
+  background: transparent;
+  color: rgba(242, 242, 243, 0.4);
+  text-align: left;
+  cursor: pointer;
+  transition: color 0.25s ease;
+}
+
+.trustStep:hover {
+  color: rgba(242, 242, 243, 0.75);
+}
+
+.trustStep:focus-visible {
+  outline: 1px solid #f2f2f3;
+  outline-offset: 2px;
+}
+
+.trustStepOn,
+.trustStepOn:hover {
+  color: #f2f2f3;
+}
+
+.trustNum {
+  font-family: var(--font-geist-mono), ui-monospace, monospace;
+  font-size: 11px;
+  color: rgba(242, 242, 243, 0.3);
+}
+
+.trustStepOn .trustNum {
+  color: #f2f2f3;
+}
+
+.trustText {
+  display: grid;
+  gap: 6px;
+  min-width: 0;
+}
+
+.trustTitle {
+  font-size: 16px;
+  line-height: 1.3;
+  letter-spacing: -0.01em;
+}
+
+/* The active step's sentence opens under its title; the others stay one line. */
+.trustSays {
+  display: grid;
+  grid-template-rows: 0fr;
+  opacity: 0;
+  transition: grid-template-rows 0.4s cubic-bezier(0.22, 1, 0.36, 1), opacity 0.3s ease;
+}
+
+.trustSays > span {
+  overflow: hidden;
+  padding-right: 8px;
+  font-size: 13.5px;
+  line-height: 1.55;
+  color: rgba(242, 242, 243, 0.55);
+}
+
+.trustStepOn .trustSays {
+  grid-template-rows: 1fr;
+  opacity: 1;
+}
+
+/* The timer: the active row's top hairline fills in white until the next step. */
+.trustBar {
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: -1px;
+  height: 1px;
+}
+
+.trustBar i {
+  display: block;
+  height: 100%;
+  background: #f2f2f3;
+  transform-origin: left;
+}
+
+.trustBarFill {
+  animation: trustFill var(--step-ms) linear forwards;
+}
+
+.trustBarFull {
+  transform: scaleX(1);
+}
+
+@keyframes trustFill {
+  from {
+    transform: scaleX(0);
+  }
+  to {
+    transform: scaleX(1);
+  }
+}
+
+/* ----- The diagram ----- */
+
+.trustDiagram {
+  position: relative;
+  height: 400px;
+}
+
+.trustWires {
+  position: absolute;
+  inset: 0;
+  overflow: visible;
+  pointer-events: none;
+}
+
+.trustWires path {
+  fill: none;
+}
+
+.trustWireBase {
+  stroke: rgba(255, 255, 255, 0.1);
+  stroke-width: 1;
+}
+
+/* A live wire: the line turns solid white and a small dot travels along it with the money. */
+.trustWireLit {
+  stroke: #f2f2f3;
+  stroke-width: 1;
+  opacity: 0;
+  transition: opacity 0.4s ease;
+}
+
+.trustWireOn .trustWireLit {
+  opacity: 0.7;
+}
+
+/* Refunds: the same, dashed, and the dot runs back to the sender. */
+.trustWireBack .trustWireLit {
+  stroke-dasharray: 3 4;
+}
+
+.trustComet {
+  stroke: #f2f2f3;
+  stroke-width: 5;
+  stroke-linecap: round;
+  stroke-dasharray: 0 100;
+  opacity: 0;
+}
+
+.trustWireOn .trustComet {
+  opacity: 1;
+  animation: trustRun 2s cubic-bezier(0.45, 0, 0.55, 1) infinite;
+}
+
+.trustWireOn .trustCometBack {
+  animation-direction: reverse;
+}
+
+@keyframes trustRun {
+  from {
+    stroke-dashoffset: 100;
+  }
+  to {
+    stroke-dashoffset: 0;
+  }
+}
+
+.trustNodeWrap {
+  position: absolute;
+  transform: translate(-50%, -50%);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 10px;
+}
+
+.trustNode {
+  width: 52px;
+  height: 52px;
+  border-radius: 50%;
+  border: 1px solid var(--hair-strong);
+  background: var(--background);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: border-color 0.4s ease;
+}
+
+.trustLogo {
+  display: block;
+  width: 24px;
+  height: 24px;
+  object-fit: contain;
+  filter: grayscale(1);
+  opacity: 0.35;
+  transition: filter 0.4s ease, opacity 0.4s ease;
+}
+
+.trustLogoWide {
+  width: 32px;
+  height: auto;
+}
+
+/* The label sits on the page colour, so a wire passing under it is hidden, not drawn through it. */
+.trustLabel {
+  padding: 2px 6px;
+  background: var(--background);
+  font-family: var(--font-geist-mono), ui-monospace, monospace;
+  font-size: 10px;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: rgba(242, 242, 243, 0.3);
+  white-space: nowrap;
+  transition: color 0.4s ease;
+}
+
+.trustNodeWrapOn .trustNode {
+  border-color: rgba(242, 242, 243, 0.7);
+}
+
+.trustNodeWrapOn .trustLogo {
+  filter: none;
+  opacity: 1;
+}
+
+.trustNodeWrapOn .trustLabel {
+  color: #f2f2f3;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .trustWireOn .trustComet {
+    animation: none;
+    opacity: 0;
+  }
+}
+
+@media (max-width: 1000px) {
+  .trustGrid {
+    grid-template-columns: 1fr;
+    gap: 32px;
+  }
+
+  /* Diagram first, so the wires stay in view while the steps play below it. */
+  .trustDiagram {
+    order: -1;
+    height: 340px;
+  }
+}
+
+@media (max-width: 560px) {
+  .trustDiagram {
+    height: 280px;
+  }
+
+  .trustNode {
+    width: 38px;
+    height: 38px;
+  }
+
+  .trustLogo {
+    width: 18px;
+    height: 18px;
+  }
+
+  .trustLogoWide {
+    width: 26px;
+    height: auto;
+  }
+
+  .trustLabel {
+    font-size: 8px;
+    letter-spacing: 0.06em;
+  }
+}
+
+/* ---------- Footer ---------- */
+
+/* Between the side lines, like the hatched band above it, with room on each side so the word and
+   the links never touch them. */
+.footerFrame {
+  margin: 0 var(--gutter);
+  padding: 0 32px;
+}
+
+@media (max-width: 760px) {
+  .footerFrame {
+    padding: 0 16px;
+  }
+}
+
+/* ---------- Smaller screens ---------- */
+
+@media (max-width: 1000px) {
+  .features {
+    padding: 72px 20px 88px;
+  }
+
+  .sectionHead {
+    grid-template-columns: 1fr;
+  }
+
+  .sectionLede {
+    justify-self: start;
+  }
+
+  .grid {
+    grid-template-columns: 1fr;
+  }
+
+  .block {
+    border-right: 0 !important;
+    border-bottom: 1px solid var(--hair) !important;
+    padding: 32px 20px;
+  }
+
+  .block:last-child {
+    border-bottom: 0 !important;
+  }
+
+}
+
+@media (max-width: 760px) {
+  .hero {
+    padding: 110px 18px 120px;
+  }
+
+  .heroTitle {
+    max-width: 22rem;
+    white-space: normal;
+    text-wrap: balance;
+    font-size: clamp(2rem, 9vw, 2.5rem);
+    line-height: 0.96;
+  }
+
+  .heroLede {
+    max-width: 22rem;
+    margin-bottom: 32px;
+    font-size: 14px;
+  }
+
+  .line {
+    display: inline;
+  }
+
+  .flow {
+    flex-wrap: wrap;
+  }
+
+  .wire {
+    display: none;
+  }
+
+  .stage {
+    height: 320px;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .bar,
+  .dots i,
+  .heroTitle,
+  .heroLede,
+  .heroActions {
+    animation: none;
+  }
+}

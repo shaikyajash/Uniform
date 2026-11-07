@@ -1,0 +1,1243 @@
+//! Everything the Relayer asks of a chain, behind one trait so the job logic can be tested with a
+//! fake chain and run against Whitechain (or a local anvil copy of it) unchanged.
+//!
+//! Signing and sending are separate steps: the worker saves the signed bytes before it sends
+//! them, so a retry after a timeout or a crash sends the very same transaction again.
+
+use std::{future::Future, time::Duration};
+
+use alloy::{
+    eips::{
+        eip2718::Encodable2718,
+        eip7702::{Authorization, SignedAuthorization},
+    },
+    network::{EthereumWallet, NetworkTransactionBuilder, TransactionBuilder, TransactionBuilder7702},
+    primitives::{Address, B256, Bytes, Signature, U256},
+    providers::{DynProvider, Provider, ProviderBuilder},
+    rpc::types::{Filter, TransactionRequest},
+    signers::local::PrivateKeySigner,
+    sol,
+    sol_types::{SolCall, SolEvent},
+    transports::{RpcError, TransportErrorKind},
+};
+use common::{
+    amount::Amount,
+    calibur::{self, Batch},
+    chains::Chain as ChainConfig,
+    jobs::{Job, transfer_refund_nonce},
+    locks::{SourceLockParams, hashlock_of, source_lock_id},
+};
+
+sol! {
+    // The contract's nine arguments, not ours to shorten.
+    #[allow(clippy::too_many_arguments)]
+    #[sol(rpc)]
+    interface IDirectPay {
+        function pay(bytes32 orderId, address merchant, uint256 amount, address payer, uint256 validAfter,
+                     uint256 validBefore, uint8 v, bytes32 r, bytes32 s) external returns (bytes32 paymentId);
+        event Paid(bytes32 indexed paymentId, bytes32 indexed orderId, address indexed merchant,
+                   address payer, uint256 amount);
+        function refund(bytes32 paymentId, uint256 amount, uint256 validAfter, uint256 validBefore, uint8 v,
+                        bytes32 r, bytes32 s) external;
+        function payments(bytes32 paymentId) external view returns (address payer, uint96 amount,
+            address merchant, uint96 refunded, bytes32 orderId);
+        function refundNonceFor(bytes32 paymentId, uint256 amount, uint256 refundedBefore)
+            external view returns (bytes32);
+        event Refunded(bytes32 indexed paymentId, bytes32 indexed orderId, address indexed payer, uint256 amount,
+                       uint256 totalRefunded);
+    }
+
+    /// USDT on Whitechain, and USDC or EURC on customer chains: the EIP-3009 parts.
+    #[allow(clippy::too_many_arguments)]
+    #[sol(rpc)]
+    interface IToken {
+        function balanceOf(address owner) external view returns (uint256);
+        function authorizationState(address authorizer, bytes32 nonce) external view returns (bool);
+        function transferWithAuthorization(address from, address to, uint256 value, uint256 validAfter,
+            uint256 validBefore, bytes32 nonce, uint8 v, bytes32 r, bytes32 s) external;
+        event AuthorizationUsed(address indexed authorizer, bytes32 indexed nonce);
+    }
+
+    /// Tether's block list (USDT).
+    #[sol(rpc)]
+    interface ITether {
+        function isBlocked(address account) external view returns (bool);
+    }
+
+    /// Circle's block list (USDC, EURC).
+    #[sol(rpc)]
+    interface ICircle {
+        function isBlacklisted(address account) external view returns (bool);
+    }
+
+    struct LockParams {
+        bytes32 orderId;
+        address receiver;
+        uint256 minUsdcOut;
+        bytes32 hashlock;
+        uint64 expiry;
+        address outToken;
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    #[sol(rpc)]
+    interface ISourceLock {
+        function lockWithAuthorization(LockParams p, address payer, address tokenIn, uint256 amountIn,
+                                       uint256 validAfter, uint256 validBefore, uint8 v, bytes32 r, bytes32 s,
+                                       bytes swapData) external returns (bytes32 lockId);
+        function refund(bytes32 lockId) external;
+        function locks(bytes32 lockId) external view returns (address payer, uint64 expiry, uint8 state,
+            address receiver, uint96 amount, bytes32 hashlock, bytes32 orderId, address token);
+        event Locked(bytes32 indexed lockId, bytes32 indexed orderId, address payer, address receiver,
+                     address token, uint256 amount, bytes32 hashlock, uint64 expiry);
+        event Refunded(bytes32 indexed lockId);
+    }
+
+    #[sol(rpc)]
+    interface IDestinationLock {
+        function claim(bytes32 lockId, bytes32 secret) external;
+        function locks(bytes32 lockId) external view returns (address maker, uint64 expiry, uint8 state,
+            address merchant, uint96 amount, bytes32 hashlock, bytes32 orderId, bytes32 strategyHash,
+            bytes32 srcLockId, uint64 srcChainId);
+        event Settled(bytes32 indexed lockId, bytes32 indexed orderId, address indexed merchant, uint256 amount,
+                      uint256 srcChainId, bytes32 srcLockId, bytes32 secret);
+    }
+}
+
+/// A lock's state in both lock contracts.
+const LOCK_OPEN: u8 = 1;
+const LOCK_CLAIMED: u8 = 2;
+const LOCK_REFUNDED: u8 = 3;
+
+/// Why a chain call failed. A revert is final for this job; anything else is worth a retry.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ChainError {
+    /// The contract (or one of our checks) refused. Sending would waste gas.
+    Revert(String),
+    /// The RPC was down, slow or returned nonsense. Try again later.
+    Rpc(String),
+}
+
+impl std::fmt::Display for ChainError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ChainError::Revert(reason) => write!(f, "reverted: {reason}"),
+            ChainError::Rpc(reason) => write!(f, "rpc: {reason}"),
+        }
+    }
+}
+
+fn refuse<T>(reason: impl Into<String>) -> Result<T, ChainError> {
+    Err(ChainError::Revert(reason.into()))
+}
+
+/// A mined transaction: who sent it, whether it succeeded and what its gas cost (wei).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Mined {
+    pub from: Address,
+    pub success: bool,
+    pub gas_used: u64,
+    pub gas_cost: U256,
+}
+
+/// A signed transaction that has not necessarily been sent.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SignedTx {
+    pub raw: Bytes,
+    pub hash: B256,
+    pub nonce: u64,
+}
+
+/// `DirectPay.pay`'s arguments, with the signature split into v, r, s.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PayCall {
+    pub order_id: B256,
+    pub merchant: Address,
+    pub amount: Amount,
+    pub payer: Address,
+    pub valid_after: u64,
+    pub valid_before: u64,
+    pub nonce: B256,
+    pub v: u8,
+    pub r: B256,
+    pub s: B256,
+}
+
+/// `SourceLock.lockWithAuthorization`'s arguments, with the signature split into v, r, s. With
+/// `batch`, the same lock of any ERC-20 through the customer's Calibur account instead.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LockCall {
+    pub params: SourceLockParams,
+    pub payer: Address,
+    pub token: Address,
+    pub amount: Amount,
+    pub valid_after: u64,
+    pub valid_before: u64,
+    pub lock_id: B256,
+    pub v: u8,
+    pub r: B256,
+    pub s: B256,
+    /// `customer.execute(batch, signature)` (approve, then `SourceLock.lock`), sent by us.
+    /// Boxed: it would make every `Call` as large as a batch.
+    pub batch: Option<Box<Batch>>,
+}
+
+/// `DirectPay.refund`'s arguments, from the note the shop signed, with what the note was made against.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RefundCall {
+    pub payment_id: B256,
+    pub merchant: Address,
+    pub amount: Amount,
+    pub refunded_before: Amount,
+    pub valid_after: u64,
+    pub valid_before: u64,
+    /// `refundNonceFor(paymentId, amount, refundedBefore)`: the note's nonce.
+    pub nonce: B256,
+    pub v: u8,
+    pub r: B256,
+    pub s: B256,
+}
+
+/// A shop's USDT refund of a cross-chain or split payment: `USDT.transferWithAuthorization` from the
+/// shop's payout wallet to the customer.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TransferRefundCall {
+    pub order_id: B256,
+    pub merchant: Address,
+    pub customer: Address,
+    pub amount: Amount,
+    pub refunded_before: Amount,
+    pub valid_after: u64,
+    pub valid_before: u64,
+    /// `transfer_refund_nonce(..)`: the note's nonce.
+    pub nonce: B256,
+    pub v: u8,
+    pub r: B256,
+    pub s: B256,
+}
+
+/// `DestinationLock.claim`, and what the lock must promise before the secret is sent.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ClaimCall {
+    pub lock_id: B256,
+    pub secret: B256,
+    pub merchant: Address,
+    pub min_amount: Amount,
+    pub deadline: u64,
+}
+
+/// One transaction the Relayer can send. Every job kind maps to exactly one of these; there is no
+/// way to send anything else.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Call {
+    DirectPay(PayCall),
+    SourceLock(LockCall),
+    DestinationClaim(ClaimCall),
+    SourceRefund { lock_id: B256 },
+    DirectRefund(RefundCall),
+    TransferRefund(TransferRefundCall),
+}
+
+impl Call {
+    pub fn from_job(job: &Job) -> Result<Call, String> {
+        Ok(match job {
+            Job::DirectPay { order_id, merchant, amount, payer, valid_after, valid_before, nonce, signature } => {
+                let (v, r, s) = split_signature(signature)?;
+                Call::DirectPay(PayCall {
+                    order_id: *order_id,
+                    merchant: *merchant,
+                    amount: *amount,
+                    payer: *payer,
+                    valid_after: *valid_after,
+                    valid_before: *valid_before,
+                    nonce: *nonce,
+                    v,
+                    r,
+                    s,
+                })
+            }
+            Job::SourceLock { params, payer, token, amount, valid_after, valid_before, lock_id, signature, batch } => {
+                let (v, r, s) = split_signature(signature)?;
+                Call::SourceLock(LockCall {
+                    params: *params,
+                    payer: *payer,
+                    token: *token,
+                    amount: *amount,
+                    valid_after: *valid_after,
+                    valid_before: *valid_before,
+                    lock_id: *lock_id,
+                    v,
+                    r,
+                    s,
+                    batch: batch.map(Box::new),
+                })
+            }
+            Job::DestinationClaim { lock_id, secret, merchant, min_amount, deadline } => {
+                Call::DestinationClaim(ClaimCall {
+                    lock_id: *lock_id,
+                    secret: *secret,
+                    merchant: *merchant,
+                    min_amount: *min_amount,
+                    deadline: *deadline,
+                })
+            }
+            Job::SourceRefund { lock_id } => Call::SourceRefund { lock_id: *lock_id },
+            Job::DirectRefund {
+                order_id: _,
+                payment_id,
+                merchant,
+                amount,
+                refunded_before,
+                valid_after,
+                valid_before,
+                nonce,
+                signature,
+            } => {
+                let (v, r, s) = split_signature(signature)?;
+                Call::DirectRefund(RefundCall {
+                    payment_id: *payment_id,
+                    merchant: *merchant,
+                    amount: *amount,
+                    refunded_before: *refunded_before,
+                    valid_after: *valid_after,
+                    valid_before: *valid_before,
+                    nonce: *nonce,
+                    v,
+                    r,
+                    s,
+                })
+            }
+            Job::TransferRefund {
+                order_id,
+                merchant,
+                customer,
+                amount,
+                refunded_before,
+                valid_after,
+                valid_before,
+                nonce,
+                signature,
+            } => {
+                let (v, r, s) = split_signature(signature)?;
+                Call::TransferRefund(TransferRefundCall {
+                    order_id: *order_id,
+                    merchant: *merchant,
+                    customer: *customer,
+                    amount: *amount,
+                    refunded_before: *refunded_before,
+                    valid_after: *valid_after,
+                    valid_before: *valid_before,
+                    nonce: *nonce,
+                    v,
+                    r,
+                    s,
+                })
+            }
+        })
+    }
+
+    /// What marks this call as done on chain, by anyone: the note's nonce (a payment, a lock or a
+    /// shop refund), or the lock id (a claim or a lock refund).
+    pub fn done_id(&self) -> B256 {
+        match self {
+            Call::DirectPay(call) => call.nonce,
+            Call::SourceLock(call) => call.lock_id,
+            Call::DestinationClaim(call) => call.lock_id,
+            Call::SourceRefund { lock_id } => *lock_id,
+            Call::DirectRefund(call) => call.nonce,
+            Call::TransferRefund(call) => call.nonce,
+        }
+    }
+
+    /// The first indexed topic of the log this call emits. The done id, except for a shop refund:
+    /// DirectPay's `Refunded` log is under the payment id, and USDT's `AuthorizationUsed` under the
+    /// shop's address.
+    pub fn log_topic(&self) -> B256 {
+        match self {
+            Call::DirectRefund(call) => call.payment_id,
+            Call::TransferRefund(call) => call.merchant.into_word(),
+            _ => self.done_id(),
+        }
+    }
+
+    /// After this (unix seconds) the call can no longer succeed. A refund never runs out.
+    pub fn deadline(&self) -> Option<u64> {
+        match self {
+            Call::DirectPay(call) => Some(call.valid_before),
+            Call::SourceLock(call) => Some(call.batch.as_ref().map_or(call.valid_before, |batch| batch.deadline)),
+            Call::DestinationClaim(call) => Some(call.deadline),
+            Call::SourceRefund { .. } => None,
+            Call::DirectRefund(call) => Some(call.valid_before),
+            Call::TransferRefund(call) => Some(call.valid_before),
+        }
+    }
+
+    /// Whether the shop's daily gas budget can stop this call. It can stop a call that starts a
+    /// payment, while the customer's money is still in their wallet, and a shop's own refund. A
+    /// claim or a lock refund finishes money already locked, so it is sent even when the shop has
+    /// spent its budget.
+    pub fn uses_shop_budget(&self) -> bool {
+        matches!(self, Call::DirectPay(_) | Call::SourceLock(_) | Call::DirectRefund(_) | Call::TransferRefund(_))
+    }
+
+    /// The amount checked against the Relayer's order limit, in 6-decimal units. A lock carries
+    /// Bob's fee on top of the order, so it is allowed 1% more. A batch lock's token is not a
+    /// 6-decimal dollar, so its USD value (`minUsdcOut`) is checked instead.
+    pub fn amount_for_limit(&self) -> Option<U256> {
+        match self {
+            Call::DirectPay(call) => Some(call.amount.0),
+            Call::SourceLock(call) => {
+                let usd = if call.batch.is_some() { call.params.min_usdc_out.0 } else { call.amount.0 };
+                Some(usd * U256::from(100u64) / U256::from(101u64))
+            }
+            Call::DestinationClaim(_) | Call::SourceRefund { .. } | Call::DirectRefund(_) | Call::TransferRefund(_) => None,
+        }
+    }
+
+    /// A lock sent through the customer's Calibur account (a token without EIP-3009).
+    pub fn is_batch_lock(&self) -> bool {
+        matches!(self, Call::SourceLock(call) if call.batch.is_some())
+    }
+
+    /// Whether a failure that leaves nothing on chain hands the order back to `quoted`, so the
+    /// customer can sign again. Only the calls that carry the customer's note do.
+    pub fn reopens_order(&self) -> bool {
+        matches!(self, Call::DirectPay(_) | Call::SourceLock(_))
+    }
+
+    /// For messages: what runs out at the deadline.
+    pub fn what_runs_out(&self) -> &'static str {
+        match self {
+            Call::DirectPay(_) | Call::SourceLock(_) | Call::DirectRefund(_) | Call::TransferRefund(_) => "the note",
+            Call::DestinationClaim(_) | Call::SourceRefund { .. } => "the lock",
+        }
+    }
+}
+
+impl PayCall {
+    fn abi(&self) -> IDirectPay::payCall {
+        IDirectPay::payCall {
+            orderId: self.order_id,
+            merchant: self.merchant,
+            amount: self.amount.0,
+            payer: self.payer,
+            validAfter: U256::from(self.valid_after),
+            validBefore: U256::from(self.valid_before),
+            v: self.v,
+            r: self.r,
+            s: self.s,
+        }
+    }
+}
+
+impl RefundCall {
+    fn abi(&self) -> IDirectPay::refundCall {
+        IDirectPay::refundCall {
+            paymentId: self.payment_id,
+            amount: self.amount.0,
+            validAfter: U256::from(self.valid_after),
+            validBefore: U256::from(self.valid_before),
+            v: self.v,
+            r: self.r,
+            s: self.s,
+        }
+    }
+}
+
+impl TransferRefundCall {
+    fn abi(&self) -> IToken::transferWithAuthorizationCall {
+        IToken::transferWithAuthorizationCall {
+            from: self.merchant,
+            to: self.customer,
+            value: self.amount.0,
+            validAfter: U256::from(self.valid_after),
+            validBefore: U256::from(self.valid_before),
+            nonce: self.nonce,
+            v: self.v,
+            r: self.r,
+            s: self.s,
+        }
+    }
+}
+
+impl LockCall {
+    fn abi(&self) -> ISourceLock::lockWithAuthorizationCall {
+        let p = self.params;
+        ISourceLock::lockWithAuthorizationCall {
+            p: LockParams {
+                orderId: p.order_id,
+                receiver: p.receiver,
+                minUsdcOut: p.min_usdc_out.0,
+                hashlock: p.hashlock,
+                expiry: p.expiry,
+                outToken: p.out_token,
+            },
+            payer: self.payer,
+            tokenIn: self.token,
+            amountIn: self.amount.0,
+            validAfter: U256::from(self.valid_after),
+            validBefore: U256::from(self.valid_before),
+            v: self.v,
+            r: self.r,
+            s: self.s,
+            swapData: Bytes::new(),
+        }
+    }
+
+    /// The 65-byte signature (r, s, v) again, for Calibur.
+    fn signature(&self) -> Bytes {
+        [self.r.as_slice(), self.s.as_slice(), &[self.v]].concat().into()
+    }
+
+    /// The Calibur batch, rebuilt from the job's own lock: approve exactly `amount` to SourceLock,
+    /// then lock it.
+    fn signed_batch(&self, batch: &Batch, source_lock: Address) -> calibur::SignedBatchedCall {
+        calibur::signed_batch(calibur::lock_calls(source_lock, &self.params, self.token, self.amount), batch.nonce, batch.deadline)
+    }
+}
+
+impl Call {
+    /// The EIP-7702 authorization to send with this call: only a batch lock's first one, which
+    /// delegates the customer's wallet to Calibur.
+    fn authorization_list(&self) -> Option<Vec<SignedAuthorization>> {
+        match self {
+            Call::SourceLock(call) => call.batch.as_ref()?.authorization.map(|auth| vec![signed_authorization(&auth)]),
+            _ => None,
+        }
+    }
+}
+
+fn signed_authorization(auth: &calibur::Authorization) -> SignedAuthorization {
+    let inner = Authorization { chain_id: U256::from(auth.chain_id), address: auth.address, nonce: auth.nonce };
+    SignedAuthorization::new_unchecked(inner, auth.y_parity, auth.r, auth.s)
+}
+
+/// 65 bytes into the `v` (27 or 28), `r`, `s` that `receiveWithAuthorization` takes.
+pub fn split_signature(signature: &Bytes) -> Result<(u8, B256, B256), String> {
+    let parsed = Signature::from_raw(signature).map_err(|error| format!("bad signature: {error}"))?;
+    Ok((27 + u8::from(parsed.v()), parsed.r().into(), parsed.s().into()))
+}
+
+/// A batch lock's wallet code must be empty (then the authorization delegates it to Calibur) or
+/// Calibur's EIP-7702 designator (then any authorization keeps it there: checked in `check_batch`).
+fn check_delegation(code: &Bytes, batch: &Batch, calibur: Address) -> Result<(), ChainError> {
+    if code.is_empty() {
+        if batch.authorization.is_none() {
+            return refuse("the wallet is not delegated to Calibur and sent no authorization");
+        }
+        return Ok(());
+    }
+    if *code != calibur::delegation_code(calibur) {
+        return refuse("the wallet has code other than a delegation to Calibur");
+    }
+    Ok(())
+}
+
+pub trait Chain {
+    /// The Relayer's own address on this chain.
+    fn sender(&self) -> Address;
+    /// Has this call's effect happened on chain, by anyone? A note is used, or a lock claimed or
+    /// refunded, only by a mined transaction, never by a pending one.
+    async fn done(&self, call: &Call) -> Result<bool, ChainError>;
+    /// Every check before signing, ending with a dry run (`eth_call` of the exact transaction).
+    /// `Revert` means sending would fail or do harm; `Rpc` means try again.
+    async fn check(&self, call: &Call, now: u64) -> Result<(), ChainError>;
+    /// Signs the call with `nonce` (or the next free one) and the fee raised `fee_bumps` times by
+    /// 25%. Sends nothing.
+    async fn sign(&self, call: &Call, nonce: Option<u64>, fee_bumps: u32) -> Result<SignedTx, ChainError>;
+    /// Sends signed bytes. Sending the same bytes again is harmless: it is the same transaction.
+    async fn broadcast(&self, raw: &Bytes) -> Result<(), ChainError>;
+    /// `None` while not mined yet.
+    async fn receipt(&self, tx_hash: B256) -> Result<Option<Mined>, ChainError>;
+    /// The transaction that did this call's effect (its log), if any.
+    async fn find_done(&self, call: &Call) -> Result<Option<B256>, ChainError>;
+}
+
+/// Our contracts and tokens on one chain, from chains.json. A call for a contract that is not on
+/// this chain is refused.
+#[derive(Debug, Clone, Default)]
+struct Contracts {
+    direct_pay: Option<Address>,
+    source_lock: Option<Address>,
+    destination_lock: Option<Address>,
+    usdt: Option<Address>,
+    /// The tokens a SourceLock here may hold for us (USDC, EURC).
+    lockable: Vec<Address>,
+    /// Uniswap's Calibur: the only delegate a customer's wallet may have for a batch lock.
+    calibur: Option<Address>,
+    /// The tokens with a market price (`priceId`), locked through a Calibur batch (WETH, WBTC).
+    priced: Vec<Address>,
+}
+
+/// A real chain over JSON-RPC, signing with the Relayer's key.
+pub struct Rpc {
+    provider: DynProvider,
+    wallet: EthereumWallet,
+    sender: Address,
+    chain_id: u64,
+    contracts: Contracts,
+    /// The RPC address, kept only to remove it from error text: it may hold an API key.
+    url: String,
+}
+
+/// How far back to look for the log that shows a call was done. Notes live 10 minutes and locks
+/// 20; Whitechain makes about one block a second and Base one every two, so this is over an hour.
+const LOG_LOOKBACK_BLOCKS: u64 = 5_000;
+/// Every RPC call gives up after this, well inside the worker's lease.
+pub const RPC_TIMEOUT: Duration = Duration::from_secs(10);
+/// Gas limit = estimate + 20%.
+const GAS_MARGIN_PERCENT: u64 = 20;
+/// SPEC: do not send a claim with less than this left on the destination lock. A claim that
+/// reverts still puts the secret on chain, where Bob could use it.
+const MIN_CLAIM_TIME_LEFT: u64 = 120;
+/// Do not lock a customer's tokens unless Bob still has this long to fill: chains.json
+/// `fillCutoff` (900 s) plus a minute for the transaction and Base's safe block.
+pub const MIN_LOCK_TIME_LEFT: u64 = 960;
+
+impl Rpc {
+    pub fn connect(config: &ChainConfig, rpc_url: &str, signer: PrivateKeySigner) -> Result<Rpc, String> {
+        let token = |symbol: &str| config.tokens.get(symbol).map(|token| token.address);
+        let contracts = Contracts {
+            direct_pay: config.contracts.direct_pay,
+            source_lock: config.contracts.source_lock,
+            destination_lock: config.contracts.destination_lock,
+            usdt: token("USDT"),
+            lockable: ["USDC", "EURC"].into_iter().filter_map(token).collect(),
+            calibur: config.contracts.calibur,
+            priced: config.tokens.values().filter(|token| token.price_id.is_some()).map(|token| token.address).collect(),
+        };
+        let sender = signer.address();
+        let url = rpc_url.parse().map_err(|_| format!("chain {}: the RPC address is not a valid URL", config.chain_id))?;
+        let provider = ProviderBuilder::new().connect_http(url).erased();
+        Ok(Rpc {
+            provider,
+            wallet: EthereumWallet::from(signer),
+            sender,
+            chain_id: config.chain_id,
+            contracts,
+            url: rpc_url.trim_end_matches('/').to_owned(),
+        })
+    }
+
+    /// The RPC call, with a time limit and the RPC address taken out of any error.
+    async fn rpc<T>(&self, call: impl Future<Output = Result<T, RpcError<TransportErrorKind>>>) -> Result<T, ChainError> {
+        timed(RPC_TIMEOUT, call).await?.map_err(|error| self.clean(rpc_error(error)))
+    }
+
+    async fn contract<T>(&self, call: impl Future<Output = Result<T, alloy::contract::Error>>) -> Result<T, ChainError> {
+        let result = timed(RPC_TIMEOUT, call).await?;
+        result.map_err(|error| {
+            self.clean(match error {
+                alloy::contract::Error::TransportError(error) => rpc_error(error),
+                other => ChainError::Rpc(other.to_string()),
+            })
+        })
+    }
+
+    fn clean(&self, error: ChainError) -> ChainError {
+        let scrub = |text: String| if self.url.is_empty() { text } else { text.replace(&self.url, "<rpc>") };
+        match error {
+            ChainError::Revert(text) => ChainError::Revert(scrub(text)),
+            ChainError::Rpc(text) => ChainError::Rpc(scrub(text)),
+        }
+    }
+
+    fn need(&self, address: Option<Address>, what: &str) -> Result<Address, ChainError> {
+        address.map_or_else(|| refuse(format!("no {what} on chain {}", self.chain_id)), Ok)
+    }
+
+    /// Where the call goes and its calldata.
+    fn target(&self, call: &Call) -> Result<(Address, Vec<u8>), ChainError> {
+        Ok(match call {
+            Call::DirectPay(call) => (self.need(self.contracts.direct_pay, "DirectPay")?, call.abi().abi_encode()),
+            Call::SourceLock(call) => match &call.batch {
+                // To the customer's own address, which runs Calibur's code.
+                Some(batch) => {
+                    let batch = call.signed_batch(batch, self.need(self.contracts.source_lock, "SourceLock")?);
+                    (call.payer, calibur::execute_calldata(batch, &call.signature()).to_vec())
+                }
+                None => (self.need(self.contracts.source_lock, "SourceLock")?, call.abi().abi_encode()),
+            },
+            Call::DestinationClaim(call) => (
+                self.need(self.contracts.destination_lock, "DestinationLock")?,
+                IDestinationLock::claimCall { lockId: call.lock_id, secret: call.secret }.abi_encode(),
+            ),
+            Call::SourceRefund { lock_id } => (
+                self.need(self.contracts.source_lock, "SourceLock")?,
+                ISourceLock::refundCall { lockId: *lock_id }.abi_encode(),
+            ),
+            Call::DirectRefund(call) => (self.need(self.contracts.direct_pay, "DirectPay")?, call.abi().abi_encode()),
+            Call::TransferRefund(call) => (self.need(self.contracts.usdt, "USDT")?, call.abi().abi_encode()),
+        })
+    }
+
+    /// The transaction, without nonce, fees or gas: where it goes, its calldata and any EIP-7702
+    /// authorization (which makes it a type 0x04 transaction).
+    fn request(&self, call: &Call) -> Result<TransactionRequest, ChainError> {
+        let (to, input) = self.target(call)?;
+        let request = TransactionRequest::default().with_from(self.sender).with_to(to).with_input(input);
+        Ok(match call.authorization_list() {
+            Some(list) => request.with_authorization_list(list),
+            None => request,
+        })
+    }
+
+    /// `eth_call` of the exact transaction: free, and says whether sending would succeed.
+    async fn dry_run(&self, call: &Call) -> Result<(), ChainError> {
+        let request = self.request(call)?;
+        self.rpc(self.provider.call(request).into_future()).await.map(|_| ())
+    }
+
+    async fn note_used(&self, token: Address, payer: Address, nonce: B256) -> Result<bool, ChainError> {
+        let token = IToken::new(token, &self.provider);
+        self.contract(async { token.authorizationState(payer, nonce).call().await }).await
+    }
+
+    async fn balance(&self, token: Address, owner: Address) -> Result<U256, ChainError> {
+        let token = IToken::new(token, &self.provider);
+        self.contract(async { token.balanceOf(owner).call().await }).await
+    }
+
+    async fn source_lock_state(&self, lock_id: B256) -> Result<ISourceLock::locksReturn, ChainError> {
+        let lock = ISourceLock::new(self.need(self.contracts.source_lock, "SourceLock")?, &self.provider);
+        self.contract(async { lock.locks(lock_id).call().await }).await
+    }
+
+    async fn destination_lock_state(&self, lock_id: B256) -> Result<IDestinationLock::locksReturn, ChainError> {
+        let lock = IDestinationLock::new(self.need(self.contracts.destination_lock, "DestinationLock")?, &self.provider);
+        self.contract(async { lock.locks(lock_id).call().await }).await
+    }
+
+    async fn check_pay(&self, call: &PayCall) -> Result<(), ChainError> {
+        let usdt = self.need(self.contracts.usdt, "USDT")?;
+        let tether = ITether::new(usdt, &self.provider);
+        if self.contract(async { tether.isBlocked(call.payer).call().await }).await? {
+            return refuse("the payer is blocked by USDT");
+        }
+        if self.balance(usdt, call.payer).await? < call.amount.0 {
+            return refuse("the payer does not have enough USDT");
+        }
+        Ok(())
+    }
+
+    async fn check_lock(&self, call: &LockCall, now: u64) -> Result<(), ChainError> {
+        let source_lock = self.need(self.contracts.source_lock, "SourceLock")?;
+        if !self.contracts.lockable.contains(&call.token) {
+            return refuse("the token cannot be locked on this chain");
+        }
+        let expected = source_lock_id(self.chain_id, source_lock, &call.params, call.payer, call.token, call.amount);
+        if expected != call.lock_id {
+            return refuse("the lock id does not match its parameters");
+        }
+        if call.params.expiry < now + MIN_LOCK_TIME_LEFT {
+            return refuse("too little time left on the lock for Bob to fill it");
+        }
+        let circle = ICircle::new(call.token, &self.provider);
+        if self.contract(async { circle.isBlacklisted(call.payer).call().await }).await? {
+            return refuse("the payer is blacklisted by Circle");
+        }
+        if self.balance(call.token, call.payer).await? < call.amount.0 {
+            return refuse("the payer does not have enough USDC");
+        }
+        Ok(())
+    }
+
+    /// A batch lock: the checks that need no chain (`check_batch`), then the token balance, the
+    /// wallet's code, and that any authorization is for the wallet's next nonce. A wallet that is
+    /// not delegated would take the transaction as a plain call and do nothing, so these matter.
+    async fn check_batch_lock(&self, call: &LockCall, batch: &Batch, now: u64) -> Result<(), ChainError> {
+        self.check_batch(call, batch, now)?;
+        if self.balance(call.token, call.payer).await? < call.amount.0 {
+            return refuse("the payer does not have enough of the token");
+        }
+        let code = self.rpc(self.provider.get_code_at(call.payer).into_future()).await?;
+        check_delegation(&code, batch, self.need(self.contracts.calibur, "Calibur")?)?;
+        if let Some(auth) = batch.authorization {
+            // `pending`, as the pay page reads it when the wallet signs.
+            let nonce = self.rpc(self.provider.get_transaction_count(call.payer).pending().into_future()).await?;
+            if auth.nonce != nonce {
+                return refuse("the wallet's authorization is for another nonce; it must sign it again");
+            }
+        }
+        Ok(())
+    }
+
+    /// What a batch lock must be, from the job alone: our SourceLock and a priced token, the lock
+    /// id of its own parameters, time for Bob, a live deadline, the batch signed by the payer, and
+    /// any authorization signed by the payer, naming Calibur on this chain.
+    fn check_batch(&self, call: &LockCall, batch: &Batch, now: u64) -> Result<(), ChainError> {
+        let source_lock = self.need(self.contracts.source_lock, "SourceLock")?;
+        let calibur = self.need(self.contracts.calibur, "Calibur")?;
+        if !self.contracts.priced.contains(&call.token) {
+            return refuse("the token cannot be locked through Calibur on this chain");
+        }
+        let expected = source_lock_id(self.chain_id, source_lock, &call.params, call.payer, call.token, call.amount);
+        if expected != call.lock_id {
+            return refuse("the lock id does not match its parameters");
+        }
+        if call.params.expiry < now + MIN_LOCK_TIME_LEFT {
+            return refuse("too little time left on the lock for Bob to fill it");
+        }
+        if batch.deadline <= now {
+            return refuse("the batch's deadline has passed");
+        }
+        if batch.nonce != calibur::nonce_for(call.lock_id) {
+            return refuse("the batch's nonce is not the one for this lock");
+        }
+        let hash = calibur::signing_hash(&call.signed_batch(batch, source_lock), self.chain_id, call.payer, calibur);
+        let signer = Signature::from_raw(&call.signature()).ok().and_then(|signature| signature.recover_address_from_prehash(&hash).ok());
+        if signer != Some(call.payer) {
+            return refuse("the batch is not signed by the payer");
+        }
+        if let Some(auth) = &batch.authorization {
+            if auth.address != calibur {
+                return refuse("the authorization delegates to a contract other than Calibur");
+            }
+            // Chain id 0 would let the authorization be replayed on any chain: refuse it.
+            if auth.chain_id != self.chain_id {
+                return refuse("the authorization is for another chain");
+            }
+            if signed_authorization(auth).recover_authority().ok() != Some(call.payer) {
+                return refuse("the authorization is not signed by the payer");
+            }
+        }
+        Ok(())
+    }
+
+    /// SPEC: before sending the secret, the lock must pay this shop at least the order amount,
+    /// under this secret, with time to spare, and Tether must not have blocked the lock.
+    async fn check_claim(&self, call: &ClaimCall, now: u64) -> Result<(), ChainError> {
+        let lock = self.destination_lock_state(call.lock_id).await?;
+        if lock.state != LOCK_OPEN {
+            return refuse("the merchant's lock is not open");
+        }
+        if lock.merchant != call.merchant {
+            return refuse("the merchant's lock pays someone else");
+        }
+        if U256::from(lock.amount) < call.min_amount.0 {
+            return refuse("the merchant's lock holds less than the order");
+        }
+        if lock.hashlock != hashlock_of(call.secret) {
+            return refuse("the merchant's lock is under another secret");
+        }
+        if lock.expiry < now + MIN_CLAIM_TIME_LEFT {
+            return refuse("too little time left on the merchant's lock to send the secret safely");
+        }
+        let usdt = self.need(self.contracts.usdt, "USDT")?;
+        let destination_lock = self.need(self.contracts.destination_lock, "DestinationLock")?;
+        let tether = ITether::new(usdt, &self.provider);
+        if self.contract(async { tether.isBlocked(destination_lock).call().await }).await? {
+            return refuse("USDT has blocked the DestinationLock");
+        }
+        Ok(())
+    }
+
+    /// A shop refund only for the payment's own shop, against the refunds DirectPay has now, with
+    /// the nonce DirectPay itself computes, and only if the shop holds the USDT.
+    async fn check_direct_refund(&self, call: &RefundCall) -> Result<(), ChainError> {
+        let direct_pay = IDirectPay::new(self.need(self.contracts.direct_pay, "DirectPay")?, &self.provider);
+        let payment = self.contract(async { direct_pay.payments(call.payment_id).call().await }).await?;
+        if payment.payer == Address::ZERO {
+            return refuse("DirectPay has no such payment");
+        }
+        if payment.merchant != call.merchant {
+            return refuse("the payment went to another merchant");
+        }
+        if U256::from(payment.refunded) != call.refunded_before.0 {
+            return refuse("another refund landed first; the merchant must sign a new note");
+        }
+        if call.amount.0 > U256::from(payment.amount) - U256::from(payment.refunded) {
+            return refuse("the refund is more than what is left of the payment");
+        }
+        let nonce = self
+            .contract(async {
+                direct_pay.refundNonceFor(call.payment_id, call.amount.0, call.refunded_before.0).call().await
+            })
+            .await?;
+        if nonce != call.nonce {
+            return refuse("the note's nonce is not DirectPay's for this refund");
+        }
+        if self.balance(self.need(self.contracts.usdt, "USDT")?, call.merchant).await? < call.amount.0 {
+            return refuse("the merchant does not have enough USDT for the refund");
+        }
+        Ok(())
+    }
+
+    /// A shop's USDT refund: the nonce must be the one for this order, customer, amount and earlier
+    /// refunds, Tether must not have blocked either side, and the shop must hold the USDT.
+    async fn check_transfer_refund(&self, call: &TransferRefundCall) -> Result<(), ChainError> {
+        let usdt = self.need(self.contracts.usdt, "USDT")?;
+        let nonce = transfer_refund_nonce(
+            self.chain_id,
+            usdt,
+            call.order_id,
+            call.customer,
+            call.amount,
+            call.refunded_before,
+        );
+        if nonce != call.nonce {
+            return refuse("the note's nonce is not the one for this refund");
+        }
+        let tether = ITether::new(usdt, &self.provider);
+        for (who, address) in [("merchant", call.merchant), ("customer", call.customer)] {
+            if self.contract(async { tether.isBlocked(address).call().await }).await? {
+                return refuse(format!("the {who} is blocked by USDT"));
+            }
+        }
+        if self.balance(usdt, call.merchant).await? < call.amount.0 {
+            return refuse("the merchant does not have enough USDT for the refund");
+        }
+        Ok(())
+    }
+
+    /// Whether the lock has timed out is the chain's call: the dry run runs on its clock.
+    async fn check_refund(&self, lock_id: B256) -> Result<(), ChainError> {
+        match self.source_lock_state(lock_id).await?.state {
+            LOCK_OPEN => Ok(()),
+            LOCK_CLAIMED => refuse("Bob claimed the lock; there is nothing to refund"),
+            _ => refuse("there is no open lock with this id"),
+        }
+    }
+}
+
+impl Chain for Rpc {
+    fn sender(&self) -> Address {
+        self.sender
+    }
+
+    async fn done(&self, call: &Call) -> Result<bool, ChainError> {
+        match call {
+            Call::DirectPay(call) => self.note_used(self.need(self.contracts.usdt, "USDT")?, call.payer, call.nonce).await,
+            // A batch has no EIP-3009 note: the lock existing at all says it was done.
+            Call::SourceLock(call) if call.batch.is_some() => Ok(self.source_lock_state(call.lock_id).await?.state != 0),
+            Call::SourceLock(call) => self.note_used(call.token, call.payer, call.lock_id).await,
+            Call::DestinationClaim(call) => Ok(self.destination_lock_state(call.lock_id).await?.state == LOCK_CLAIMED),
+            Call::SourceRefund { lock_id } => Ok(self.source_lock_state(*lock_id).await?.state == LOCK_REFUNDED),
+            Call::DirectRefund(call) => {
+                self.note_used(self.need(self.contracts.usdt, "USDT")?, call.merchant, call.nonce).await
+            }
+            Call::TransferRefund(call) => {
+                self.note_used(self.need(self.contracts.usdt, "USDT")?, call.merchant, call.nonce).await
+            }
+        }
+    }
+
+    async fn check(&self, call: &Call, now: u64) -> Result<(), ChainError> {
+        match call {
+            Call::DirectPay(call) => self.check_pay(call).await?,
+            Call::SourceLock(call) => match &call.batch {
+                Some(batch) => self.check_batch_lock(call, batch, now).await?,
+                None => self.check_lock(call, now).await?,
+            },
+            Call::DestinationClaim(call) => self.check_claim(call, now).await?,
+            Call::SourceRefund { lock_id } => self.check_refund(*lock_id).await?,
+            Call::DirectRefund(call) => self.check_direct_refund(call).await?,
+            Call::TransferRefund(call) => self.check_transfer_refund(call).await?,
+        }
+        self.dry_run(call).await
+    }
+
+    async fn sign(&self, call: &Call, nonce: Option<u64>, fee_bumps: u32) -> Result<SignedTx, ChainError> {
+        let request = self.request(call)?;
+        let nonce = match nonce {
+            Some(nonce) => nonce,
+            None => self.rpc(self.provider.get_transaction_count(self.sender).pending().into_future()).await?,
+        };
+        let fees = self.rpc(self.provider.estimate_eip1559_fees()).await?;
+        let (mut max_fee, mut tip) = (fees.max_fee_per_gas, fees.max_priority_fee_per_gas);
+        for _ in 0..fee_bumps {
+            // +25% each time; nodes replace a pending transaction only for at least +10%.
+            max_fee = max_fee * 5 / 4 + 1;
+            tip = tip * 5 / 4 + 1;
+        }
+        let mut request = request
+            .with_chain_id(self.chain_id)
+            .with_nonce(nonce)
+            .with_max_fee_per_gas(max_fee)
+            .with_max_priority_fee_per_gas(tip);
+        let gas = self.rpc(self.provider.estimate_gas(request.clone()).into_future()).await?;
+        request.set_gas_limit(gas + gas * GAS_MARGIN_PERCENT / 100);
+        let envelope = request.build(&self.wallet).await.map_err(|error| ChainError::Rpc(format!("signing: {error}")))?;
+        Ok(SignedTx { raw: envelope.encoded_2718().into(), hash: *envelope.tx_hash(), nonce })
+    }
+
+    async fn broadcast(&self, raw: &Bytes) -> Result<(), ChainError> {
+        match self.rpc(async { self.provider.send_raw_transaction(raw).await.map(|_| ()) }).await {
+            // The node already has it, or its nonce is used (by this transaction, mined, or by
+            // another one): either way the receipt and the chain decide what happened.
+            Err(ChainError::Rpc(text) | ChainError::Revert(text)) if already_handled(&text) => Ok(()),
+            // A node never "reverts" a raw send; any refusal here is worth a retry.
+            Err(ChainError::Revert(text)) => Err(ChainError::Rpc(text)),
+            other => other,
+        }
+    }
+
+    async fn receipt(&self, tx_hash: B256) -> Result<Option<Mined>, ChainError> {
+        let receipt = self.rpc(self.provider.get_transaction_receipt(tx_hash).into_future()).await?;
+        Ok(receipt.map(|receipt| Mined {
+            from: receipt.from,
+            success: receipt.status(),
+            gas_used: receipt.gas_used,
+            gas_cost: U256::from(receipt.gas_used) * U256::from(receipt.effective_gas_price),
+        }))
+    }
+
+    async fn find_done(&self, call: &Call) -> Result<Option<B256>, ChainError> {
+        let (contract, event) = match call {
+            Call::DirectPay(_) => (self.need(self.contracts.direct_pay, "DirectPay")?, IDirectPay::Paid::SIGNATURE_HASH),
+            Call::SourceLock(_) => (self.need(self.contracts.source_lock, "SourceLock")?, ISourceLock::Locked::SIGNATURE_HASH),
+            Call::DestinationClaim(_) => {
+                (self.need(self.contracts.destination_lock, "DestinationLock")?, IDestinationLock::Settled::SIGNATURE_HASH)
+            }
+            Call::SourceRefund { .. } => {
+                (self.need(self.contracts.source_lock, "SourceLock")?, ISourceLock::Refunded::SIGNATURE_HASH)
+            }
+            Call::DirectRefund(_) => (self.need(self.contracts.direct_pay, "DirectPay")?, IDirectPay::Refunded::SIGNATURE_HASH),
+            Call::TransferRefund(_) => (self.need(self.contracts.usdt, "USDT")?, IToken::AuthorizationUsed::SIGNATURE_HASH),
+        };
+        let latest = self.rpc(self.provider.get_block_number().into_future()).await?;
+        let filter = Filter::new()
+            .address(contract)
+            .event_signature(event)
+            .topic1(call.log_topic())
+            .from_block(latest.saturating_sub(LOG_LOOKBACK_BLOCKS))
+            .to_block(latest);
+        let logs = self.rpc(self.provider.get_logs(&filter).into_future()).await?;
+        // A payment can be refunded in parts, all under its id: ours is the one that brought the
+        // total to what this note was for.
+        let ours = |log: &&alloy::rpc::types::Log| match call {
+            Call::DirectRefund(call) => IDirectPay::Refunded::decode_log_data(log.data())
+                .is_ok_and(|event| event.totalRefunded == call.refunded_before.0 + call.amount.0),
+            // The shop authorizes many transfers: ours is the one under this note's nonce.
+            Call::TransferRefund(call) => log.topics().get(2) == Some(&call.nonce),
+            _ => true,
+        };
+        Ok(logs.iter().find(ours).and_then(|log| log.transaction_hash))
+    }
+}
+
+/// Runs `call`, or gives up with an RPC error after `limit`.
+pub async fn timed<T>(limit: Duration, call: impl Future<Output = T>) -> Result<T, ChainError> {
+    tokio::time::timeout(limit, call).await.map_err(|_| ChainError::Rpc(format!("no answer within {limit:?}")))
+}
+
+fn already_handled(text: &str) -> bool {
+    let text = text.to_ascii_lowercase();
+    ["already known", "known transaction", "nonce too low", "already imported"].iter().any(|phrase| text.contains(phrase))
+}
+
+fn rpc_error(error: RpcError<TransportErrorKind>) -> ChainError {
+    match error.as_error_resp() {
+        // JSON-RPC code 3 is "execution reverted".
+        Some(response) if response.code == 3 || response.message.contains("revert") => {
+            ChainError::Revert(response.message.to_string())
+        }
+        _ => ChainError::Rpc(error.to_string()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use alloy::{signers::SignerSync, sol_types::SolValue};
+
+    #[test]
+    fn signatures_split_into_v_27_or_28() {
+        let signer = PrivateKeySigner::random();
+        for byte in 0..8u8 {
+            let signature = signer.sign_hash_sync(&B256::repeat_byte(byte)).unwrap();
+            let (v, r, s) = split_signature(&Bytes::from(signature.as_bytes().to_vec())).unwrap();
+            assert!(v == 27 || v == 28, "v = {v}");
+            assert_eq!((r, s), (signature.r().into(), signature.s().into()));
+        }
+        assert!(split_signature(&Bytes::from(vec![1u8; 64])).is_err());
+    }
+
+    #[tokio::test]
+    async fn a_call_that_never_answers_times_out() {
+        let result = timed(Duration::from_millis(20), std::future::pending::<()>()).await;
+        assert!(matches!(result, Err(ChainError::Rpc(_))));
+    }
+
+    #[test]
+    fn errors_never_carry_the_rpc_address() {
+        let config = common::chains::Chains::from_json(include_str!("../../../shared/chains.json")).unwrap();
+        let url = "https://rpc.example/v1/SECRET-KEY";
+        let rpc = Rpc::connect(config.shop_chain(), url, PrivateKeySigner::random()).unwrap();
+        let cleaned = rpc.clean(ChainError::Rpc(format!("error sending request for url ({url}/)")));
+        assert_eq!(cleaned, ChainError::Rpc("error sending request for url (<rpc>/)".into()));
+    }
+
+    #[test]
+    fn resending_known_transactions_counts_as_sent() {
+        for text in ["already known", "Known transaction: 0xab", "nonce too low: next nonce 5, tx nonce 4"] {
+            assert!(already_handled(text), "{text}");
+        }
+        assert!(!already_handled("insufficient funds for gas * price + value"));
+    }
+
+    // ---- Batch locks (any ERC-20 through Calibur) ----
+
+    const SEPOLIA: u64 = 11_155_111;
+    const NOW: u64 = 1_800_000_000;
+
+    fn sepolia() -> Rpc {
+        let config = common::chains::Chains::from_json(include_str!("../../../shared/chains.json")).unwrap();
+        Rpc::connect(config.by_id(SEPOLIA).unwrap(), "http://127.0.0.1:1", PrivateKeySigner::random()).unwrap()
+    }
+
+    fn authorization(wallet: &PrivateKeySigner, chain_id: u64, delegate: Address) -> calibur::Authorization {
+        let inner = Authorization { chain_id: U256::from(chain_id), address: delegate, nonce: 0 };
+        let signature = wallet.sign_hash_sync(&inner.signature_hash()).unwrap();
+        calibur::Authorization {
+            chain_id,
+            address: delegate,
+            nonce: 0,
+            y_parity: u8::from(signature.v()),
+            r: signature.r(),
+            s: signature.s(),
+        }
+    }
+
+    /// A batch lock of 0.00001 WBTC, signed by `wallet`, with or without an authorization.
+    fn batch_lock(rpc: &Rpc, wallet: &PrivateKeySigner, token: Address, auth: Option<calibur::Authorization>) -> LockCall {
+        let source_lock = rpc.contracts.source_lock.unwrap();
+        let params = SourceLockParams {
+            order_id: B256::repeat_byte(1),
+            receiver: Address::repeat_byte(0xb0),
+            min_usdc_out: Amount::from(1_003_000u64),
+            hashlock: B256::repeat_byte(2),
+            expiry: NOW + 1_200,
+            out_token: Address::ZERO,
+        };
+        let amount = Amount::from(1_000u64);
+        let lock_id = source_lock_id(SEPOLIA, source_lock, &params, wallet.address(), token, amount);
+        let batch = Batch { nonce: calibur::nonce_for(lock_id), deadline: NOW + 600, authorization: auth };
+        let signed = calibur::signed_batch(calibur::lock_calls(source_lock, &params, token, amount), batch.nonce, batch.deadline);
+        let hash = calibur::signing_hash(&signed, SEPOLIA, wallet.address(), rpc.contracts.calibur.unwrap());
+        let signature = wallet.sign_hash_sync(&hash).unwrap();
+        let job = Job::SourceLock {
+            params,
+            payer: wallet.address(),
+            token,
+            amount,
+            valid_after: 0,
+            valid_before: 0,
+            lock_id,
+            signature: Bytes::from(signature.as_bytes().to_vec()),
+            batch: Some(batch),
+        };
+        match Call::from_job(&job).unwrap() {
+            Call::SourceLock(call) => call,
+            _ => unreachable!(),
+        }
+    }
+
+    fn wbtc(rpc: &Rpc) -> Address {
+        *rpc.contracts.priced.iter().find(|token| **token == alloy::primitives::address!("29f2D40B0605204364af54EC677bD022dA425d03")).unwrap()
+    }
+
+    fn refused(result: Result<(), ChainError>, reason: &str) {
+        match result {
+            Err(ChainError::Revert(text)) => assert!(text.contains(reason), "{text}"),
+            other => panic!("expected a refusal containing {reason:?}, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_batch_lock_goes_to_the_payer_as_calibur_execute() {
+        let rpc = sepolia();
+        let wallet = PrivateKeySigner::random();
+        let call = batch_lock(&rpc, &wallet, wbtc(&rpc), None);
+        let source_lock = rpc.contracts.source_lock.unwrap();
+        let (to, input) = rpc.target(&Call::SourceLock(call.clone())).unwrap();
+        assert_eq!(to, wallet.address());
+        let execute = calibur::ICalibur::executeCall::abi_decode(&input).unwrap();
+        let calls = &execute.signedBatchedCall.batchedCall.calls;
+        assert_eq!(calls.len(), 2);
+        assert!(execute.signedBatchedCall.batchedCall.revertOnFailure);
+        assert_eq!(execute.signedBatchedCall.nonce, calibur::nonce_for(call.lock_id));
+        assert_eq!(calls[0].to, call.token);
+        let approve = calibur::IErc20Approve::approveCall::abi_decode(&calls[0].data).unwrap();
+        assert_eq!((approve.spender, approve.amount), (source_lock, call.amount.0));
+        assert_eq!(calls[1].to, source_lock);
+        let lock = calibur::ISourceLockLock::lockCall::abi_decode(&calls[1].data).unwrap();
+        assert_eq!((lock.token, lock.amount, lock.p.orderId), (call.token, call.amount.0, call.params.order_id));
+        let (signature, hook) = <(Bytes, Bytes)>::abi_decode_params(&execute.wrappedSignature).unwrap();
+        assert_eq!((signature, hook), (call.signature(), Bytes::new()));
+        // The batch's own deadline applies, and the order limit sees its dollar value.
+        let call = Call::SourceLock(call);
+        assert_eq!(call.deadline(), Some(NOW + 600));
+        assert_eq!(call.amount_for_limit(), Some(U256::from(1_003_000u64 * 100 / 101)));
+    }
+
+    #[test]
+    fn the_authorization_is_sent_only_when_the_wallet_signed_one() {
+        let rpc = sepolia();
+        let wallet = PrivateKeySigner::random();
+        let calibur = rpc.contracts.calibur.unwrap();
+        let without = Call::SourceLock(batch_lock(&rpc, &wallet, wbtc(&rpc), None));
+        assert_eq!(rpc.request(&without).unwrap().authorization_list, None);
+        let auth = authorization(&wallet, SEPOLIA, calibur);
+        let with = Call::SourceLock(batch_lock(&rpc, &wallet, wbtc(&rpc), Some(auth)));
+        let list = rpc.request(&with).unwrap().authorization_list.unwrap();
+        assert_eq!(list.len(), 1);
+        assert_eq!(list[0].address, calibur);
+        assert_eq!(list[0].recover_authority().unwrap(), wallet.address());
+    }
+
+    #[test]
+    fn a_good_batch_lock_passes_the_checks() {
+        let rpc = sepolia();
+        let wallet = PrivateKeySigner::random();
+        let calibur = rpc.contracts.calibur.unwrap();
+        for auth in [None, Some(authorization(&wallet, SEPOLIA, calibur))] {
+            let call = batch_lock(&rpc, &wallet, wbtc(&rpc), auth);
+            rpc.check_batch(&call, call.batch.as_ref().unwrap(), NOW).unwrap();
+        }
+        // Chain id 0 is valid on every chain, so it could be replayed elsewhere: refused.
+        let call = batch_lock(&rpc, &wallet, wbtc(&rpc), Some(authorization(&wallet, 0, calibur)));
+        assert!(rpc.check_batch(&call, call.batch.as_ref().unwrap(), NOW).is_err());
+    }
+
+    #[test]
+    fn the_checks_refuse_a_bad_batch_lock() {
+        let rpc = sepolia();
+        let wallet = PrivateKeySigner::random();
+        let calibur = rpc.contracts.calibur.unwrap();
+        let check = |call: &LockCall, now| rpc.check_batch(call, call.batch.as_ref().unwrap(), now);
+        let other = Address::repeat_byte(0x66);
+        refused(check(&batch_lock(&rpc, &wallet, wbtc(&rpc), Some(authorization(&wallet, SEPOLIA, other))), NOW), "other than Calibur");
+        refused(check(&batch_lock(&rpc, &wallet, wbtc(&rpc), Some(authorization(&wallet, 84_532, calibur))), NOW), "another chain");
+        let stranger = PrivateKeySigner::random();
+        refused(check(&batch_lock(&rpc, &wallet, wbtc(&rpc), Some(authorization(&stranger, SEPOLIA, calibur))), NOW), "not signed by the payer");
+        let mut expired = batch_lock(&rpc, &wallet, wbtc(&rpc), None);
+        expired.batch.as_mut().unwrap().deadline = NOW;
+        refused(check(&expired, NOW), "deadline has passed");
+        // USDC has a note path and no price: not lockable through Calibur.
+        let usdc = alloy::primitives::address!("1c7D4B196Cb0C7B01d743Fbc6116a902379C7238");
+        refused(check(&batch_lock(&rpc, &wallet, usdc, None), NOW), "cannot be locked through Calibur");
+        let mut signed_by_another = batch_lock(&rpc, &stranger, wbtc(&rpc), None);
+        let mine = batch_lock(&rpc, &wallet, wbtc(&rpc), None);
+        (signed_by_another.v, signed_by_another.r, signed_by_another.s) = (mine.v, mine.r, mine.s);
+        refused(check(&signed_by_another, NOW), "not signed by the payer");
+        let mut wrong_nonce = batch_lock(&rpc, &wallet, wbtc(&rpc), None);
+        wrong_nonce.batch.as_mut().unwrap().nonce = U256::from(1);
+        refused(check(&wrong_nonce, NOW), "nonce");
+    }
+
+    #[test]
+    fn the_wallet_must_be_bare_with_an_authorization_or_delegated_to_calibur() {
+        let calibur = alloy::primitives::address!("000000005c84F8Fd50b21CAC312528A64437030e");
+        let wallet = PrivateKeySigner::random();
+        let bare = Batch { nonce: U256::ZERO, deadline: NOW, authorization: None };
+        let first = Batch { authorization: Some(authorization(&wallet, SEPOLIA, calibur)), ..bare };
+        check_delegation(&Bytes::new(), &first, calibur).unwrap();
+        refused(check_delegation(&Bytes::new(), &bare, calibur), "not delegated");
+        check_delegation(&calibur::delegation_code(calibur), &bare, calibur).unwrap();
+        check_delegation(&calibur::delegation_code(calibur), &first, calibur).unwrap();
+        let elsewhere = calibur::delegation_code(Address::repeat_byte(0x66));
+        refused(check_delegation(&elsewhere, &bare, calibur), "other than a delegation to Calibur");
+        refused(check_delegation(&Bytes::from(vec![0x60, 0x80]), &first, calibur), "other than a delegation to Calibur");
+    }
+}

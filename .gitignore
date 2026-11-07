@@ -10,3 +10,5 @@ broadcast/*/31337/
 *.sqlite
 *.db
 .DS_Store
+**/dry-run/
+target/
