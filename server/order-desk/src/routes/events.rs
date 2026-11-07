@@ -205,7 +205,7 @@ fn order_id_of(kind: &EventKind) -> Option<String> {
 }
 
 /// `Authorization: Bearer <INTERNAL_EVENTS_TOKEN>`, compared in constant time.
-fn has_token(headers: &HeaderMap, expected: &str) -> bool {
+pub(crate) fn has_token(headers: &HeaderMap, expected: &str) -> bool {
     let Some(given) = headers.get(AUTHORIZATION).and_then(|value| value.to_str().ok()) else {
         return false;
     };

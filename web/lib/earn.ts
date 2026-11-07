@@ -25,7 +25,7 @@ import {
   type Hex,
 } from "viem";
 import type { ConnectedWallet } from "@privy-io/react-auth";
-import { providerFeeBps, shopChain, shopViemChain } from "./chain";
+import { providerFeeRange, shopChain, shopViemChain } from "./chain";
 
 /**
  * The Matchmaker's address: the only one allowed to fill from a strategy (`filler`). It is the
@@ -86,13 +86,15 @@ export type Shipped = {
   balance: bigint;
   /** Docked: closed for good. */
   docked: boolean;
-  /** Uniform's Matchmaker can fill from it (it is the filler and the token is USDT). */
+  /** Uniform's Matchmaker can fill from it (it is the filler, the token is USDT and the fee is in range). */
   forUniform: boolean;
   shippedTx: Hex;
 };
 
 export type FillRecord = {
   orderId: Hex;
+  /** The strategy that paid. */
+  strategyHash: Hex;
   amount: bigint;
   lockId: Hex;
   tx: Hex;
@@ -217,7 +219,8 @@ export async function readPosition(maker: Address): Promise<Position> {
         docked,
         forUniform:
           same(decoded.filler, UNIFORM_FILLER) &&
-          same(decoded.token, shopChain.usdt),
+          same(decoded.token, shopChain.usdt) &&
+          feeAllowed(Number(decoded.feeBps)),
         shippedTx: log.transaction_hash,
       };
     }),
@@ -234,6 +237,7 @@ export async function readPosition(maker: Address): Promise<Position> {
       const p = params(log);
       return {
         orderId: p.orderId as Hex,
+        strategyHash: p.strategyHash as Hex,
         amount: BigInt(p.amount),
         lockId: p.lockId as Hex,
         tx: log.transaction_hash,
@@ -254,15 +258,22 @@ export function payableNow(position: Position): bigint {
 }
 
 /**
- * Fees earned, estimated: the provider's fee rate times what they paid out. The real fee arrives
- * as USDC on the customer's chain when the provider claims, which this page doesn't read.
+ * Fees earned, estimated: each payout times the fee of the strategy that paid it. The real fee
+ * arrives in the customer's token on their chain when the provider claims, which this page doesn't
+ * read.
  */
 export function estimatedFees(position: Position): bigint {
-  const volume = position.fills.reduce(
-    (sum, fill) => sum + fill.amount,
+  const feeOf = new Map(position.strategies.map((s) => [s.hash.toLowerCase(), s.strategy.feeBps]));
+  return position.fills.reduce(
+    (sum, fill) =>
+      sum + (fill.amount * BigInt(feeOf.get(fill.strategyHash.toLowerCase()) ?? 0)) / BigInt(10_000),
     BigInt(0),
   );
-  return (volume * BigInt(providerFeeBps)) / BigInt(10_000);
+}
+
+/** Whether Uniform fills from a strategy with this fee (basis points). */
+export function feeAllowed(feeBps: number): boolean {
+  return Number.isInteger(feeBps) && feeBps >= providerFeeRange.min && feeBps <= providerFeeRange.max;
 }
 
 /** Sends one transaction from the provider's wallet on Whitechain and waits for it. */
@@ -321,20 +332,28 @@ async function approveIfNeeded(
   onStep(`Step 2 of 2: ${final.charAt(0).toLowerCase()}${final.slice(1)}`);
 }
 
-/** A new strategy for Uniform: Uniform's filler, USDT, the advertised fee, a fresh salt. */
+/**
+ * A new strategy for Uniform: Uniform's filler, USDT, the provider's own fee, a fresh salt. Each
+ * cross-chain payment goes to the lowest fee that can cover it, so a lower fee wins more orders.
+ */
 export async function startProviding(
   wallet: ConnectedWallet,
   position: Position,
   amount: bigint,
+  feeBps: number,
   onStep: OnStep = () => {},
 ): Promise<Hex> {
+  if (!feeAllowed(feeBps))
+    throw new Error(
+      `The fee must be between ${providerFeeRange.min / 100}% and ${providerFeeRange.max / 100}%`,
+    );
   const maker = wallet.address as Address;
   const strategy = {
     maker,
     token: shopChain.usdt,
     filler: UNIFORM_FILLER,
     maxPerOrder: NEW_STRATEGY_MAX_PER_ORDER,
-    feeBps: providerFeeBps,
+    feeBps,
     salt: keccak256(toBytes(`uniform-earn:${maker}:${Date.now()}`)),
   };
   const encoded = encodeAbiParameters(STRATEGY, [strategy]);

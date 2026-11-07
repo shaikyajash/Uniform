@@ -89,5 +89,6 @@
     "fillCutoff": 900,
     "quote": 120
   },
-  "providerFeeBps": 30
+  "providerFeeBps": 30,
+  "providerFeeBpsRange": { "min": 10, "max": 100 }
 }

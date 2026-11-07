@@ -97,18 +97,21 @@ pub async fn filled(
     destination_lock: B256,
     amount: Amount,
 ) -> Result<Applied, ApiError> {
-    let Some(provider) = state.provider else { return skip("no PROVIDER_ADDRESS: cross-chain is off") };
     let shop_chain = state.chains.shop_chain();
     let Some(destination_lock_address) = shop_chain.contracts.destination_lock else {
         return skip("chains.json has no DestinationLock");
     };
     let order_id = order_id.to_string();
-    let order: Option<(String, String)> =
-        sqlx::query_as("SELECT status, amount::text FROM orders WHERE id = $1 FOR UPDATE")
+    let order: Option<(String, String, Option<String>)> =
+        sqlx::query_as("SELECT status, amount::text, provider FROM orders WHERE id = $1 FOR UPDATE")
             .bind(&order_id)
             .fetch_optional(&mut *tx)
             .await?;
-    let Some((status, order_amount)) = order else { return skip("no such order") };
+    let Some((status, order_amount, provider)) = order else { return skip("no such order") };
+    // The provider the quote chose: only their destination lock pays for this order.
+    let Some(provider) = provider.and_then(|p| p.parse::<Address>().ok()) else {
+        return skip("the order has no provider");
+    };
     let status: OrderStatus = status.parse().map_err(ApiError::internal)?;
     let order_amount: Amount = order_amount.parse().map_err(ApiError::internal)?;
 
@@ -125,7 +128,7 @@ pub async fn filled(
         destination_lock_id(shop_chain.chain_id, destination_lock_address, chain_id, lock_id, provider) == destination_lock
     });
     let Some((leg_id, _, _, leg_status)) = ours else {
-        return skip("the destination lock is not Bob's lock for one of our source locks");
+        return skip("the destination lock is not the provider's lock for one of our source locks");
     };
     if amount.0 < order_amount.0 {
         return skip(format!("filled {amount} but the order is {order_amount}"));

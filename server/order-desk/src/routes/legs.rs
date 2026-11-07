@@ -59,6 +59,7 @@ struct QuotedLeg {
     valid_before: i64,
     expires_at: i64,
     leg: Option<Value>,
+    provider_fee_bps: Option<i32>,
     status: String,
     merchant_id: i64,
 }
@@ -72,7 +73,8 @@ pub async fn submit(
     let order_id = normalize_order_id(&id).ok_or_else(|| ApiError::not_found("order"))?;
 
     let quote: QuotedLeg = sqlx::query_as(
-        "SELECT q.payer, q.typed_data, q.valid_after, q.valid_before, q.expires_at, q.leg, o.status, o.merchant_id
+        "SELECT q.payer, q.typed_data, q.valid_after, q.valid_before, q.expires_at, q.leg, q.provider_fee_bps,
+                o.status, o.merchant_id
          FROM quotes q JOIN orders o ON o.id = q.order_id
          WHERE q.id = $1 AND q.order_id = $2 AND q.path IN ('crosschain', 'split')",
     )
@@ -150,13 +152,19 @@ pub async fn submit(
     let now = now();
 
     let mut tx = state.pool.begin().await?;
-    // Only from `quoted`, checked again here: a double click cannot make two jobs. The hashlock is
-    // the signed quote's, in case a newer quote with another one was asked for in between.
-    let moved = sqlx::query("UPDATE orders SET status = 'paying', hashlock = $2 WHERE id = $1 AND status = 'quoted'")
-        .bind(&order_id)
-        .bind(hashlock.to_string())
-        .execute(&mut *tx)
-        .await?;
+    // Only from `quoted`, checked again here: a double click cannot make two jobs. The hashlock and
+    // the provider are the signed quote's, in case a newer quote was asked for in between: the lock
+    // names this quote's provider, so only their fill pays for the order.
+    let moved = sqlx::query(
+        "UPDATE orders SET status = 'paying', hashlock = $2, provider = $3, provider_fee_bps = $4
+         WHERE id = $1 AND status = 'quoted'",
+    )
+    .bind(&order_id)
+    .bind(hashlock.to_string())
+    .bind(format!("{:#x}", legs[0].params.receiver))
+    .bind(quote.provider_fee_bps)
+    .execute(&mut *tx)
+    .await?;
     if moved.rows_affected() == 0 {
         return Err(ApiError::conflict("already_submitted", "this order's payment is already being sent"));
     }
@@ -396,6 +404,39 @@ pub(crate) mod tests {
         let other = created["orderId"].as_str().unwrap().to_owned();
         let (_, direct) = call(&test.app, post(format!("/v1/orders/{other}/quote"), json!({ "payer": alice.address() }))).await;
         assert_eq!(call(&test.app, submit(&other, &direct, &sign(&alice, &direct))).await.0, StatusCode::NOT_FOUND);
+    }
+
+    #[sqlx::test]
+    async fn signing_an_older_quote_makes_its_provider_the_orders(pool: PgPool) {
+        let test = test_app(pool).await;
+        let alice = PrivateKeySigner::random();
+        let (id, first) = quoted(&test, &alice).await;
+
+        // A cheaper provider turns up and the order is quoted again, but the customer signs the
+        // first quote: its lock names the first provider, so that provider must fill.
+        let cheaper = "0x00000000000000000000000000000000000000c3";
+        let offers = json!({ "offers": [{ "provider": cheaper, "feeBps": 10, "maxPerOrder": "100000000", "available": "100000000" }] });
+        let request = Request::post("/internal/offers")
+            .header(header::CONTENT_TYPE, "application/json")
+            .header(header::AUTHORIZATION, format!("Bearer {}", crate::routes::test_support::INTERNAL_TOKEN))
+            .body(Body::from(offers.to_string()))
+            .unwrap();
+        call(&test.app, request).await;
+        let hashlock = common::locks::hashlock_of(SECRET.parse().unwrap());
+        let body = json!({ "payer": alice.address(), "hashlock": hashlock, "chainId": 84532 });
+        let (_, second) = call(&test.app, post(format!("/v1/orders/{id}/quote"), body)).await;
+        assert_eq!(second["fee"], "0.012000");
+
+        let (status, reply) = call(&test.app, submit(&id, &first, &sign(&alice, &first))).await;
+        assert_eq!(status, StatusCode::ACCEPTED, "{reply}");
+        let (provider, fee): (String, i32) =
+            sqlx::query_as("SELECT provider, provider_fee_bps FROM orders WHERE id = $1")
+                .bind(&id)
+                .fetch_one(&test.pool)
+                .await
+                .unwrap();
+        assert_eq!(provider, format!("{:#x}", crate::routes::test_support::PROVIDER));
+        assert_eq!(fee, 30);
     }
 
     #[sqlx::test]

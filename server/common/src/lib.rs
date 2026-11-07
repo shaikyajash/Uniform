@@ -6,4 +6,5 @@ pub mod chains;
 pub mod events;
 pub mod jobs;
 pub mod locks;
+pub mod offers;
 pub mod status;

@@ -21,7 +21,11 @@ use alloy::{
     transports::http::reqwest,
 };
 use bindings::{DestinationLock, IAqua, IERC20, IFiatToken, PayoutPool, SourceLock};
-use common::chains::Role;
+use common::{
+    amount::Amount,
+    chains::Role,
+    offers::{Offer, Offers},
+};
 use tokio::sync::Mutex;
 
 use crate::{
@@ -31,7 +35,17 @@ use crate::{
     price::{self, CoinPrice},
     rules::{self, LockedToken, SourceLockView},
     store::{Fill, FillLeg, PendingLog, SourceLeg, Store},
+    strategies::{self, Strategies, Wanted},
 };
+
+/// A provider's strategy Aqua still lets the pool draw from.
+#[derive(Debug, Clone)]
+struct OpenStrategy {
+    strategy: PayoutPool::Strategy,
+    hash: B256,
+    /// USDT the pool may still take from it.
+    balance: U256,
+}
 
 /// How far back the first run starts, so locks made before start-up are still seen (on Base
 /// Sepolia under an hour; on Ethereum Sepolia about 20 hours).
@@ -60,6 +74,10 @@ const NONE: u8 = 0;
 const OPEN: u8 = 1;
 const CLAIMED: u8 = 2;
 const REFUNDED: u8 = 3;
+/// Any maker, to check our destination lock id matches the contract's.
+const PROBE_MAKER: Address = Address::repeat_byte(0x11);
+/// How often the Order Desk gets fresh offers; it stops quoting from offers much older than this.
+pub const OFFERS_EVERY: Duration = Duration::from_secs(15);
 
 pub type Result<T> = std::result::Result<T, String>;
 
@@ -206,8 +224,8 @@ pub struct Worker {
     payout_pool: Address,
     destination_lock: Address,
     aqua: Address,
-    /// Bob's strategy on Aqua, checked at start-up.
-    strategy_hash: B256,
+    /// Providers' strategies, as they ship and dock them on the Earn page.
+    strategies: Strategies,
     /// Our SourceLock and the tokens it accepts on each customer chain.
     source_locks: HashMap<u64, Address>,
     tokens: HashMap<u64, LockTokens>,
@@ -419,7 +437,13 @@ impl Worker {
                 prices.insert(t.price_id.clone(), coin);
             }
         }
-        let mut worker = Worker {
+        let strategies = Strategies::new(
+            &shop.explorer,
+            aqua,
+            payout_pool,
+            Wanted { token: usdt, filler, fees: config.chains.provider_fee_bps_range },
+        )?;
+        let worker = Worker {
             shop_chain_id: shop.chain_id,
             config,
             store,
@@ -430,20 +454,18 @@ impl Worker {
             payout_pool,
             destination_lock,
             aqua,
-            strategy_hash: B256::ZERO,
+            strategies,
             source_locks,
             tokens,
             eurc_price,
             prices,
         };
-        worker.strategy_hash = worker.check_setup().await?;
+        worker.check_setup().await?;
         Ok(worker)
     }
 
-    /// Refuses to start against the wrong contracts or a strategy Bob never shipped. Returns the
-    /// strategy's hash.
-    async fn check_setup(&self) -> Result<B256> {
-        let aqua = self.aqua;
+    /// Refuses to start against the wrong contracts, and says what Bob can fill from.
+    async fn check_setup(&self) -> Result<()> {
         let shop = self.provider(self.shop_chain_id)?;
         let pool = PayoutPool::new(self.payout_pool, shop);
         let wired = pool.destinationLock().call().await.map_err(err)?;
@@ -455,7 +477,7 @@ impl Worker {
         }
         let probe = B256::repeat_byte(0x42);
         let on_chain_id = DestinationLock::new(self.destination_lock, shop)
-            .lockIdFor(U256::from(84532u64), probe, self.config.provider.address)
+            .lockIdFor(U256::from(84532u64), probe, PROBE_MAKER)
             .call()
             .await
             .map_err(err)?;
@@ -464,35 +486,30 @@ impl Worker {
             self.destination_lock,
             84532,
             probe,
-            self.config.provider.address,
+            PROBE_MAKER,
         );
         if on_chain_id != local_id {
             return Err("DestinationLock.lockIdFor does not match the local calculation".into());
         }
-        let hash = pool
-            .strategyHashOf(self.strategy()?)
-            .call()
-            .await
-            .map_err(err)?;
-        let shipped = IAqua::new(aqua, shop)
-            .rawBalances(
-                self.config.provider.address,
-                self.payout_pool,
-                hash,
-                self.usdt,
-            )
-            .call()
-            .await
-            .map_err(err)?;
-        if shipped.tokensCount == 0 || shipped.tokensCount == u8::MAX {
-            return Err(format!(
-                "The provider's strategy {hash} is not active on Aqua: check BOB_ADDRESS, STRATEGY_SALT, STRATEGY_MAX_PER_ORDER and STRATEGY_FEE_BPS"
-            ));
+        // Our strategy ids must be the pool's, or no fill would ever match a strategy.
+        if let Some(configured) = self.configured_strategy()? {
+            let on_chain = pool.strategyHashOf(configured.clone()).call().await.map_err(err)?;
+            if on_chain != strategies::hash_of(&configured) {
+                return Err("PayoutPool.strategyHashOf does not match the local calculation".into());
+            }
         }
-        eprintln!(
-            "matchmaker: strategy {hash} active, allowance {}",
-            shipped.balance
-        );
+        let open = self.open_strategies().await?;
+        if open.is_empty() {
+            eprintln!(
+                "matchmaker: no provider has an open strategy yet: nothing is filled until one is shipped on the Earn page"
+            );
+        }
+        for o in &open {
+            eprintln!(
+                "matchmaker: provider {} strategy {} open: {} USDT units left, up to {} per order, fee {} bps",
+                o.strategy.maker, o.hash, o.balance, o.strategy.maxPerOrder, o.strategy.feeBps
+            );
+        }
         for (&chain_id, &lock_address) in &self.source_locks {
             let code = self
                 .provider(chain_id)?
@@ -533,29 +550,45 @@ impl Worker {
         }
         self.require_six_decimals(self.shop_chain_id, self.usdt)
             .await?;
-        Ok(hash)
+        Ok(())
     }
 
-    /// The parts of what Bob can pay out now: his strategy's balance on Aqua, the USDT in his
-    /// wallet and his approval to Aqua.
-    async fn liquidity(&self) -> Result<(U256, U256, U256)> {
+    /// Every provider's strategy that Aqua still lets the pool draw from, with what is left of it:
+    /// those shipped on chain (found through the explorer) plus the one named by STRATEGY_SALT.
+    async fn open_strategies(&self) -> Result<Vec<OpenStrategy>> {
+        let mut candidates = self.strategies.shipped().await?;
+        if let Some(configured) = self.configured_strategy()? {
+            let hash = strategies::hash_of(&configured);
+            if !candidates.iter().any(|s| strategies::hash_of(s) == hash) {
+                candidates.push(configured);
+            }
+        }
         let shop = self.provider(self.shop_chain_id)?;
-        let bob = self.config.provider.address;
-        let shipped = IAqua::new(self.aqua, shop)
-            .rawBalances(bob, self.payout_pool, self.strategy_hash, self.usdt)
-            .call()
-            .await
-            .map_err(err)?;
-        // A docked strategy keeps no balance.
-        let strategy_balance = if shipped.tokensCount == u8::MAX {
-            U256::ZERO
-        } else {
-            U256::from(shipped.balance)
-        };
+        let aqua = IAqua::new(self.aqua, shop);
+        let mut open = Vec::new();
+        for strategy in candidates {
+            let hash = strategies::hash_of(&strategy);
+            let state = aqua
+                .rawBalances(strategy.maker, self.payout_pool, hash, self.usdt)
+                .call()
+                .await
+                .map_err(err)?;
+            // 0 tokens: never shipped; u8::MAX: docked (paused or closed).
+            if state.tokensCount != 0 && state.tokensCount != u8::MAX && state.balance > alloy::primitives::aliases::U248::ZERO {
+                open.push(OpenStrategy { strategy, hash, balance: U256::from(state.balance) });
+            }
+        }
+        Ok(open)
+    }
+
+    /// The USDT in a provider's wallet and their approval to Aqua: a fill takes from the wallet, so
+    /// these cap what any of their strategies can pay.
+    async fn wallet_and_approval(&self, maker: Address) -> Result<(U256, U256)> {
+        let shop = self.provider(self.shop_chain_id)?;
         let usdt = IERC20::new(self.usdt, shop);
-        let wallet = usdt.balanceOf(bob).call().await.map_err(err)?;
-        let approved = usdt.allowance(bob, self.aqua).call().await.map_err(err)?;
-        Ok((strategy_balance, wallet, approved))
+        let wallet = usdt.balanceOf(maker).call().await.map_err(err)?;
+        let approved = usdt.allowance(maker, self.aqua).call().await.map_err(err)?;
+        Ok((wallet, approved))
     }
 
     /// Valuing a lock assumes USDC, EURC and USDT all have 6 decimals; refuse a token that doesn't.
@@ -581,16 +614,60 @@ impl Worker {
         self.filler
     }
 
-    fn strategy(&self) -> Result<PayoutPool::Strategy> {
-        Ok(PayoutPool::Strategy {
-            maker: self.config.provider.address,
+    /// The strategy STRATEGY_MAKER and STRATEGY_SALT name, if set.
+    fn configured_strategy(&self) -> Result<Option<PayoutPool::Strategy>> {
+        let Some(extra) = self.config.extra_strategy else { return Ok(None) };
+        Ok(Some(PayoutPool::Strategy {
+            maker: extra.maker,
             token: self.usdt,
             filler: self.filler,
-            maxPerOrder: u128::try_from(self.config.provider.max_per_order)
-                .map_err(|_| "maxPerOrder too large")?,
-            feeBps: self.config.provider.fee_bps,
-            salt: self.config.strategy_salt,
-        })
+            maxPerOrder: u128::try_from(extra.max_per_order).map_err(|_| "maxPerOrder too large")?,
+            feeBps: extra.fee_bps,
+            salt: extra.salt,
+        }))
+    }
+
+
+    /// Sends the Order Desk every open strategy's offer (fee, per-order limit, what it can pay
+    /// now). The Order Desk quotes cross-chain payments from these; main runs this on its own loop,
+    /// every `OFFERS_EVERY`, so a long scan never leaves the Order Desk without offers.
+    pub async fn send_offers(&self) {
+        match self.offers().await {
+            Ok(offers) => {
+                if let Err(e) = self.desk.send_offers(&offers).await {
+                    eprintln!("matchmaker: sending offers: {e}");
+                }
+            }
+            Err(e) => eprintln!("matchmaker: reading offers: {e}"),
+        }
+    }
+
+    async fn offers(&self) -> Result<Offers> {
+        let open = self.open_strategies().await?;
+        let mut wallets: HashMap<Address, (U256, U256)> = HashMap::new();
+        let mut offers = Vec::with_capacity(open.len());
+        for o in &open {
+            let maker = o.strategy.maker;
+            let (wallet, approved) = match wallets.get(&maker) {
+                Some(found) => *found,
+                None => {
+                    let read = self.wallet_and_approval(maker).await?;
+                    wallets.insert(maker, read);
+                    read
+                }
+            };
+            let available = rules::liquidity(o.balance, wallet, approved);
+            if available.is_zero() {
+                continue;
+            }
+            offers.push(Offer {
+                provider: maker,
+                fee_bps: o.strategy.feeBps,
+                max_per_order: Amount(U256::from(o.strategy.maxPerOrder)),
+                available: Amount(available),
+            });
+        }
+        Ok(Offers { offers })
     }
 
     fn watched(&self, chain_id: u64) -> Result<&Watched> {
@@ -854,8 +931,10 @@ impl Worker {
     /// naming the first of them. If Bob already filled it (an earlier run stopped before
     /// recording), record it from the chain.
     async fn on_locked(&self, chain_id: u64, locked: SourceLock::Locked) -> Result<()> {
-        let bob = self.config.provider.address;
-        if locked.receiver != bob || !self.source_locks.contains_key(&chain_id) {
+        // Whose lock it is comes from the Order Desk below: only a lock it planned for one of its
+        // orders is filled, for the provider that lock names.
+        let receiver = locked.receiver;
+        if !self.source_locks.contains_key(&chain_id) {
             return Ok(());
         }
         self.store
@@ -902,7 +981,7 @@ impl Worker {
             self.destination_lock,
             anchor.chain_id,
             anchor.lock_id,
-            bob,
+            receiver,
         );
         let existing = destination
             .locks(destination_lock_id)
@@ -975,13 +1054,38 @@ impl Worker {
             });
         }
         let dest_now = self.chain_time(self.shop_chain_id).await?;
+        // The provider's terms across their open strategies: the largest order any takes and the
+        // lowest fee any asks. Which strategy pays is chosen below, once the lock is valued.
+        let open: Vec<OpenStrategy> = self
+            .open_strategies()
+            .await?
+            .into_iter()
+            .filter(|o| o.strategy.maker == receiver)
+            .collect();
+        if open.is_empty() {
+            // An error, so the lock stays parked: a strategy shipped before the fill cutoff still
+            // fills the order.
+            return Err(format!(
+                "not enough liquidity for order {}: provider {receiver} has no open strategy; add liquidity on the Earn page",
+                locked.orderId
+            ));
+        }
+        let provider = rules::Provider {
+            address: receiver,
+            max_per_order: open
+                .iter()
+                .map(|o| U256::from(o.strategy.maxPerOrder))
+                .max()
+                .unwrap_or(U256::ZERO),
+            fee_bps: open.iter().map(|o| o.strategy.feeBps).min().unwrap_or(u16::MAX),
+        };
         let decide = |views: Vec<(SourceLockView, u64)>| {
             let combined = rules::combine(&views)?;
             // `combine` measures time left on each lock's own chain, so its expiry is relative.
             rules::fill_decision(
                 &combined,
                 &order.view,
-                &self.config.provider,
+                &provider,
                 false,
                 0,
                 dest_now,
@@ -1040,7 +1144,7 @@ impl Worker {
             let circle = matches!(r.kind, LockedToken::Usdc | LockedToken::Eurc);
             if circle
                 && IFiatToken::new(r.token, self.provider(r.leg.chain_id)?)
-                    .isBlacklisted(bob)
+                    .isBlacklisted(receiver)
                     .call()
                     .await
                     .map_err(err)?
@@ -1070,14 +1174,27 @@ impl Worker {
             }
         }
 
-        // Checked last, after every reason to skip. A short pool is an error, so the lock stays
+        // Checked last, after every reason to skip. Short liquidity is an error, so the lock stays
         // parked and is tried again: a top-up before the fill cutoff still fills the order.
-        let (strategy_balance, wallet, approved) = self.liquidity().await?;
-        let available = rules::liquidity(strategy_balance, wallet, approved);
+        let (wallet, approved) = self.wallet_and_approval(receiver).await?;
+        let Some(chosen) = rules::choose_strategy(&open, plan.amount, combined.usdc_value, |o| {
+            (U256::from(o.strategy.maxPerOrder), o.balance, o.strategy.feeBps)
+        }) else {
+            return Err(format!(
+                "not enough liquidity for order {}: needs {} USDT units; no open strategy of the provider covers it at the fee paid ({} open); add liquidity on the Earn page",
+                locked.orderId,
+                plan.amount,
+                open.len()
+            ));
+        };
+        let available = rules::liquidity(chosen.balance, wallet, approved);
         if available < plan.amount {
             return Err(format!(
-                "not enough liquidity for order {}: needs {} USDT units, the provider can pay {available} (strategy {strategy_balance}, wallet {wallet}, approved to Aqua {approved}); top up the provider's pool",
-                locked.orderId, plan.amount
+                "not enough liquidity for order {}: needs {} USDT units, the provider can pay {available} (strategy {strategy} has {balance}, wallet {wallet}, approved to Aqua {approved}); add USDT on the Earn page",
+                locked.orderId,
+                plan.amount,
+                strategy = chosen.hash,
+                balance = chosen.balance
             ));
         }
         let fill = PayoutPool::Fill {
@@ -1090,7 +1207,7 @@ impl Worker {
             srcLockId: anchor.lock_id,
         };
         let tx = PayoutPool::new(self.payout_pool, shop)
-            .fill(self.strategy()?, fill)
+            .fill(chosen.strategy.clone(), fill)
             .into_transaction_request();
         match self.send(self.shop_chain_id, tx).await? {
             Sent::WouldRevert(reason) => {
@@ -1145,7 +1262,7 @@ impl Worker {
         destination_lock_id: B256,
         existing: DestinationLock::locksReturn,
     ) -> Result<()> {
-        if existing.maker != self.config.provider.address || existing.hashlock != locked.hashlock {
+        if existing.maker != locked.receiver || existing.hashlock != locked.hashlock {
             return Err(format!(
                 "{PERMANENT}destination lock {destination_lock_id} does not match source lock {}",
                 locked.lockId
@@ -1233,23 +1350,12 @@ impl Worker {
                 .await
                 .map_err(err);
         }
-        let bob = self.config.provider.address;
         let Ok(src_chain_id) = u64::try_from(settled.srcChainId) else {
             return Ok(());
         };
         let Some(&lock_address) = self.source_locks.get(&src_chain_id) else {
             return Ok(());
         };
-        if destination_lock_id(
-            self.shop_chain_id,
-            self.destination_lock,
-            src_chain_id,
-            settled.srcLockId,
-            bob,
-        ) != settled.lockId
-        {
-            return Ok(()); // someone else's destination lock
-        }
         let source = SourceLock::new(lock_address, self.provider(src_chain_id)?)
             .locks(settled.srcLockId)
             .call()
@@ -1261,7 +1367,16 @@ impl Worker {
                 settled.srcLockId
             ));
         }
-        if source.receiver != bob {
+        // Ours only if it is the destination lock its receiver opened for this very source lock,
+        // and the Order Desk lists the order (checked below).
+        if destination_lock_id(
+            self.shop_chain_id,
+            self.destination_lock,
+            src_chain_id,
+            settled.srcLockId,
+            source.receiver,
+        ) != settled.lockId
+        {
             return Ok(());
         }
         let existing =
@@ -1278,7 +1393,8 @@ impl Worker {
         // A split payment's other source locks are listed only by the Order Desk.
         let legs = match self.desk.order(settled.orderId).await? {
             OrderLookup::Found(order) => legs_for(&order, anchor),
-            OrderLookup::NotFound => None,
+            // Not one of our orders: someone else's lock.
+            OrderLookup::NotFound => return Ok(()),
         }
         .unwrap_or_else(|| {
             eprintln!(

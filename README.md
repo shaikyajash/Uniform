@@ -43,9 +43,15 @@ The defaults come from `confirmations` in `shared/chains.json`; the environment 
 (about 2.5 min). Do not put Ethereum in `SAFE_TAG_CHAINS`: its `safe` block trails by about 9
 minutes, longer than a source lock leaves to fill.
 
-**The risk with the fast defaults:** if a reorg drops a customer's lock after Bob filled it, Bob
-loses that order's USDT, at most his strategy's `STRATEGY_MAX_PER_ORDER`. Keep that limit small
-while running fast.
+**The risk with the fast defaults:** if a reorg drops a customer's lock after a provider filled
+it, the provider loses that order's USDT, at most their strategy's per-order limit. Keep that limit
+small while running fast.
+
+**Providers:** anyone who ships a strategy on the Earn page (USDT, Uniform's filler, a fee within
+`providerFeeBpsRange` in chains.json). The Matchmaker sends every open strategy's offer to the
+Order Desk every 15 s, and each cross-chain quote goes to the lowest fee that can cover the order
+(of equal fees, the most free liquidity). The customer's lock names that provider, so their tokens
+go to the provider who paid the shop.
 
 Other Matchmaker settings: `POLL_SECONDS` (default 2), `MAX_BLOCK_RANGE` (default 1000),
 `EURC_PRICE_BUFFER_BPS` (default 100 = 1%), and `MIN_FILLER_GAS_WEI` /

@@ -2,13 +2,22 @@
 
 use std::{collections::HashMap, env, str::FromStr};
 
-use alloy::primitives::B256;
+use alloy::primitives::{Address, B256, U256};
 use common::chains::Chains;
 
-use crate::rules::{Provider, Timing};
+use crate::rules::Timing;
 
 /// Ethereum itself (mainnet and Sepolia), as opposed to the cheaper rollups.
 const ETHEREUM_CHAINS: [u64; 2] = [1, 11_155_111];
+
+/// A strategy named in the environment rather than found on chain.
+#[derive(Debug, Clone, Copy)]
+pub struct ExtraStrategy {
+    pub maker: Address,
+    pub salt: B256,
+    pub max_per_order: U256,
+    pub fee_bps: u16,
+}
 
 pub struct Config {
     pub chains: Chains,
@@ -16,8 +25,9 @@ pub struct Config {
     pub internal_token: String,
     /// The Matchmaker's own key: pays gas on every chain and is the strategy's filler.
     pub filler_key: String,
-    pub provider: Provider,
-    pub strategy_salt: B256,
+    /// One more strategy to fill from, besides those found through the explorer: one shipped by
+    /// hand (`STRATEGY_MAKER` and `STRATEGY_SALT`, for local forks the explorer cannot see).
+    pub extra_strategy: Option<ExtraStrategy>,
     pub timing: Timing,
     pub db_path: String,
     pub poll_seconds: u64,
@@ -32,8 +42,8 @@ pub struct Config {
     pub eurc_price_url: String,
     /// CoinGecko's simple price endpoint, for tokens with a `priceId` in chains.json (WETH, WBTC).
     pub price_api_url: String,
-    /// EURC and priced-token locks are valued this far below the price, so a price move before Bob
-    /// converts the token cannot leave him short (100 = 1%). `PRICE_BUFFER_BPS`, else the older
+    /// EURC and priced-token locks are valued this far below the price, so a price move before the
+    /// provider converts the token cannot leave him short (100 = 1%). `PRICE_BUFFER_BPS`, else the older
     /// `EURC_PRICE_BUFFER_BPS`. Keep it below the Order Desk's quote buffer.
     pub price_buffer_bps: u16,
     /// Customer chains listed here read up to their "safe" block: the strongest guard against a
@@ -51,15 +61,15 @@ impl Config {
             env::var("CHAINS_PATH").unwrap_or_else(|_| "../shared/chains.json".into());
         let chains = Chains::load(&chains_path).map_err(|e| e.to_string())?;
         let timeouts = chains.timeouts_seconds;
-        let provider = Provider {
-            address: parse("BOB_ADDRESS")?,
-            max_per_order: parse("STRATEGY_MAX_PER_ORDER")?,
-            fee_bps: env::var("STRATEGY_FEE_BPS")
-                .map(|v| {
-                    v.parse()
-                        .map_err(|_| "STRATEGY_FEE_BPS is not a number".to_string())
-                })
-                .unwrap_or(Ok(chains.provider_fee_bps))?,
+        let extra_strategy = match env::var("STRATEGY_SALT") {
+            Err(_) => None,
+            Ok(_) => Some(ExtraStrategy {
+                maker: parse("STRATEGY_MAKER")?,
+                salt: parse("STRATEGY_SALT")?,
+                // 100 USDT: the Earn page's (and the Relayer's) order limit.
+                max_per_order: number("STRATEGY_MAX_PER_ORDER", U256::from(100_000_000u64))?,
+                fee_bps: number("STRATEGY_FEE_BPS", chains.provider_fee_bps)?,
+            }),
         };
         let config = Config {
             order_desk_url: required("ORDER_DESK_URL")?
@@ -67,8 +77,7 @@ impl Config {
                 .to_string(),
             internal_token: required("INTERNAL_EVENTS_TOKEN")?,
             filler_key: required("FILLER_PRIVATE_KEY")?,
-            provider,
-            strategy_salt: parse("STRATEGY_SALT")?,
+            extra_strategy,
             timing: Timing {
                 fill_cutoff: timeouts.fill_cutoff,
                 destination_lock: timeouts.destination_lock,
@@ -135,14 +144,17 @@ impl Config {
         if self.poll_seconds == 0 {
             return Err("POLL_SECONDS must be at least 1".into());
         }
-        if self.provider.max_per_order.is_zero() {
-            return Err("STRATEGY_MAX_PER_ORDER must be above zero".into());
-        }
-        if self.provider.fee_bps != self.chains.provider_fee_bps {
-            return Err(format!(
-                "STRATEGY_FEE_BPS ({}) differs from providerFeeBps in chains.json ({}): quotes and fills would disagree",
-                self.provider.fee_bps, self.chains.provider_fee_bps
-            ));
+        if let Some(extra) = self.extra_strategy {
+            if extra.max_per_order.is_zero() {
+                return Err("STRATEGY_MAX_PER_ORDER must be above zero".into());
+            }
+            let fees = self.chains.provider_fee_bps_range;
+            if !fees.allows(extra.fee_bps) {
+                return Err(format!(
+                    "STRATEGY_FEE_BPS ({}) is outside providerFeeBpsRange {}..={} in chains.json",
+                    extra.fee_bps, fees.min, fees.max
+                ));
+            }
         }
         if self.price_buffer_bps > 1_000 {
             return Err(format!(

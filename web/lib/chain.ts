@@ -52,7 +52,12 @@ export type CustomerChain = {
 export const shopChain: ShopChain = JSON.parse(process.env.NEXT_PUBLIC_SHOP_CHAIN ?? "null");
 export const customerChains: CustomerChain[] = JSON.parse(process.env.NEXT_PUBLIC_CUSTOMER_CHAINS ?? "[]");
 /** Bob's fee on a cross-chain payment, in basis points (30 = 0.3%). */
+/** The fee a new strategy starts with on the Earn page. Each provider sets their own. */
 export const providerFeeBps = Number(process.env.NEXT_PUBLIC_PROVIDER_FEE_BPS ?? "30");
+/** The lowest and highest fee a provider may ask, in basis points (chains.json). */
+export const providerFeeRange: { min: number; max: number } = JSON.parse(
+  process.env.NEXT_PUBLIC_PROVIDER_FEE_RANGE ?? '{"min":10,"max":100}',
+);
 
 const CHAIN_NAMES: Record<number, string> = {
   1874: "Whitechain",
@@ -84,11 +89,16 @@ export const customerViemChains = customerChains.map((chain) =>
   }),
 );
 
-const shopClient = createPublicClient({ chain: shopViemChain, transport: http(shopChain.rpc) });
+/**
+ * Reads go to public RPCs from the browser: calls made together go as one batched request per
+ * chain, and a slow node is given up on quickly (the page shows what it has and reads again).
+ */
+const rpc = (url: string) => http(url, { batch: { wait: 16 }, timeout: 6_000, retryCount: 1 });
+const shopClient = createPublicClient({ chain: shopViemChain, transport: rpc(shopChain.rpc) });
 const customerClients = new Map<number, PublicClient>(
   customerChains.map((chain, index) => [
     chain.id,
-    createPublicClient({ chain: customerViemChains[index], transport: http(chain.rpc) }) as PublicClient,
+    createPublicClient({ chain: customerViemChains[index], transport: rpc(chain.rpc) }) as PublicClient,
   ]),
 );
 
@@ -179,9 +189,13 @@ export function formatTokenAmount(units: bigint, decimals: number): string {
   return trimAmount(`0.${fraction.slice(0, lead + 6)}`);
 }
 
-/** What the customer locks for an order: the amount plus Bob's fee, rounded up (as the server). */
-export function withProviderFee(units: bigint): bigint {
-  const scaled = units * BigInt(10_000 + providerFeeBps);
+/**
+ * What the customer locks for an order: the amount plus a provider's fee, rounded up (as the
+ * server). Without the order's current fee, the highest a provider may ask; the quote has the real
+ * total, from the cheapest provider who can take the order.
+ */
+export function withProviderFee(units: bigint, feeBps: number = providerFeeRange.max): bigint {
+  const scaled = units * BigInt(10_000 + feeBps);
   return (scaled + BigInt(9_999)) / BigInt(10_000);
 }
 

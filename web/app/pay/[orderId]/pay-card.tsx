@@ -12,7 +12,7 @@
 //   (approve, then lock) signed by the wallet itself, with an EIP-7702 authorization to Calibur
 //   the first time. Both are signed silently behind the one Pay click; the Gas Payer sends them.
 
-import { usePrivy, useSign7702Authorization, useSignTypedData, useWallets } from "@privy-io/react-auth";
+import { useCreateWallet, usePrivy, useSign7702Authorization, useSignTypedData, useWallets } from "@privy-io/react-auth";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { decodeFunctionData, erc20Abi, formatUnits, parseUnits, zeroAddress, type Address, type Hex } from "viem";
 import { Check, Loader2 } from "lucide-react";
@@ -24,6 +24,7 @@ import {
   estimateTokenUnits,
   explorerTx,
   formatTokenAmount,
+  providerFeeRange,
   shopChain,
   shortAddress,
   tokenBalance,
@@ -71,6 +72,7 @@ import {
   PrimaryButton,
   Problem,
   Reveal,
+  LoadingBody,
   SkeletonBody,
   Stat,
   Swap,
@@ -103,6 +105,12 @@ const STEP_LABEL: Record<Exclude<Step, "idle">, string> = {
 
 /** The Order Desk's smallest split leg: 0.1 USDC (A8). */
 const MIN_SPLIT_LEG = BigInt(100_000);
+/** A way to pay the wallet holds enough for, and that can be used right now. */
+const usable = (option: SourceOption) =>
+  option.unavailable === undefined && option.balance !== null && option.balance >= option.cost;
+/** Providers set their own fee: the order says the cheapest one now, else the highest allowed. */
+const feeNote = (feeBps: number | null) =>
+  feeBps === null ? `incl. provider fee, at most ${providerFeeRange.max / 100}%` : `incl. ${feeBps / 100}% provider fee`;
 
 /** How often to refresh the market prices behind the priced tokens' estimates. */
 const PRICE_POLL_MS = 60_000;
@@ -141,6 +149,20 @@ export function PayCard({ orderId }: { orderId: string }) {
 
   const wallet = wallets.find((candidate) => candidate.walletClientType === "privy") ?? null;
   const address = (wallet?.address ?? null) as Address | null;
+
+  // Privy makes a wallet at login, but never again if that was cut short (a closed tab, a reload
+  // mid-login): a logged-in account with no wallet would wait forever. Make it here, once.
+  const { createWallet } = useCreateWallet();
+  const creating = useRef(false);
+  const hasWallet = user?.wallet !== undefined;
+  useEffect(() => {
+    if (!ready || !authenticated || !user || hasWallet || creating.current) return;
+    creating.current = true;
+    createWallet().catch((problem: unknown) => {
+      creating.current = false;
+      console.error("creating the wallet failed", problem);
+    });
+  }, [ready, authenticated, user, hasWallet, createWallet]);
   const units = order ? parseUnits(order.amount, shopChain.usdtDecimals) : null;
 
   const refresh = useCallback(async () => {
@@ -174,7 +196,11 @@ export function PayCard({ orderId }: { orderId: string }) {
   }, [moving, waiting, refresh]);
 
   // Every way to pay, with what it costs and whether the wallet has it.
-  const options = useMemo(() => paymentOptions(units, balances, address, prices), [units, balances, address, prices]);
+  const feeBps = order?.providerFeeBps ?? null;
+  const options = useMemo(
+    () => paymentOptions(units, balances, address, prices, feeBps),
+    [units, balances, address, prices, feeBps],
+  );
 
   // Market prices for the priced tokens' estimates. A failed read keeps the last prices.
   useEffect(() => {
@@ -193,13 +219,15 @@ export function PayCard({ orderId }: { orderId: string }) {
     };
   }, []);
 
-  const anyEnough = options.some((option) => option.balance !== null && option.balance >= option.cost);
-  const firstEnough = options.find((option) => option.balance !== null && option.balance >= option.cost);
+  const anyEnough = options.some((option) => usable(option));
+  // Paying from another chain needs a provider who can cover this order now; the order says.
+  const noProvider = order !== null && options.length > 0 && (order.providerFeeBps ?? null) === null;
+  const firstEnough = options.find((option) => usable(option));
   // The picked row as built from the latest balances: a split's parts follow them.
   const pickedNow = picked ? (options.find((option) => sameSource(option.source, picked))?.source ?? null) : null;
   const source = pickedNow ?? firstEnough?.source ?? options[0]?.source ?? null;
   const chosen = options.find((option) => sameSource(option.source, source)) ?? null;
-  const chosenEnough = chosen !== null && chosen.balance !== null && chosen.balance >= chosen.cost;
+  const chosenEnough = chosen !== null && usable(chosen);
 
   const readBalances = useCallback(async () => {
     if (!address) return;
@@ -211,6 +239,8 @@ export function PayCard({ orderId }: { orderId: string }) {
         tokenBalance(chain.id, token.address, address),
       ]),
     ];
+    // Shown together once every chain has answered (one batched request per chain); a failed read
+    // keeps the last value.
     const settled = await Promise.allSettled(reads.map(([, read]) => read));
     setBalances((previous) => {
       const next: Record<string, bigint | null> = {};
@@ -370,7 +400,11 @@ export function PayCard({ orderId }: { orderId: string }) {
     // The most this page will sign for: its own estimate at the price it shows, plus 5% for the
     // price moving in between. Without a price it signs nothing.
     const price = prices[token.priceId];
-    const ceiling = price ? (estimateTokenUnits(withProviderFee(parseUnits(order.amount, 6)), price, token.decimals) * BigInt(105)) / BigInt(100) : BigInt(0);
+    const ceiling = price
+      ? (estimateTokenUnits(withProviderFee(parseUnits(order.amount, 6), order.providerFeeBps ?? undefined), price, token.decimals) *
+          BigInt(105)) /
+        BigInt(100)
+      : BigInt(0);
     const expected = { orderId: order.orderId, hashlock: made.hashlock, ceiling };
     if (quote.toSign.length !== 1 || !batch || !batchFits(batch, chain, token, address, balance, expected)) throw new Error(DIDNT_CHECK_OUT);
 
@@ -606,9 +640,29 @@ export function PayCard({ orderId }: { orderId: string }) {
                       <TextButton onClick={logout}>Not you?</TextButton>
                     </div>
 
-                    <SourcePicker options={options} value={source} onChange={setPicked} disabled={step !== "idle"} />
+                    {balances?.owner !== address ? (
+                      <LoadingBody text="Reading your balances…" />
+                    ) : (
+                      <>
+                    <SourcePicker
+                      options={options}
+                      value={source}
+                      onChange={setPicked}
+                      disabled={step !== "idle"}
+                      feeNote={
+                        feeBps === null
+                          ? `the provider's fee, at most ${providerFeeRange.max / 100}%`
+                          : `the provider's ${feeBps / 100}% fee`
+                      }
+                    />
 
-                    <Reveal show={balances !== null && !anyEnough}>
+                    <Reveal show={noProvider}>
+                      <Notice>
+                        Paying from another chain isn&apos;t available for this amount right now: no provider has enough
+                        USDT free. Pay with USDT on Whitechain, or try again in a few minutes.
+                      </Notice>
+                    </Reveal>
+                    <Reveal show={balances !== null && !anyEnough && !noProvider}>
                       <Notice>
                         Your wallet doesn&apos;t hold enough yet. Send USDT on Whitechain, or USDC on{" "}
                         {customerChains.map((chain) => chainName(chain.id)).join(" or ")}, to{" "}
@@ -647,6 +701,8 @@ export function PayCard({ orderId }: { orderId: string }) {
                     <FinePrint>
                       {oneClickNote(chosen?.source ?? null)}Expires in {formatCountdown(secondsLeft)}
                     </FinePrint>
+                      </>
+                    )}
                   </>
                 )}
               </div>
@@ -674,22 +730,23 @@ function oneClickNote(source: Source | null): string {
 }
 
 /**
- * A8 split: when no one chain holds enough USDC but two together do, take as much as possible from
- * the fuller chain (leaving the other at least the Order Desk's minimum) and the rest from the
- * other. `null` when one chain is enough, or two are not.
+ * Split: whenever USDC on two chains together covers the order, a way to pay from both. It uses up
+ * the smaller balance first (the leftovers that are the reason to split), leaving the fuller chain
+ * at least the Order Desk's minimum leg, and takes the rest from the fuller one. Offered even when
+ * one chain alone is enough, as a choice next to it. `null` when the two together are not enough.
  */
 function planSplit(cost: bigint, held: { chainId: number; balance: bigint | null }[]): SplitPart[] | null {
   const known = held
-    .filter((entry): entry is { chainId: number; balance: bigint } => entry.balance !== null)
-    .sort((a, b) => (b.balance > a.balance ? 1 : b.balance < a.balance ? -1 : 0));
-  if (known.length < 2 || known.some((entry) => entry.balance >= cost)) return null;
-  const [fuller, other] = known;
-  const first = fuller.balance < cost - MIN_SPLIT_LEG ? fuller.balance : cost - MIN_SPLIT_LEG;
+    .filter((entry): entry is { chainId: number; balance: bigint } => entry.balance !== null && entry.balance >= MIN_SPLIT_LEG)
+    .sort((a, b) => (a.balance > b.balance ? 1 : a.balance < b.balance ? -1 : 0));
+  if (known.length < 2) return null;
+  const [smaller, fuller] = known;
+  const first = smaller.balance < cost - MIN_SPLIT_LEG ? smaller.balance : cost - MIN_SPLIT_LEG;
   const rest = cost - first;
-  if (first < MIN_SPLIT_LEG || rest > other.balance) return null;
+  if (first < MIN_SPLIT_LEG || rest > fuller.balance) return null;
   return [
-    { chainId: fuller.chainId, amount: first },
-    { chainId: other.chainId, amount: rest },
+    { chainId: smaller.chainId, amount: first },
+    { chainId: fuller.chainId, amount: rest },
   ];
 }
 
@@ -977,8 +1034,12 @@ function paymentOptions(
   balances: Balances | null,
   address: Address | null,
   prices: Record<string, number>,
+  feeBps: number | null,
 ): SourceOption[] {
   if (units === null) return [];
+  const withFee = (amount: bigint) => withProviderFee(amount, feeBps ?? undefined);
+  // No provider can take the order from another chain right now: those ways are shown, not offered.
+  const unavailable = feeBps === null ? "no provider right now" : undefined;
   const mine = balances && balances.owner === address ? balances.units : {};
   const usdt: SourceOption = {
     source: { kind: "usdt" },
@@ -993,14 +1054,15 @@ function paymentOptions(
       source: { kind: "usdc", chainId: chain.id },
       token: "USDC",
       chain: chainName(chain.id),
-      cost: withProviderFee(units),
+      cost: withFee(units),
       decimals: chain.usdcDecimals,
       balance: mine[`usdc:${chain.id}`] ?? null,
-      note: "incl. 0.3% provider fee",
+      note: feeNote(feeBps),
+      unavailable,
     }),
   );
   const parts = planSplit(
-    withProviderFee(units),
+    withFee(units),
     customerChains.map((chain) => ({ chainId: chain.id, balance: mine[`usdc:${chain.id}`] ?? null })),
   );
   const split: SourceOption[] = parts
@@ -1009,10 +1071,11 @@ function paymentOptions(
           source: { kind: "split", parts },
           token: "USDC",
           chain: parts.map((part) => chainName(part.chainId)).join(" + "),
-          cost: withProviderFee(units),
+          cost: withFee(units),
           decimals: 6,
           balance: parts.reduce((sum, part) => sum + (mine[`usdc:${part.chainId}`] ?? BigInt(0)), BigInt(0)),
-          note: "incl. 0.3% provider fee",
+          note: feeNote(feeBps),
+          unavailable,
           detail: parts.map((part) => `${formatUsdc(part.amount)} on ${chainName(part.chainId)}`).join(" + "),
         },
       ]
@@ -1027,9 +1090,10 @@ function paymentOptions(
         source: { kind: "token", chainId: chain.id, symbol: token.symbol },
         token: token.symbol,
         chain: chainName(chain.id),
-        cost: estimateTokenUnits(withProviderFee(units), price, token.decimals),
+        cost: estimateTokenUnits(withFee(units), price, token.decimals),
         decimals: token.decimals,
         approx: true,
+        unavailable,
         balance,
       },
     ];
