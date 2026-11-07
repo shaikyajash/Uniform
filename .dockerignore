@@ -1,0 +1,7 @@
+# Only shared/ and server/ go into the backend image.
+*
+!shared
+!server
+server/target
+server/**/e2e/.state
+**/.env*

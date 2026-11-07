@@ -1,0 +1,41 @@
+# Render Blueprint: the Uniform backend (Order Desk, Relayer, Matchmaker, Notifier) as one Docker
+# web service. The database stays on Railway: paste its URL as DATABASE_URL.
+#
+# Free plan notes: the service sleeps after 15 minutes without traffic, so an outside cron calls
+# /health every 10 minutes. The disk is not kept across restarts or deploys, so the Matchmaker's
+# matchmaker.db starts empty each time: deploy only when no cross-chain payment is in progress.
+services:
+  - type: web
+    name: uniform-backend
+    runtime: docker
+    plan: free
+    dockerfilePath: ./Dockerfile
+    dockerContext: .
+    healthCheckPath: /health
+    autoDeploy: false
+    envVars:
+      # Secrets: Render asks for these when the Blueprint is created. Never commit them.
+      - key: DATABASE_URL
+        sync: false
+      - key: INTERNAL_EVENTS_TOKEN
+        sync: false
+      - key: RELAYER_PRIVATE_KEY
+        sync: false
+      - key: FILLER_PRIVATE_KEY
+        sync: false
+      # The website's address, for the pay links in created orders.
+      - key: PAY_BASE_URL
+        sync: false
+      # Matchmaker tuning, as run on the Mac.
+      - key: CONFIRMATIONS_1874
+        value: "2"
+      - key: CONFIRMATIONS_84532
+        value: "2"
+      - key: CONFIRMATIONS_11155111
+        value: "2"
+      - key: MAX_BLOCK_RANGE
+        value: "200"
+      - key: POLL_SECONDS
+        value: "2"
+      - key: NOTIFIER_POLL_SECONDS
+        value: "2"
