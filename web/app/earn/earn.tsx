@@ -568,7 +568,7 @@ function AmountForm({
     return (
       <p className="text-[13.5px] leading-[1.6] text-muted-foreground">
         {max <= BigInt(0)
-          ? "All the USDT in this wallet is already lent. Add USDT to the wallet on Whitechain to lend more."
+          ? "This wallet has no USDT free to lend. Add USDT to it on Whitechain, then reload."
           : `You can lend from ${formatUsdt(MIN_LEND)} USDT; this wallet has ${formatUsdt(max)} USDT free. Add USDT on Whitechain to lend.`}
       </p>
     );
