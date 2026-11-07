@@ -716,22 +716,23 @@ function oneClickNote(source: Source | null): string {
 }
 
 /**
- * A8 split: when no one chain holds enough USDC but two together do, take as much as possible from
- * the fuller chain (leaving the other at least the Order Desk's minimum) and the rest from the
- * other. `null` when one chain is enough, or two are not.
+ * Split: whenever USDC on two chains together covers the order, a way to pay from both. It uses up
+ * the smaller balance first (the leftovers that are the reason to split), leaving the fuller chain
+ * at least the Order Desk's minimum leg, and takes the rest from the fuller one. Offered even when
+ * one chain alone is enough, as a choice next to it. `null` when the two together are not enough.
  */
 function planSplit(cost: bigint, held: { chainId: number; balance: bigint | null }[]): SplitPart[] | null {
   const known = held
-    .filter((entry): entry is { chainId: number; balance: bigint } => entry.balance !== null)
-    .sort((a, b) => (b.balance > a.balance ? 1 : b.balance < a.balance ? -1 : 0));
-  if (known.length < 2 || known.some((entry) => entry.balance >= cost)) return null;
-  const [fuller, other] = known;
-  const first = fuller.balance < cost - MIN_SPLIT_LEG ? fuller.balance : cost - MIN_SPLIT_LEG;
+    .filter((entry): entry is { chainId: number; balance: bigint } => entry.balance !== null && entry.balance >= MIN_SPLIT_LEG)
+    .sort((a, b) => (a.balance > b.balance ? 1 : a.balance < b.balance ? -1 : 0));
+  if (known.length < 2) return null;
+  const [smaller, fuller] = known;
+  const first = smaller.balance < cost - MIN_SPLIT_LEG ? smaller.balance : cost - MIN_SPLIT_LEG;
   const rest = cost - first;
-  if (first < MIN_SPLIT_LEG || rest > other.balance) return null;
+  if (first < MIN_SPLIT_LEG || rest > fuller.balance) return null;
   return [
-    { chainId: fuller.chainId, amount: first },
-    { chainId: other.chainId, amount: rest },
+    { chainId: smaller.chainId, amount: first },
+    { chainId: fuller.chainId, amount: rest },
   ];
 }
 
