@@ -4,6 +4,7 @@ mod crosschain_events;
 pub mod dashboard;
 pub mod direct;
 pub mod events;
+pub mod health;
 pub mod legs;
 pub mod login;
 pub mod offers;
@@ -55,6 +56,7 @@ impl FromRef<AppState> for PgPool {
 
 pub fn router(state: AppState) -> Router {
     Router::new()
+        .route("/health", get(health::health))
         .route("/v1/orders", post(orders::create).get(dashboard::list_orders))
         .route("/v1/orders/{id}", get(orders::read))
         .route("/v1/orders/{id}/quote", post(quote::quote))
