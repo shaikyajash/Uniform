@@ -27,7 +27,7 @@ export const CATALOG: Product[] = [
     region: "Andhra Pradesh",
     notes: ["Jaggery", "Orange", "Black tea"],
     roast: "Light",
-    price: "1.40",
+    price: "2",
     color: "#d9822b",
     tint: "#f1dcc0",
   },
@@ -38,7 +38,7 @@ export const CATALOG: Product[] = [
     region: "Karnataka",
     notes: ["Milk chocolate", "Almond", "Fig"],
     roast: "Medium",
-    price: "1.10",
+    price: "1",
     color: "#a8432f",
     tint: "#ecd2c6",
   },
@@ -49,7 +49,7 @@ export const CATALOG: Product[] = [
     region: "Karnataka",
     notes: ["Cherry", "Cacao nib", "Honey"],
     roast: "Medium",
-    price: "1.30",
+    price: "2",
     color: "#5d6b9a",
     tint: "#d8dbe8",
   },
@@ -60,7 +60,7 @@ export const CATALOG: Product[] = [
     region: "Malabar Coast",
     notes: ["Cedar", "Cocoa", "Spice"],
     roast: "Dark",
-    price: "1.20",
+    price: "1",
     color: "#1f4b45",
     tint: "#cfdcd6",
   },
@@ -81,5 +81,6 @@ export function totalUnits(cart: Cart): bigint {
 
 export function formatUnits6(units: bigint): string {
   const text = units.toString().padStart(7, "0");
-  return `${text.slice(0, -6)}.${text.slice(-6, -4)}`;
+  const cents = text.slice(-6, -4);
+  return cents === "00" ? text.slice(0, -6) : `${text.slice(0, -6)}.${cents}`;
 }
